@@ -26,8 +26,6 @@ yarn-error.log*
 *.launch
 .settings/
 *.sublime-workspace
-/.vscode/*
-!/.vscode/extensions.json
 
 # Env - ignore every real env file, keep the committed template
 .env
@@ -36,3 +34,7 @@ yarn-error.log*
 
 # Misc
 *.tsbuildinfo
+branch_structure.json
+temp_auto_push.bat
+temp_interactive_push.bat
+.gitignore

@@ -27,6 +27,14 @@ describe('env.validation', () => {
     expect(env.PORT).toBe(3000);
     expect(env.DB_SSL).toBe(false);
     expect(env.DB_POOL_MAX).toBe(10);
+    expect(env.EVENTS_MAX_LISTENERS).toBe(20);
+    expect(env.EVENTS_WILDCARD).toBe(true);
+    expect(env.EVENTS_DELIMITER).toBe('.');
+    expect(env.EVENTS_VERBOSE_MEMORY_LEAK).toBe(false);
+    expect(env.OUTBOX_POLL_INTERVAL_MS).toBe(2000);
+    expect(env.OUTBOX_BATCH_SIZE).toBe(50);
+    expect(env.OUTBOX_MAX_RETRIES).toBe(5);
+    expect(env.OUTBOX_RETRY_BACKOFF_MS).toBe(1000);
     expect(exitSpy).not.toHaveBeenCalled();
     expect(stderrSpy).not.toHaveBeenCalled();
   });
@@ -39,11 +47,32 @@ describe('env.validation', () => {
   });
 
   it('coerces numeric and boolean strings', () => {
-    const env = validateEnv({ ...VALID, PORT: '8080', DB_SSL: '1', DB_POOL_MAX: '25' });
+    const env = validateEnv({
+      ...VALID,
+      PORT: '8080',
+      DB_SSL: '1',
+      DB_POOL_MAX: '25',
+      EVENTS_MAX_LISTENERS: '50',
+      EVENTS_WILDCARD: 'false',
+      EVENTS_DELIMITER: ':',
+      EVENTS_VERBOSE_MEMORY_LEAK: 'true',
+      OUTBOX_POLL_INTERVAL_MS: '5000',
+      OUTBOX_BATCH_SIZE: '100',
+      OUTBOX_MAX_RETRIES: '10',
+      OUTBOX_RETRY_BACKOFF_MS: '2500',
+    });
 
     expect(env.PORT).toBe(8080);
     expect(env.DB_SSL).toBe(true);
     expect(env.DB_POOL_MAX).toBe(25);
+    expect(env.EVENTS_MAX_LISTENERS).toBe(50);
+    expect(env.EVENTS_WILDCARD).toBe(false);
+    expect(env.EVENTS_DELIMITER).toBe(':');
+    expect(env.EVENTS_VERBOSE_MEMORY_LEAK).toBe(true);
+    expect(env.OUTBOX_POLL_INTERVAL_MS).toBe(5000);
+    expect(env.OUTBOX_BATCH_SIZE).toBe(100);
+    expect(env.OUTBOX_MAX_RETRIES).toBe(10);
+    expect(env.OUTBOX_RETRY_BACKOFF_MS).toBe(2500);
   });
 
   it('exits(1) naming the missing required variable', () => {
