@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { DatabaseModule } from './config/db/database.module';
+import { EventsModule } from './config/events/events.module';
 import { getEnv } from './config/env/env.validation';
 import { HealthModule } from './health/health.module';
 
@@ -15,6 +16,7 @@ import { HealthModule } from './health/health.module';
       load: [() => getEnv()],
     }),
     DatabaseModule,
+    EventsModule,
     HealthModule,
   ],
 })

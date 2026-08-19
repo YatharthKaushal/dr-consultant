@@ -90,7 +90,9 @@ export async function connectDatabase(): Promise<Database> {
       const { serverVersion, database } = await pingDatabase();
 
       logger.log(`Connected to ${redactConnectionString(env.DATABASE_URL)}`);
-      logger.log(`PostgreSQL ${serverVersion} | database "${database}" | pool max ${env.DB_POOL_MAX}`);
+      logger.log(
+        `PostgreSQL ${serverVersion} | database "${database}" | pool max ${env.DB_POOL_MAX}`,
+      );
 
       return getDb();
     } catch (error) {
@@ -116,7 +118,7 @@ export async function pingDatabase(): Promise<{ serverVersion: string; database:
 
   try {
     const result = await client.query<{ version: string; database: string }>(
-      'select current_setting(\'server_version\') as version, current_database() as database',
+      "select current_setting('server_version') as version, current_database() as database",
     );
 
     return {

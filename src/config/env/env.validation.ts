@@ -49,6 +49,18 @@ const optionalEnv = z.object({
   DB_CONNECT_RETRIES: z.coerce.number().int().nonnegative().default(5),
   DB_CONNECT_RETRY_DELAY_MS: z.coerce.number().int().nonnegative().default(1_000),
 
+  // Event emitter tuning.
+  EVENTS_MAX_LISTENERS: z.coerce.number().int().positive().default(20),
+  EVENTS_WILDCARD: booleanFromEnv(true),
+  EVENTS_DELIMITER: z.string().min(1).default('.'),
+  EVENTS_VERBOSE_MEMORY_LEAK: booleanFromEnv(false),
+
+  // Transactional Outbox worker tuning.
+  OUTBOX_POLL_INTERVAL_MS: z.coerce.number().int().positive().default(2_000),
+  OUTBOX_BATCH_SIZE: z.coerce.number().int().positive().default(50),
+  OUTBOX_MAX_RETRIES: z.coerce.number().int().nonnegative().default(5),
+  OUTBOX_RETRY_BACKOFF_MS: z.coerce.number().int().nonnegative().default(1_000),
+
   // HTTP.
   CORS_ORIGIN: z.string().optional(),
 });
@@ -69,14 +81,11 @@ export const REQUIRED_ENV_KEYS: readonly string[] = Object.keys(requiredEnv.shap
  * process/shell variable always beats a file).
  */
 export function envFilePaths(nodeEnv: string, cwd: string = process.cwd()): string[] {
-  const candidates = [
-    `.env.${nodeEnv}.local`,
-    `.env.${nodeEnv}`,
-    '.env.local',
-    '.env',
-  ];
+  const candidates = [`.env.${nodeEnv}.local`, `.env.${nodeEnv}`, '.env.local', '.env'];
 
-  return [...new Set(candidates)].map((file) => resolve(cwd, file)).filter((path) => existsSync(path));
+  return [...new Set(candidates)]
+    .map((file) => resolve(cwd, file))
+    .filter((path) => existsSync(path));
 }
 
 /** Reads the appropriate .env files into `process.env` without overriding real vars. */
