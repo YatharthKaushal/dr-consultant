@@ -16,6 +16,17 @@ const logger = new Logger('Database');
 /** Drizzle instance type. Pass your schema here once tables are defined. */
 export type Database = NodePgDatabase<Record<string, never>>;
 
+/**
+ * The handle passed to `db.transaction(async (tx) => ...)`. Structurally
+ * interchangeable with `Database` for query-builder calls (insert/select/
+ * update/delete), so a repository method that should work either standalone
+ * or nested inside a caller's transaction can type its executor parameter as
+ * `Database | DatabaseTransaction` — see `shared/audit/audit.service.ts` for
+ * the pattern (transactional writes must roll back with the state change
+ * they audit; best-effort writes, like a login, must not).
+ */
+export type DatabaseTransaction = Parameters<Parameters<Database['transaction']>[0]>[0];
+
 let pool: Pool | null = null;
 let db: Database | null = null;
 

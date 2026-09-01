@@ -12,7 +12,10 @@ async function bootstrap(): Promise<void> {
 
   const app = await NestFactory.create<NestFastifyApplication>(
     AppModule,
-    new FastifyAdapter({ logger: false }),
+    // trustProxy: read the real client IP from X-Forwarded-For when behind a
+    // load balancer, so per-IP OTP rate limiting (otp_challenges) sees each
+    // caller's own IP rather than the proxy's.
+    new FastifyAdapter({ logger: false, trustProxy: env.TRUST_PROXY }),
   );
 
   app.setGlobalPrefix('api');
