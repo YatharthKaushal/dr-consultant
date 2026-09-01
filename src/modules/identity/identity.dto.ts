@@ -1,4 +1,4 @@
-import { IsIn, IsOptional, IsPhoneNumber, IsString, IsUUID, Matches } from 'class-validator';
+import { IsIn, IsOptional, IsPhoneNumber, IsString, IsUUID, Length, Matches } from 'class-validator';
 import { ACCOUNT_TYPES, type AccountType } from '../../schema/enums.schema';
 
 export class OtpRequestDto {
@@ -8,8 +8,10 @@ export class OtpRequestDto {
   @IsIn(ACCOUNT_TYPES)
   audience!: AccountType;
 
+  /** Matches otp_challenges.device_id's varchar(120) — without this cap an oversized value hits the DB constraint directly and surfaces as a raw 500 instead of a clean 400. */
   @IsOptional()
   @IsString()
+  @Length(1, 120)
   deviceId?: string;
 }
 

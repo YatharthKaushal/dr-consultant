@@ -66,6 +66,40 @@ describe('IdentityOtpService', () => {
     });
   });
 
+  it('maps SlideValidationError on send to OTP_SEND_FAILED, NOT the "wrong code" message — no code has been entered yet at this stage', async () => {
+    otpMock.send.mockRejectedValue(new SlideValidationError('invalid identifier'));
+    const service = createService();
+
+    try {
+      await service.send('+919876543210');
+      fail('expected send to throw');
+    } catch (error) {
+      expect(error).toBeInstanceOf(HttpException);
+      const httpError = error as HttpException;
+      expect(httpError.getStatus()).toBe(HttpStatus.BAD_REQUEST);
+      const body = httpError.getResponse() as { code: string; message: string };
+      expect(body.code).toBe(IDENTITY_ERROR_CODES.OTP_SEND_FAILED);
+      expect(body.message.toLowerCase()).not.toContain('code you entered');
+    }
+  });
+
+  it('maps SlideValidationError on retry to OTP_RESEND_FAILED, not INVALID_OTP', async () => {
+    otpMock.retry.mockRejectedValue(new SlideValidationError('resend limit exceeded'));
+    const service = createService();
+
+    await expect(service.retry('otpreq_1')).rejects.toMatchObject({
+      status: HttpStatus.BAD_REQUEST,
+      response: expect.objectContaining({ code: IDENTITY_ERROR_CODES.OTP_RESEND_FAILED }),
+    });
+  });
+
+  it('maps a 404 on send to a 503 (config problem), not CHALLENGE_EXPIRED — there is no challenge yet to have expired', async () => {
+    otpMock.send.mockRejectedValue(new SlideNotFoundError('widget not found'));
+    const service = createService();
+
+    await expect(service.send('+919876543210')).rejects.toBeInstanceOf(ServiceUnavailableException);
+  });
+
   it('does not leak whether the code was wrong, expired, or blocked', async () => {
     otpMock.verify.mockRejectedValue(new SlideValidationError('blocked after too many attempts'));
     const service = createService();

@@ -32,6 +32,21 @@ export interface SlideVerifyTokenResult {
 }
 
 /**
+ * Per-call overrides for the two Slide error types whose correct client
+ * message genuinely depends on WHICH operation failed — a `SlideValidationError`
+ * from `otp.send` (bad number/widget) has nothing to do with a wrong code,
+ * yet both would otherwise fall through the same generic handler. The other
+ * error types (429/401/403/5xx/network) are infrastructure-level and mean
+ * the same thing regardless of which operation triggered them, so they stay
+ * shared across every call.
+ */
+interface CallOverrides {
+  onValidationError: (error: SlideValidationError) => HttpException;
+  /** Omit to fall back to the shared CHALLENGE_EXPIRED/410 mapping. */
+  onNotFoundError?: (error: SlideNotFoundError) => HttpException;
+}
+
+/**
  * The ONLY file in this codebase that imports `@synquic/slide`. Every
  * caller gets back either a typed result or a plain Nest `HttpException` —
  * no `Slide*Error` ever escapes this file, so nothing downstream needs to
@@ -55,28 +70,65 @@ export class IdentityOtpService {
   }
 
   async send(mobileNumber: string): Promise<SlideSendResult> {
-    return this.call(() => this.client.otp.send({ widgetId: this.widgetId, identifier: mobileNumber }));
+    return this.call(() => this.client.otp.send({ widgetId: this.widgetId, identifier: mobileNumber }), {
+      onValidationError: () =>
+        new HttpException(
+          {
+            code: IDENTITY_ERROR_CODES.OTP_SEND_FAILED,
+            message: 'Could not send a verification code to this number. Please check the number and try again.',
+          },
+          HttpStatus.BAD_REQUEST,
+        ),
+      // A 404 on a fresh send has nothing to do with an expired challenge
+      // (there isn't one yet) — it means the widget itself is misconfigured.
+      // Not something the caller can act on; log it and treat as our fault.
+      onNotFoundError: () => {
+        this.logger.error('Slide otp.send returned 404 — check SLIDE_OTP_WIDGET_ID is a valid widget id.');
+        return unavailable();
+      },
+    });
   }
 
   /** Resends under the SAME `requestId` — Slide's own resend cooldown/max apply on top of ours. */
   async retry(requestId: string): Promise<SlideSendResult> {
-    return this.call(() => this.client.otp.retry({ requestId }));
+    return this.call(() => this.client.otp.retry({ requestId }), {
+      onValidationError: () =>
+        new HttpException(
+          { code: IDENTITY_ERROR_CODES.OTP_RESEND_FAILED, message: 'Could not resend the code. Please request a new one.' },
+          HttpStatus.BAD_REQUEST,
+        ),
+    });
   }
 
   async verify(requestId: string, otp: string): Promise<SlideVerifyResult> {
-    return this.call(() => this.client.otp.verify({ requestId, otp }));
+    return this.call(() => this.client.otp.verify({ requestId, otp }), {
+      // One generic message for invalid/expired/blocked-at-Slide alike —
+      // distinguishing them is free reconnaissance to an attacker and
+      // nothing in the SRS asks for it.
+      onValidationError: () =>
+        new HttpException(
+          { code: IDENTITY_ERROR_CODES.INVALID_OTP, message: 'The code you entered is incorrect or has expired.' },
+          HttpStatus.BAD_REQUEST,
+        ),
+    });
   }
 
   /** Single-use — Slide consumes the token on this call. Never call this more than once per accessToken, and never retry it. */
   async verifyToken(accessToken: string): Promise<SlideVerifyTokenResult> {
-    return this.call(() => this.client.otp.verifyToken({ accessToken }));
+    return this.call(() => this.client.otp.verifyToken({ accessToken }), {
+      onValidationError: () =>
+        new HttpException(
+          { code: IDENTITY_ERROR_CODES.INVALID_OTP, message: 'Verification failed. Please try again.' },
+          HttpStatus.BAD_REQUEST,
+        ),
+    });
   }
 
-  private async call<T>(fn: () => Promise<T>): Promise<T> {
+  private async call<T>(fn: () => Promise<T>, overrides: CallOverrides): Promise<T> {
     try {
       return await fn();
     } catch (error) {
-      throw await this.mapError(error);
+      throw await this.mapError(error, overrides);
     }
   }
 
@@ -85,18 +137,15 @@ export class IdentityOtpService {
    * `send`/`retry`, and `verifyToken` is single-use so a retry after a
    * timeout could destroy a legitimate session.
    */
-  private async mapError(error: unknown): Promise<HttpException> {
+  private async mapError(error: unknown, overrides: CallOverrides): Promise<HttpException> {
     if (error instanceof SlideValidationError) {
-      // One generic message for invalid/expired/blocked-at-Slide alike —
-      // distinguishing them is free reconnaissance to an attacker and
-      // nothing in the SRS asks for it.
-      return new HttpException(
-        { code: IDENTITY_ERROR_CODES.INVALID_OTP, message: 'The code you entered is incorrect or has expired.' },
-        HttpStatus.BAD_REQUEST,
-      );
+      return overrides.onValidationError(error);
     }
 
     if (error instanceof SlideNotFoundError) {
+      if (overrides.onNotFoundError) {
+        return overrides.onNotFoundError(error);
+      }
       return new HttpException(
         {
           code: IDENTITY_ERROR_CODES.CHALLENGE_EXPIRED,

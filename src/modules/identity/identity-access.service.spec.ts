@@ -18,20 +18,23 @@ function createDeps() {
     findPermissionById: jest.fn(),
     holdsRoleCode: jest.fn().mockResolvedValue(false),
     countSuperAdminHolders: jest.fn().mockResolvedValue(1),
-    assignRole: jest.fn(),
-    revokeRole: jest.fn(),
-    grantPermission: jest.fn(),
-    revokePermissionGrant: jest.fn(),
+    lockSuperAdminGuard: jest.fn().mockResolvedValue(undefined),
+    assignRole: jest.fn().mockResolvedValue(true),
+    revokeRole: jest.fn().mockResolvedValue(true),
+    grantPermission: jest.fn().mockResolvedValue(true),
+    revokePermissionGrant: jest.fn().mockResolvedValue(true),
     getAdminRoles: jest.fn().mockResolvedValue([]),
     getAdminPermissionGrants: jest.fn().mockResolvedValue([]),
     listRoles: jest.fn(),
     listPermissions: jest.fn(),
   } as unknown as jest.Mocked<IdentityAccessRepository>;
   const identityRepo = {
-    findAdminById: jest.fn(),
+    // Defaults to "exists" — the common case for every mutation test.
+    // Individual tests override to null for the 404 cases.
+    findAdminById: jest.fn().mockResolvedValue({ id: 'admin-2', status: 'active' }),
     findAdminByMobile: jest.fn(),
     createAdmin: jest.fn(),
-    updateAdmin: jest.fn(),
+    updateAdmin: jest.fn().mockResolvedValue({ id: 'admin-2', status: 'active' }),
     bumpTokenVersion: jest.fn(),
     listAdmins: jest.fn(),
   } as unknown as jest.Mocked<IdentityRepository>;
@@ -53,57 +56,103 @@ describe('IdentityAccessService', () => {
     });
   });
 
-  describe('last-super_admin guardrail', () => {
-    it('blocks removing the super_admin role from its only holder', async () => {
-      const { service, accessRepo } = createDeps();
-      accessRepo.findRoleById.mockResolvedValue({ id: 'role-super', code: 'super_admin', name: 'Super Admin' } as never);
-      accessRepo.holdsRoleCode.mockResolvedValue(true);
-      accessRepo.countSuperAdminHolders.mockResolvedValue(1);
+  describe('target-admin existence', () => {
+    it('404s assignRole/revokeRole/grantPermission/revokePermission when the target admin does not exist', async () => {
+      const { service, identityRepo } = createDeps();
+      identityRepo.findAdminById.mockResolvedValue(null as never);
 
-      await expect(service.revokeRole('admin-1', 'admin-2', 'role-super')).rejects.toBeInstanceOf(ConflictException);
-      expect(accessRepo.revokeRole).not.toHaveBeenCalled();
+      await expect(service.assignRole('admin-1', 'missing', 'role-1')).rejects.toBeInstanceOf(NotFoundException);
+      await expect(service.revokeRole('admin-1', 'missing', 'role-1')).rejects.toBeInstanceOf(NotFoundException);
+      await expect(service.grantPermission('admin-1', 'missing', 'perm-1')).rejects.toBeInstanceOf(NotFoundException);
+      await expect(service.revokePermission('admin-1', 'missing', 'perm-1')).rejects.toBeInstanceOf(NotFoundException);
     });
 
-    it('allows removing super_admin from one holder when another remains', async () => {
+    it('never reaches the database for a role/permission id when the target admin is missing (fails fast)', async () => {
+      const { service, identityRepo, accessRepo } = createDeps();
+      identityRepo.findAdminById.mockResolvedValue(null as never);
+
+      await expect(service.assignRole('admin-1', 'missing', 'role-1')).rejects.toBeInstanceOf(NotFoundException);
+      expect(accessRepo.findRoleById).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('last-super_admin guardrail', () => {
+    it('blocks removing the super_admin role when it would leave zero active holders', async () => {
       const { service, accessRepo } = createDeps();
       accessRepo.findRoleById.mockResolvedValue({ id: 'role-super', code: 'super_admin', name: 'Super Admin' } as never);
-      accessRepo.holdsRoleCode.mockResolvedValue(true);
-      accessRepo.countSuperAdminHolders.mockResolvedValue(2);
+      accessRepo.revokeRole.mockResolvedValue(true);
+      accessRepo.countSuperAdminHolders.mockResolvedValue(0);
+
+      await expect(service.revokeRole('admin-1', 'admin-2', 'role-super')).rejects.toBeInstanceOf(ConflictException);
+      // The lock is acquired before the count is trusted.
+      expect(accessRepo.lockSuperAdminGuard).toHaveBeenCalled();
+    });
+
+    it('allows removing super_admin when at least one active holder remains afterward', async () => {
+      const { service, accessRepo } = createDeps();
+      accessRepo.findRoleById.mockResolvedValue({ id: 'role-super', code: 'super_admin', name: 'Super Admin' } as never);
+      accessRepo.revokeRole.mockResolvedValue(true);
+      accessRepo.countSuperAdminHolders.mockResolvedValue(1);
 
       await service.revokeRole('admin-1', 'admin-2', 'role-super');
 
       expect(accessRepo.revokeRole).toHaveBeenCalledWith('admin-2', 'role-super', expect.anything());
     });
 
-    it('does not run the super_admin check at all for a non-super_admin role', async () => {
+    it('does not acquire the lock or count holders for a non-super_admin role', async () => {
       const { service, accessRepo } = createDeps();
       accessRepo.findRoleById.mockResolvedValue({ id: 'role-ops', code: 'operations', name: 'Operations' } as never);
+      accessRepo.revokeRole.mockResolvedValue(true);
 
       await service.revokeRole('admin-1', 'admin-2', 'role-ops');
 
+      expect(accessRepo.lockSuperAdminGuard).not.toHaveBeenCalled();
       expect(accessRepo.countSuperAdminHolders).not.toHaveBeenCalled();
-      expect(accessRepo.revokeRole).toHaveBeenCalled();
     });
 
-    it('blocks deactivating the last super_admin via updateAdmin', async () => {
-      const { service, accessRepo, identityRepo } = createDeps();
-      identityRepo.findAdminById.mockResolvedValue({ id: 'admin-2', status: 'active' } as never);
+    it('does not guard or audit a revoke that was already a no-op (admin never held the role)', async () => {
+      const { service, accessRepo, audit } = createDeps();
+      accessRepo.findRoleById.mockResolvedValue({ id: 'role-super', code: 'super_admin', name: 'Super Admin' } as never);
+      accessRepo.revokeRole.mockResolvedValue(false);
+
+      await service.revokeRole('admin-1', 'admin-2', 'role-super');
+
+      expect(accessRepo.countSuperAdminHolders).not.toHaveBeenCalled();
+      expect(audit.write).not.toHaveBeenCalled();
+    });
+
+    it('blocks deactivating the last active super_admin via updateAdmin, and rolls back the status change', async () => {
+      const { service, accessRepo, identityRepo, audit } = createDeps();
+      identityRepo.updateAdmin.mockResolvedValue({ id: 'admin-2', status: 'suspended' } as never);
       accessRepo.holdsRoleCode.mockResolvedValue(true);
-      accessRepo.countSuperAdminHolders.mockResolvedValue(1);
+      accessRepo.countSuperAdminHolders.mockResolvedValue(0);
 
       await expect(service.updateAdmin('admin-1', 'admin-2', { status: 'suspended' })).rejects.toBeInstanceOf(
         ConflictException,
       );
-      expect(identityRepo.updateAdmin).not.toHaveBeenCalled();
+      // The update was attempted (and would be rolled back by the real
+      // transaction) but neither the session revocation nor the audit
+      // entry for a change that got rolled back should ever run.
+      expect(identityRepo.bumpTokenVersion).not.toHaveBeenCalled();
+      expect(audit.write).not.toHaveBeenCalled();
+    });
+
+    it('allows deactivating a super_admin when another active one remains', async () => {
+      const { service, accessRepo, identityRepo } = createDeps();
+      identityRepo.updateAdmin.mockResolvedValue({ id: 'admin-2', status: 'suspended' } as never);
+      accessRepo.holdsRoleCode.mockResolvedValue(true);
+      accessRepo.countSuperAdminHolders.mockResolvedValue(1);
+
+      await service.updateAdmin('admin-1', 'admin-2', { status: 'suspended' });
+
+      expect(identityRepo.bumpTokenVersion).toHaveBeenCalledWith('admin', 'admin-2', expect.anything());
     });
   });
 
   describe('updateAdmin session revocation', () => {
-    it('bumps tokenVersion when status changes away from active', async () => {
+    it('bumps tokenVersion when status changes away from active and the admin is not a super_admin', async () => {
       const { service, accessRepo, identityRepo } = createDeps();
-      identityRepo.findAdminById.mockResolvedValue({ id: 'admin-2', status: 'active' } as never);
       accessRepo.holdsRoleCode.mockResolvedValue(false);
-      accessRepo.countSuperAdminHolders.mockResolvedValue(3);
       identityRepo.updateAdmin.mockResolvedValue({ id: 'admin-2', status: 'suspended' } as never);
 
       await service.updateAdmin('admin-1', 'admin-2', { status: 'suspended' });
@@ -111,15 +160,24 @@ describe('IdentityAccessService', () => {
       expect(identityRepo.bumpTokenVersion).toHaveBeenCalledWith('admin', 'admin-2', expect.anything());
     });
 
-    it('does not bump tokenVersion or run the super_admin check for a fullName-only update', async () => {
+    it('does not bump tokenVersion, lock, or check holders for a fullName-only update', async () => {
       const { service, accessRepo, identityRepo } = createDeps();
-      identityRepo.findAdminById.mockResolvedValue({ id: 'admin-2', status: 'active' } as never);
       identityRepo.updateAdmin.mockResolvedValue({ id: 'admin-2', fullName: 'New Name' } as never);
 
       await service.updateAdmin('admin-1', 'admin-2', { fullName: 'New Name' });
 
       expect(identityRepo.bumpTokenVersion).not.toHaveBeenCalled();
+      expect(accessRepo.lockSuperAdminGuard).not.toHaveBeenCalled();
       expect(accessRepo.holdsRoleCode).not.toHaveBeenCalled();
+    });
+
+    it('never returns tokenVersion to the caller', async () => {
+      const { service, identityRepo } = createDeps();
+      identityRepo.updateAdmin.mockResolvedValue({ id: 'admin-2', fullName: 'New Name', tokenVersion: 4 } as never);
+
+      const result = await service.updateAdmin('admin-1', 'admin-2', { fullName: 'New Name' });
+
+      expect(result).not.toHaveProperty('tokenVersion');
     });
   });
 
@@ -135,7 +193,52 @@ describe('IdentityAccessService', () => {
     });
   });
 
-  describe('not-found handling', () => {
+  describe('idempotent RBAC mutations do not write a misleading audit entry', () => {
+    it('does not audit assignRole when the admin already held the role', async () => {
+      const { service, accessRepo, audit } = createDeps();
+      accessRepo.findRoleById.mockResolvedValue({ id: 'role-1', code: 'operations', name: 'Operations' } as never);
+      accessRepo.assignRole.mockResolvedValue(false);
+
+      await service.assignRole('admin-1', 'admin-2', 'role-1');
+
+      expect(audit.write).not.toHaveBeenCalled();
+    });
+
+    it('does not audit grantPermission when the admin already held the grant', async () => {
+      const { service, accessRepo, audit } = createDeps();
+      accessRepo.findPermissionById.mockResolvedValue({ id: 'perm-1', key: 'doctors.verify' } as never);
+      accessRepo.grantPermission.mockResolvedValue(false);
+
+      await service.grantPermission('admin-1', 'admin-2', 'perm-1');
+
+      expect(audit.write).not.toHaveBeenCalled();
+    });
+
+    it('does not audit revokePermission when the admin never held the grant', async () => {
+      const { service, accessRepo, audit } = createDeps();
+      accessRepo.findPermissionById.mockResolvedValue({ id: 'perm-1', key: 'doctors.verify' } as never);
+      accessRepo.revokePermissionGrant.mockResolvedValue(false);
+
+      await service.revokePermission('admin-1', 'admin-2', 'perm-1');
+
+      expect(audit.write).not.toHaveBeenCalled();
+    });
+
+    it('DOES audit assignRole when the role was actually newly assigned', async () => {
+      const { service, accessRepo, audit } = createDeps();
+      accessRepo.findRoleById.mockResolvedValue({ id: 'role-1', code: 'operations', name: 'Operations' } as never);
+      accessRepo.assignRole.mockResolvedValue(true);
+
+      await service.assignRole('admin-1', 'admin-2', 'role-1');
+
+      expect(audit.write).toHaveBeenCalledWith(
+        expect.objectContaining({ action: 'create', entityType: 'admin_role', entityId: 'admin-2' }),
+        expect.anything(),
+      );
+    });
+  });
+
+  describe('not-found handling for role/permission ids', () => {
     it('404s assignRole when the role does not exist', async () => {
       const { service, accessRepo } = createDeps();
       accessRepo.findRoleById.mockResolvedValue(null as never);

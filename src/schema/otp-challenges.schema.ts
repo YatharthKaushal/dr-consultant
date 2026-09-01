@@ -16,13 +16,23 @@ import { accountTypeEnum } from './enums.schema';
  *
  * A resend (Slide's `otp.retry`) UPDATES this row in place — Slide reuses
  * the same `provider_request_id` across a retry, so `resend_count` and
- * `last_sent_at` move and everything else stays. "How many sends for this
- * number/IP in the last N minutes" (SRS 6.1's rate limit) therefore sums
- * `1 + resend_count` over the `(mobile_number, created_at)` / `(ip_address,
- * created_at)` index range, not a plain row count. `attempt_count` counts
- * wrong-code submissions against `otp.verify` for THIS row, a separate
- * concern from resends; `attempt_count >= max` (checked in application code
- * against `app_config`) is the lockout condition, so there is no separate
+ * `last_sent_at` move and everything else stays. `resend_count` plus
+ * `otp.resend.max_per_challenge`/`otp.resend.cooldown_seconds` in
+ * `app_config` govern how many times and how often THIS ONE challenge may
+ * be resent — a per-challenge concern.
+ *
+ * Rate limiting the INITIAL `POST /otp/request` call (SRS 6.1) is a
+ * separate, broader concern this table cannot own on its own: a
+ * doctor/admin request for an unregistered number is refused before Slide
+ * is ever called, so no row lands here for it, and counting only rows in
+ * this table would leave that check completely unthrottled. See
+ * `otp-request-attempts.schema.ts`, which records every `/otp/request`
+ * call regardless of outcome and is what `otp.request.max_per_number_per_hour`
+ * / `otp.request.max_per_ip_per_hour` are actually checked against.
+ *
+ * `attempt_count` counts wrong-code submissions against `otp.verify` for
+ * THIS row; `attempt_count >= max` (checked in application code against
+ * `app_config`) is the lockout condition, so there is no separate
  * `locked_at` — same reasoning `safety_alerts` uses for having no status
  * column. `verified_at` non-null is our own replay stop on this row,
  * independent of Slide's own single-use `otp.verifyToken`.

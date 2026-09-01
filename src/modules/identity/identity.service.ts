@@ -74,6 +74,15 @@ export class IdentityService {
   async requestOtp(dto: OtpRequestDto, ipAddress?: string): Promise<OtpChallengeResponse> {
     const mobileNumber = normalizeMobileNumber(dto.mobileNumber);
 
+    // Rate limit FIRST, before the existence check below and before Slide
+    // is ever called. This is what stops the doctor/admin existence check
+    // from being an unthrottled account-enumeration oracle: that check is
+    // refused locally (no otp_challenges row, no Slide call), so counting
+    // only otp_challenges rows would never see it — otp_request_attempts
+    // records every call to this endpoint regardless of what happens next.
+    await this.assertNotRateLimited(mobileNumber, ipAddress);
+    await this.repo.recordRequestAttempt(mobileNumber, dto.audience, ipAddress);
+
     // Doctor/admin: must already exist and be signable — refused with a
     // plain message before Slide is ever called (MODULES M-02: "a sign-in
     // with the wrong role for that app is refused with a plain message").
@@ -91,8 +100,6 @@ export class IdentityService {
         });
       }
     }
-
-    await this.assertNotRateLimited(mobileNumber, ipAddress);
 
     const { requestId } = await this.otp.send(mobileNumber);
     const ttlSeconds = await this.getConfigNumber(IDENTITY_APP_CONFIG_KEYS.OTP_CHALLENGE_TTL_SECONDS);
@@ -319,14 +326,31 @@ export class IdentityService {
         HttpStatus.GONE,
       );
     }
+    if (challenge.expiresAt.getTime() < Date.now()) {
+      // Fails fast on our own bookkeeping estimate, same reasoning as the
+      // attemptCount lockout below — an obviously-expired challenge is
+      // refused without spending a Slide call on `otp.verify`/`otp.retry`,
+      // both of which would reject it anyway once it actually reaches
+      // Slide (expires_at is deliberately just our estimate, kept roughly
+      // in step with the widget's real expiry — see otp-challenges.schema.ts).
+      throw new HttpException(
+        { code: IDENTITY_ERROR_CODES.CHALLENGE_EXPIRED, message: 'This OTP request has expired. Please request a new code.' },
+        HttpStatus.GONE,
+      );
+    }
     return challenge;
   }
 
+  /**
+   * Counts EVERY `/otp/request` call in the window (`otp_request_attempts`),
+   * not just ones that reached Slide — see that table's schema comment for
+   * why this must include locally-refused doctor/admin lookups too.
+   */
   private async assertNotRateLimited(mobileNumber: string, ipAddress?: string): Promise<void> {
     const since = new Date(Date.now() - 60 * 60 * 1000);
 
     const maxPerNumber = await this.getConfigNumber(IDENTITY_APP_CONFIG_KEYS.OTP_REQUEST_MAX_PER_NUMBER_PER_HOUR);
-    const numberCount = await this.repo.countRecentSendsByMobile(mobileNumber, since);
+    const numberCount = await this.repo.countRecentAttemptsByMobile(mobileNumber, since);
     if (numberCount >= maxPerNumber) {
       throw new HttpException(
         { code: IDENTITY_ERROR_CODES.REQUEST_RATE_LIMITED, message: 'Too many OTP requests for this number. Please try again later.' },
@@ -336,7 +360,7 @@ export class IdentityService {
 
     if (ipAddress) {
       const maxPerIp = await this.getConfigNumber(IDENTITY_APP_CONFIG_KEYS.OTP_REQUEST_MAX_PER_IP_PER_HOUR);
-      const ipCount = await this.repo.countRecentSendsByIp(ipAddress, since);
+      const ipCount = await this.repo.countRecentAttemptsByIp(ipAddress, since);
       if (ipCount >= maxPerIp) {
         throw new HttpException(
           { code: IDENTITY_ERROR_CODES.REQUEST_RATE_LIMITED, message: 'Too many OTP requests from this network. Please try again later.' },

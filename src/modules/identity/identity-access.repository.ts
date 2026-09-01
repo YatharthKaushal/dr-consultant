@@ -1,9 +1,10 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { and, eq } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 import { DATABASE } from '../../config/db/database.module';
 import type { Database } from '../../config/db/database.config';
 import { adminPermissionGrantsTable } from '../../schema/admin-permission-grants.schema';
 import { adminRolesTable } from '../../schema/admin-roles.schema';
+import { adminsTable } from '../../schema/admins.schema';
 import { permissionsTable } from '../../schema/permissions.schema';
 import { rolePermissionsTable } from '../../schema/role-permissions.schema';
 import { rolesTable } from '../../schema/roles.schema';
@@ -68,13 +69,39 @@ export class IdentityAccessRepository {
     return keys.every((key) => effective.has(key));
   }
 
+  /**
+   * Counts admins who can ACTUALLY exercise super_admin right now — role
+   * link AND `status = 'active'`. Deliberately joined against `admins`
+   * rather than counting bare `admin_roles` rows: a suspended or deleted
+   * admin's role link is never removed (see `admins.schema.ts` — status is
+   * how an account is deactivated, not role revocation), so an unfiltered
+   * count would keep reporting "N holders" while every one of them is
+   * actually inactive, and the last-super_admin guardrail would never
+   * trip even as active coverage silently reaches zero.
+   */
   async countSuperAdminHolders(executor: Executor = this.db): Promise<number> {
     const rows = await executor
       .select({ adminId: adminRolesTable.adminId })
       .from(adminRolesTable)
       .innerJoin(rolesTable, eq(rolesTable.id, adminRolesTable.roleId))
-      .where(eq(rolesTable.code, 'super_admin'));
+      .innerJoin(adminsTable, eq(adminsTable.id, adminRolesTable.adminId))
+      .where(and(eq(rolesTable.code, 'super_admin'), eq(adminsTable.status, 'active')));
     return rows.length;
+  }
+
+  /**
+   * Serializes every mutation that can change who holds `super_admin`
+   * (`revokeRole` removing it, `updateAdmin` deactivating a holder) against
+   * a single named lock for the lifetime of the caller's transaction —
+   * `pg_advisory_xact_lock` auto-releases on commit or rollback. Without
+   * this, two concurrent requests each revoking `super_admin` from a
+   * DIFFERENT admin could each read "2 holders, safe to remove one" before
+   * either commits, leaving zero afterward — the standard TOCTOU gap a
+   * check-then-act pattern has under READ COMMITTED. Call this BEFORE
+   * counting holders, inside the same transaction as the mutation.
+   */
+  async lockSuperAdminGuard(executor: Executor): Promise<void> {
+    await executor.execute(sql`select pg_advisory_xact_lock(hashtext('identity.super_admin_guard'))`);
   }
 
   async listRoles(executor: Executor = this.db) {
@@ -124,30 +151,52 @@ export class IdentityAccessRepository {
       .where(eq(adminPermissionGrantsTable.adminId, adminId));
   }
 
-  async assignRole(adminId: string, roleId: string, grantedByAdminId: string | null, executor: Executor = this.db): Promise<void> {
-    await executor.insert(adminRolesTable).values({ adminId, roleId, grantedByAdminId }).onConflictDoNothing();
+  /** Returns whether a row was actually inserted (`false` when the admin already held it) — the caller must not audit a "grant" that changed nothing. */
+  async assignRole(
+    adminId: string,
+    roleId: string,
+    grantedByAdminId: string | null,
+    executor: Executor = this.db,
+  ): Promise<boolean> {
+    const inserted = await executor
+      .insert(adminRolesTable)
+      .values({ adminId, roleId, grantedByAdminId })
+      .onConflictDoNothing()
+      .returning({ adminId: adminRolesTable.adminId });
+    return inserted.length > 0;
   }
 
-  async revokeRole(adminId: string, roleId: string, executor: Executor = this.db): Promise<void> {
-    await executor.delete(adminRolesTable).where(and(eq(adminRolesTable.adminId, adminId), eq(adminRolesTable.roleId, roleId)));
+  /** Returns whether a row was actually deleted (`false` when the admin didn't hold it). */
+  async revokeRole(adminId: string, roleId: string, executor: Executor = this.db): Promise<boolean> {
+    const deleted = await executor
+      .delete(adminRolesTable)
+      .where(and(eq(adminRolesTable.adminId, adminId), eq(adminRolesTable.roleId, roleId)))
+      .returning({ adminId: adminRolesTable.adminId });
+    return deleted.length > 0;
   }
 
+  /** Returns whether a row was actually inserted. */
   async grantPermission(
     adminId: string,
     permissionId: string,
     grantedByAdminId: string | null,
     reason: string | undefined,
     executor: Executor = this.db,
-  ): Promise<void> {
-    await executor
+  ): Promise<boolean> {
+    const inserted = await executor
       .insert(adminPermissionGrantsTable)
       .values({ adminId, permissionId, grantedByAdminId, reason })
-      .onConflictDoNothing();
+      .onConflictDoNothing()
+      .returning({ adminId: adminPermissionGrantsTable.adminId });
+    return inserted.length > 0;
   }
 
-  async revokePermissionGrant(adminId: string, permissionId: string, executor: Executor = this.db): Promise<void> {
-    await executor
+  /** Returns whether a row was actually deleted. */
+  async revokePermissionGrant(adminId: string, permissionId: string, executor: Executor = this.db): Promise<boolean> {
+    const deleted = await executor
       .delete(adminPermissionGrantsTable)
-      .where(and(eq(adminPermissionGrantsTable.adminId, adminId), eq(adminPermissionGrantsTable.permissionId, permissionId)));
+      .where(and(eq(adminPermissionGrantsTable.adminId, adminId), eq(adminPermissionGrantsTable.permissionId, permissionId)))
+      .returning({ adminId: adminPermissionGrantsTable.adminId });
+    return deleted.length > 0;
   }
 }
