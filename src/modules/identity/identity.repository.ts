@@ -6,6 +6,7 @@ import type { AccountStatus, AccountType } from '../../schema/enums.schema';
 import { adminsTable } from '../../schema/admins.schema';
 import { doctorsTable } from '../../schema/doctors.schema';
 import { otpChallengesTable, type OtpChallengeRow } from '../../schema/otp-challenges.schema';
+import { otpRequestAttemptsTable } from '../../schema/otp-request-attempts.schema';
 import { patientsTable } from '../../schema/patients.schema';
 
 /** A Drizzle db handle or an open transaction — every method here accepts either, defaulting to the module's own pooled connection. */
@@ -98,20 +99,37 @@ export class IdentityRepository {
     await executor.update(otpChallengesTable).set({ verifiedAt }).where(eq(otpChallengesTable.id, id));
   }
 
-  /** Sum of `1 + resend_count` for this number since `since` — the actual "how many sends" count, not a row count. */
-  async countRecentSendsByMobile(mobileNumber: string, since: Date, executor: Executor = this.db): Promise<number> {
+  /* ---------------------------------------------------------------------- */
+  /* otp_request_attempts — rate limiting for POST /otp/request itself       */
+  /* ---------------------------------------------------------------------- */
+
+  /**
+   * Written FIRST, before the doctor/admin existence check and before Slide
+   * is ever called — see `otp-request-attempts.schema.ts` for why a row in
+   * `otp_challenges` alone can't be the rate-limit source of truth.
+   */
+  async recordRequestAttempt(
+    mobileNumber: string,
+    audience: AccountType,
+    ipAddress: string | undefined,
+    executor: Executor = this.db,
+  ): Promise<void> {
+    await executor.insert(otpRequestAttemptsTable).values({ mobileNumber, audience, ipAddress });
+  }
+
+  async countRecentAttemptsByMobile(mobileNumber: string, since: Date, executor: Executor = this.db): Promise<number> {
     const [result] = await executor
-      .select({ total: sql<string>`coalesce(sum(1 + ${otpChallengesTable.resendCount}), 0)` })
-      .from(otpChallengesTable)
-      .where(and(eq(otpChallengesTable.mobileNumber, mobileNumber), gte(otpChallengesTable.createdAt, since)));
+      .select({ total: sql<string>`count(*)` })
+      .from(otpRequestAttemptsTable)
+      .where(and(eq(otpRequestAttemptsTable.mobileNumber, mobileNumber), gte(otpRequestAttemptsTable.createdAt, since)));
     return Number(result?.total ?? 0);
   }
 
-  async countRecentSendsByIp(ipAddress: string, since: Date, executor: Executor = this.db): Promise<number> {
+  async countRecentAttemptsByIp(ipAddress: string, since: Date, executor: Executor = this.db): Promise<number> {
     const [result] = await executor
-      .select({ total: sql<string>`coalesce(sum(1 + ${otpChallengesTable.resendCount}), 0)` })
-      .from(otpChallengesTable)
-      .where(and(eq(otpChallengesTable.ipAddress, ipAddress), gte(otpChallengesTable.createdAt, since)));
+      .select({ total: sql<string>`count(*)` })
+      .from(otpRequestAttemptsTable)
+      .where(and(eq(otpRequestAttemptsTable.ipAddress, ipAddress), gte(otpRequestAttemptsTable.createdAt, since)));
     return Number(result?.total ?? 0);
   }
 

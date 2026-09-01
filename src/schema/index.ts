@@ -21,6 +21,7 @@ export * from './enums.schema';
 export * from './patients.schema';
 export * from './admins.schema';
 export * from './otp-challenges.schema';
+export * from './otp-request-attempts.schema';
 export * from './roles.schema';
 export * from './permissions.schema';
 export * from './role-permissions.schema';

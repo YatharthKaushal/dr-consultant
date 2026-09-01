@@ -42,8 +42,9 @@ function createDeps() {
     bumpAttemptCount: jest.fn(),
     recordResend: jest.fn(),
     markVerified: jest.fn(),
-    countRecentSendsByMobile: jest.fn().mockResolvedValue(0),
-    countRecentSendsByIp: jest.fn().mockResolvedValue(0),
+    recordRequestAttempt: jest.fn().mockResolvedValue(undefined),
+    countRecentAttemptsByMobile: jest.fn().mockResolvedValue(0),
+    countRecentAttemptsByIp: jest.fn().mockResolvedValue(0),
     findDoctorAuthStateByMobile: jest.fn(),
     findAdminAuthStateByMobile: jest.fn(),
     findPatientAuthStateById: jest.fn(),
@@ -129,12 +130,44 @@ describe('IdentityService', () => {
       (appConfig.getNumber as jest.Mock).mockImplementation((key: string) =>
         Promise.resolve(key.includes('max_per_number') ? 3 : 999),
       );
-      repo.countRecentSendsByMobile.mockResolvedValue(3);
+      repo.countRecentAttemptsByMobile.mockResolvedValue(3);
 
       await expect(service.requestOtp({ mobileNumber: '+919876543210', audience: 'patient' })).rejects.toBeInstanceOf(
         HttpException,
       );
       expect(otp.send).not.toHaveBeenCalled();
+      expect(repo.recordRequestAttempt).not.toHaveBeenCalled();
+    });
+
+    it('rate-limits the doctor/admin existence check itself — a rejected lookup still counts against the IP', async () => {
+      // Regression test: countRecentAttempts* reads otp_request_attempts,
+      // NOT otp_challenges, specifically so that a run of "account not
+      // found" rejections (which never touch otp_challenges or Slide) are
+      // still throttled. Before this fix, this endpoint was an unlimited
+      // account-enumeration oracle for doctor/admin numbers.
+      const { service, repo, otp, appConfig } = createDeps();
+      (appConfig.getNumber as jest.Mock).mockImplementation((key: string) =>
+        Promise.resolve(key.includes('max_per_ip') ? 5 : 999),
+      );
+      repo.countRecentAttemptsByIp.mockResolvedValue(5);
+
+      await expect(
+        service.requestOtp({ mobileNumber: '+919876543210', audience: 'doctor' }, '1.1.1.1'),
+      ).rejects.toBeInstanceOf(HttpException);
+      // Never even reached the existence check, let alone Slide.
+      expect(repo.findDoctorAuthStateByMobile).not.toHaveBeenCalled();
+      expect(otp.send).not.toHaveBeenCalled();
+    });
+
+    it('records the attempt before the doctor/admin existence check, so a rejected lookup is still counted for next time', async () => {
+      const { service, repo } = createDeps();
+      repo.findDoctorAuthStateByMobile.mockResolvedValue(null);
+
+      await expect(service.requestOtp({ mobileNumber: '+919876543210', audience: 'doctor' }, '1.1.1.1')).rejects.toBeInstanceOf(
+        ForbiddenException,
+      );
+
+      expect(repo.recordRequestAttempt).toHaveBeenCalledWith('+919876543210', 'doctor', '1.1.1.1');
     });
   });
 
@@ -151,6 +184,18 @@ describe('IdentityService', () => {
     it('refuses an already-verified challenge without calling Slide again — our own replay stop', async () => {
       const { service, repo, otp } = createDeps();
       repo.findChallengeById.mockResolvedValue(baseChallenge({ verifiedAt: NOW }) as never);
+
+      await expect(service.verifyOtp({ challengeId: 'challenge-1', code: '123456' })).rejects.toBeInstanceOf(
+        HttpException,
+      );
+      expect(otp.verify).not.toHaveBeenCalled();
+    });
+
+    it('refuses a locally-expired challenge without calling Slide — fails fast instead of wasting a Slide call', async () => {
+      const { service, repo, otp } = createDeps();
+      repo.findChallengeById.mockResolvedValue(
+        baseChallenge({ expiresAt: new Date(NOW.getTime() - 1000) }) as never,
+      );
 
       await expect(service.verifyOtp({ challengeId: 'challenge-1', code: '123456' })).rejects.toBeInstanceOf(
         HttpException,
