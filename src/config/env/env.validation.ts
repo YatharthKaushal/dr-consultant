@@ -31,6 +31,17 @@ const booleanFromEnv = (defaultValue: boolean) =>
 const requiredEnv = z.object({
   /** postgres://user:password@host:port/database */
   DATABASE_URL: z.string().min(1, 'must be a non-empty PostgreSQL connection string'),
+
+  // Auth. Two distinct secrets, not one plus a `type` claim: a leaked
+  // access-verification secret must not be enough to mint a refresh token.
+  // `validateEnv` additionally asserts they are not equal to each other.
+  JWT_ACCESS_SECRET: z.string().min(32, 'must be at least 32 characters'),
+  JWT_REFRESH_SECRET: z.string().min(32, 'must be at least 32 characters'),
+
+  // Slide (slide.synquic.in) — the OTP vendor. See otp-challenges.schema.ts.
+  SLIDE_API_KEY: z.string().min(1),
+  /** ID of the OTP widget configured in the Slide dashboard (length, expiry, resend rules, channel). */
+  SLIDE_OTP_WIDGET_ID: z.string().min(1),
 });
 
 /* -------------------------------------------------------------------------- */
@@ -63,6 +74,38 @@ const optionalEnv = z.object({
 
   // HTTP.
   CORS_ORIGIN: z.string().optional(),
+  // Set true behind a load balancer/reverse proxy, so `request.ip` is the
+  // real client IP (X-Forwarded-For) rather than the proxy's — otherwise
+  // every request collapses into one IP for the OTP per-IP rate limit.
+  TRUST_PROXY: booleanFromEnv(false),
+
+  // Auth / JWT tuning. TTLs are a bare `<number><unit>` (s/m/h/d) — both
+  // `jsonwebtoken`'s `expiresIn` and identity-token.service.ts's own
+  // seconds conversion for the API response parse this shape; validating
+  // it here fails fast at boot instead of on the first token mint.
+  JWT_ISSUER: z.string().min(1).default('dr-consultation'),
+  JWT_ACCESS_TTL: z
+    .string()
+    .regex(/^\d+[smhd]$/, 'must look like "15m", "12h", or "30d"')
+    .default('15m'),
+  /** Patient and doctor app sessions. */
+  JWT_REFRESH_TTL: z
+    .string()
+    .regex(/^\d+[smhd]$/, 'must look like "15m", "12h", or "30d"')
+    .default('30d'),
+  /** Shorter than the patient/doctor refresh TTL — SRS 6.1's tighter posture for panel access. */
+  JWT_ADMIN_REFRESH_TTL: z
+    .string()
+    .regex(/^\d+[smhd]$/, 'must look like "15m", "12h", or "30d"')
+    .default('12h'),
+
+  // Slide. Omit to use the SDK's own default base URL.
+  SLIDE_BASE_URL: z.string().url().optional(),
+
+  // db:seed only — creates one bootstrap super_admin when set, skips
+  // admin creation entirely when absent. Never read outside the seed script.
+  BOOTSTRAP_SUPER_ADMIN_MOBILE: z.string().optional(),
+  BOOTSTRAP_SUPER_ADMIN_NAME: z.string().min(1).default('Platform Owner'),
 });
 
 export const envSchema = requiredEnv.extend(optionalEnv.shape);
@@ -121,6 +164,24 @@ export function validateEnv(source: Record<string, unknown> = process.env): Env 
   const result = envSchema.safeParse(source);
 
   if (result.success) {
+    // A cross-field check, not expressible as a per-field zod rule without
+    // turning envSchema into a ZodEffects and losing `.shape` (which
+    // REQUIRED_ENV_KEYS and this file's own tests read directly) — so it is
+    // a plain assertion here, reported through the same `invalid` path as
+    // every other malformed value.
+    if (result.data.JWT_ACCESS_SECRET === result.data.JWT_REFRESH_SECRET) {
+      reportAndExit(
+        [],
+        [
+          {
+            key: 'JWT_REFRESH_SECRET',
+            message:
+              'must be different from JWT_ACCESS_SECRET — a shared secret would let an access token be replayed as a refresh token',
+          },
+        ],
+      );
+    }
+
     return result.data;
   }
 
