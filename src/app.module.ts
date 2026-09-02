@@ -4,6 +4,7 @@ import { DatabaseModule } from './config/db/database.module';
 import { EventsModule } from './config/events/events.module';
 import { getEnv } from './config/env/env.validation';
 import { HealthModule } from './health/health.module';
+import { AiModule } from './modules/ai/ai.module';
 import { AvailabilityModule } from './modules/availability/availability.module';
 import { CatalogueModule } from './modules/catalogue/catalogue.module';
 import { DoctorModule } from './modules/doctor/doctor.module';
@@ -41,6 +42,7 @@ import { ErrorsModule } from './shared/errors/errors.module';
     DoctorModule,
     CatalogueModule,
     AvailabilityModule,
+    AiModule,
     HealthModule,
   ],
 })

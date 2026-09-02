@@ -6,6 +6,7 @@ const VALID: Record<string, string> = {
   JWT_REFRESH_SECRET: 'b'.repeat(32),
   SLIDE_API_KEY: 'sk_test_1234567890',
   SLIDE_OTP_WIDGET_ID: 'wgt_test_1234567890',
+  AI_CREDENTIAL_ENCRYPTION_KEY: 'a'.repeat(64),
 };
 
 describe('env.validation', () => {
@@ -133,7 +134,26 @@ describe('env.validation', () => {
       'JWT_REFRESH_SECRET',
       'SLIDE_API_KEY',
       'SLIDE_OTP_WIDGET_ID',
+      'AI_CREDENTIAL_ENCRYPTION_KEY',
     ]);
     expect(Object.keys(envSchema.shape)).toContain('CORS_ORIGIN');
+  });
+
+  it('rejects an AI_CREDENTIAL_ENCRYPTION_KEY that is not 64 hex characters', () => {
+    // Present but malformed (31 bytes, not 32) — reported as invalid, not
+    // missing, so the operator is told what is wrong with the value they set.
+    expect(() => validateEnv({ ...VALID, AI_CREDENTIAL_ENCRYPTION_KEY: 'a'.repeat(62) })).toThrow('process.exit:1');
+
+    const output = stderrSpy.mock.calls.map((call) => String(call[0])).join('');
+    expect(output).toContain('Invalid environment variable');
+    expect(output).toContain('- AI_CREDENTIAL_ENCRYPTION_KEY');
+    expect(output).toContain('openssl rand -hex 32');
+  });
+
+  it('rejects an AI_CREDENTIAL_ENCRYPTION_KEY of the right length that is not hex', () => {
+    expect(() => validateEnv({ ...VALID, AI_CREDENTIAL_ENCRYPTION_KEY: 'z'.repeat(64) })).toThrow('process.exit:1');
+
+    const output = stderrSpy.mock.calls.map((call) => String(call[0])).join('');
+    expect(output).toContain('- AI_CREDENTIAL_ENCRYPTION_KEY');
   });
 });

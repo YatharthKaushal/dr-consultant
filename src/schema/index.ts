@@ -57,6 +57,9 @@ export * from './patient-files.schema';
 export * from './checkin-responses.schema';
 export * from './safety-alerts.schema';
 
+export * from './agent-profiles.schema';
+export * from './agent-credentials.schema';
+
 export * from './content-items.schema';
 export * from './content-recommendations.schema';
 export * from './complaints.schema';
