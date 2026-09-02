@@ -4,6 +4,7 @@ import { DatabaseModule } from './config/db/database.module';
 import { EventsModule } from './config/events/events.module';
 import { getEnv } from './config/env/env.validation';
 import { HealthModule } from './health/health.module';
+import { CatalogueModule } from './modules/catalogue/catalogue.module';
 import { DoctorModule } from './modules/doctor/doctor.module';
 import { IdentityModule } from './modules/identity/identity.module';
 import { PatientModule } from './modules/patient/patient.module';
@@ -33,6 +34,7 @@ import { AuthModule } from './shared/auth/auth.module';
     AuthModule,
     PatientModule,
     DoctorModule,
+    CatalogueModule,
     HealthModule,
   ],
 })
