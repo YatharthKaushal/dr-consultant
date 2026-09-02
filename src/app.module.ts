@@ -6,6 +6,7 @@ import { getEnv } from './config/env/env.validation';
 import { HealthModule } from './health/health.module';
 import { AiModule } from './modules/ai/ai.module';
 import { AvailabilityModule } from './modules/availability/availability.module';
+import { BookingModule } from './modules/booking/booking.module';
 import { CatalogueModule } from './modules/catalogue/catalogue.module';
 import { DoctorModule } from './modules/doctor/doctor.module';
 import { DocumentModule } from './modules/document/document.module';
@@ -59,6 +60,11 @@ import { ErrorsModule } from './shared/errors/errors.module';
     // M-10: documents and file storage. Depends only on M-01/M-02
     // (`docs/MODULES.md`), so it needs no other feature module imported here.
     DocumentModule,
+    // M-11: booking. Imported after DocumentModule because it consumes
+    // `DocumentFacade` (and Patient/Doctor/Catalogue/Availability facades) —
+    // ordering is for readability, not correctness, since Nest resolves the
+    // provider graph regardless.
+    BookingModule,
     HealthModule,
   ],
 })

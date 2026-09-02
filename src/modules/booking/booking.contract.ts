@@ -1,0 +1,145 @@
+import type { ConsultationMode, ConsultationStatus, Party } from '../../schema/enums.schema';
+
+/**
+ * A doctor's busy period. STRUCTURALLY IDENTICAL to
+ * `availability.contract.ts`'s `BusyInterval` — redeclared here rather than
+ * imported so this module's public surface does not depend on M-07's, which
+ * is the same restraint `search-ai.contract.ts` applies. TypeScript is
+ * structural, so `BookingFacade` satisfies `BusyIntervalProvider` with no
+ * adapter and no cast at the `BUSY_INTERVAL_PROVIDER` binding.
+ */
+export interface BusyInterval {
+  startsAt: Date;
+  endsAt: Date;
+}
+
+/** One doctor's busy intervals — mirrors `availability.contract.ts`'s `DoctorBusyIntervals`. */
+export interface DoctorBusyIntervals {
+  doctorId: string;
+  intervals: BusyInterval[];
+}
+
+/**
+ * The subset of a consultation `modules/document` reads. STRUCTURALLY
+ * IDENTICAL to `document/consultation-lookup.provider.ts`'s
+ * `ConsultationSummary`, redeclared here for the same reason as
+ * `BusyInterval` above.
+ */
+export interface ConsultationSummary {
+  id: string;
+  patientId: string;
+  /** Null only while an instant request is still searching for a doctor. */
+  doctorId: string | null;
+  status: ConsultationStatus;
+}
+
+/** A booking as any caller outside this module sees it. No `holdExpiresAt` — the hold is this module's internal mechanism, not a fact other modules act on. */
+export interface BookingView {
+  id: string;
+  referenceCode: string;
+  patientId: string;
+  doctorId: string | null;
+  specialtyId: string;
+  concernId: string | null;
+  mode: ConsultationMode;
+  status: ConsultationStatus;
+  scheduledStartAt: Date | null;
+  durationMinutes: number;
+  intakeAnswers: unknown;
+  rescheduledFromConsultationId: string | null;
+  cancelledAt: Date | null;
+  cancelledByParty: Party | null;
+  cancellationReason: string | null;
+  createdAt: Date;
+}
+
+/**
+ * Booking's public surface. Deliberately shaped around the consumers that
+ * ACTUALLY EXIST or are already stubbed waiting for it, and nothing more —
+ * the same restraint `catalogue.contract.ts`/`availability.contract.ts`/
+ * `document.contract.ts` apply.
+ *
+ * ── The two placeholders this closes ───────────────────────────────────────
+ *
+ * 1. `availability`'s `BUSY_INTERVAL_PROVIDER`, currently bound to the
+ *    placeholder `ConsultationBusyIntervalProvider`. `getBusyIntervals` +
+ *    `getBusyIntervalsForMany` below cover `BusyIntervalProvider` in full.
+ *    The batch form is OPTIONAL in M-07's interface but implemented here on
+ *    purpose — its own doc comment says "Implement it — the fallback is a
+ *    correctness guarantee, not a performance one."
+ *
+ * 2. `document`'s `CONSULTATION_LOOKUP_PROVIDER`, currently bound to the
+ *    placeholder `ConsultationLookupProvider`. `findById` +
+ *    `listConsultationIdsBetween` + `listConsultationIdsForPatient` below
+ *    cover `ConsultationLookupPort` in full.
+ *
+ * *** THIS MODULE DOES NOT REBIND EITHER TOKEN. *** Both stay pointed at
+ * their in-module placeholders here. The COORDINATOR rebinds them post-merge
+ * — deliberately, to avoid a circular-import surprise (`AvailabilityModule`
+ * already imports `DoctorModule`, and `BookingModule` imports
+ * `AvailabilityModule`; binding `BUSY_INTERVAL_PROVIDER` to `BookingFacade`
+ * from inside `availability.module.ts` closes that loop) landing in three
+ * parallel worktrees at once. Nothing breaks in the meantime: the
+ * placeholders read the same table this module writes, so they are correct,
+ * just not routed through the facade.
+ *
+ * ── What M-13 (Instant Consult) will need ──────────────────────────────────
+ *
+ * `createInstantBooking` and `assignDoctor` exist for M-13 and are the ONLY
+ * instant-consult surface here. This module creates the consultation row for
+ * `mode: 'instant'` and can attach a doctor to it once M-13 has chosen one.
+ * It owns NONE of the routing: no `instant_consultancy` rows, no acceptance
+ * window, no timeout, no re-routing, no seven doctor states — `docs/MODULES.
+ * md` assigns every one of those to M-13.
+ */
+export interface BookingContract {
+  /* ── For `availability`'s BUSY_INTERVAL_PROVIDER ───────────────────────── */
+
+  /** Every busy interval for `doctorId` overlapping `[fromUtc, toUtc)`. Only slot-occupying statuses count; `cancelled`/`no_show`/`expired` are free. */
+  getBusyIntervals(doctorId: string, fromUtc: Date, toUtc: Date): Promise<BusyInterval[]>;
+
+  /** The batch form — one entry per requested doctor id, including doctors with nothing booked. */
+  getBusyIntervalsForMany(doctorIds: readonly string[], fromUtc: Date, toUtc: Date): Promise<DoctorBusyIntervals[]>;
+
+  /* ── For `document`'s CONSULTATION_LOOKUP_PROVIDER ─────────────────────── */
+
+  /** One consultation by id, or `null`. Never throws. No ownership check — a trusted module-to-module read; the CALLER authorizes. */
+  findById(consultationId: string): Promise<ConsultationSummary | null>;
+
+  /** Every consultation id shared by this doctor and patient, ANY status. Empty array, never a throw. */
+  listConsultationIdsBetween(doctorId: string, patientId: string): Promise<string[]>;
+
+  /** Every consultation id for one patient, any status/doctor. Empty array, never a throw. */
+  listConsultationIdsForPatient(patientId: string): Promise<string[]>;
+
+  /* ── General reads other modules will need ─────────────────────────────── */
+
+  /** The full booking view by id, or `null`. For M-12/M-14/M-15/M-19, which each hang their own record off a consultation id. */
+  getBooking(consultationId: string): Promise<BookingView | null>;
+
+  /* ── For M-13 (Instant Consult) ────────────────────────────────────────── */
+
+  /**
+   * Creates a `mode: 'instant'` consultation with NO doctor assigned and no
+   * slot — the row M-13 then routes. Returns it in `pending_payment` with a
+   * live hold, exactly like a scheduled booking, so the payment path is
+   * mode-agnostic. Note FR-10.2 orders the instant flow request -> accept ->
+   * pay, so M-13 may choose to assign a doctor before the payment settles;
+   * both orders work against this row.
+   */
+  createInstantBooking(input: {
+    patientId: string;
+    specialtyId: string;
+    concernId?: string | null;
+    intakeAnswers?: unknown;
+  }): Promise<BookingView>;
+
+  /**
+   * Attaches the doctor M-13's routing selected. Refuses unless the
+   * consultation is instant-mode and currently unassigned, and enforces that
+   * the doctor practises the booked specialty (the
+   * `consultations_doctor_specialty_fk` composite FK). Does NOT touch
+   * `instant_consultancy` — that table is M-13's.
+   */
+  assignDoctor(consultationId: string, doctorId: string): Promise<BookingView>;
+}
