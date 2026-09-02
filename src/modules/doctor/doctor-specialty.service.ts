@@ -54,7 +54,16 @@ export class DoctorSpecialtyService {
         ? await this.repo.setPrimaryFlag(existing.id, wantPrimary, tx)
         : await this.repo.insert(doctorId, dto.specialtyId, wantPrimary, tx);
       if (!row) {
-        throw doctorNotFound();
+        // The doctor_specialties JUNCTION ROW vanished mid-transaction (e.g.
+        // a concurrent `remove` deleted the row `setPrimaryFlag` targeted, or
+        // the just-inserted row was concurrently removed before `insert`'s
+        // `RETURNING` was read) — a genuine race, not the doctor itself
+        // disappearing. `doctorNotFound()` would be misleading here; the
+        // doctor row is confirmed to exist above.
+        throw new NotFoundException({
+          code: DOCTOR_ERROR_CODES.DOCTOR_SPECIALTY_NOT_FOUND,
+          message: 'The doctor-specialty assignment was not found — it may have been removed concurrently.',
+        });
       }
 
       await this.audit.write(

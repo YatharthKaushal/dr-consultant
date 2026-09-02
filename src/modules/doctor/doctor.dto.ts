@@ -1,4 +1,4 @@
-import { IsArray, IsIn, IsOptional, IsString, Length } from 'class-validator';
+import { ArrayMaxSize, IsArray, IsIn, IsOptional, IsString, Length } from 'class-validator';
 import { DOCTOR_DOCUMENT_TYPES, type DoctorDocumentType } from '../../schema/enums.schema';
 
 /**
@@ -16,7 +16,9 @@ export class UpdateOwnDoctorProfileDto {
 
   @IsOptional()
   @IsArray()
+  @ArrayMaxSize(20)
   @IsString({ each: true })
+  @Length(1, 40, { each: true })
   languages?: string[];
 }
 

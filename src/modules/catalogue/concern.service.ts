@@ -1,5 +1,6 @@
 import { ConflictException, Injectable, NotFoundException } from '@nestjs/common';
 import { AuditService } from '../../shared/audit/audit.service';
+import { isUniqueConstraintViolation } from '../../shared/errors/postgres-error.util';
 import type { CreateConcernDto, UpdateConcernDto, UpdateConcernMappingDto } from './concern-admin.dto';
 import { CATALOGUE_AUDIT_ENTITY_TYPES, CATALOGUE_ERROR_CODES } from './catalogue.constants';
 import type { PublicConcern } from './catalogue.contract';
@@ -56,14 +57,30 @@ export class ConcernService {
       });
     }
 
-    const concern = await this.repo.create({
-      specialtyId: dto.specialtyId,
-      code: dto.code,
-      name: dto.name,
-      matchPhrases: dto.matchPhrases,
-      matchWeight: dto.matchWeight,
-      isActive: dto.isActive,
-    });
+    let concern: ConcernRow;
+    try {
+      concern = await this.repo.create({
+        specialtyId: dto.specialtyId,
+        code: dto.code,
+        name: dto.name,
+        matchPhrases: dto.matchPhrases,
+        matchWeight: dto.matchWeight,
+        isActive: dto.isActive,
+      });
+    } catch (error) {
+      // Safety net for the check-then-insert race: two concurrent callers
+      // can both pass the `findBySpecialtyAndCode` check above before either
+      // inserts, so the second insert hits the `concerns`
+      // (specialtyId, code) unique index instead. Converts that raw driver
+      // error into the same 409 the sequential check already throws.
+      if (isUniqueConstraintViolation(error)) {
+        throw new ConflictException({
+          code: CATALOGUE_ERROR_CODES.CONCERN_CODE_TAKEN,
+          message: 'A concern with this code already exists under this specialty.',
+        });
+      }
+      throw error;
+    }
 
     await this.audit.write({
       actorType: 'admin',
@@ -110,7 +127,23 @@ export class ConcernService {
     }
 
     const before = this.extractBefore(concern, fields);
-    const updated = await this.repo.updateGeneralFields(id, fields);
+    let updated: ConcernRow | null;
+    try {
+      updated = await this.repo.updateGeneralFields(id, fields);
+    } catch (error) {
+      // Safety net for the check-then-update race: two concurrent callers
+      // can both pass the `findBySpecialtyAndCode` check above before
+      // either writes, so the second update hits the `concerns`
+      // (specialtyId, code) unique index instead. Converts that raw driver
+      // error into the same 409 the sequential check already throws.
+      if (isUniqueConstraintViolation(error)) {
+        throw new ConflictException({
+          code: CATALOGUE_ERROR_CODES.CONCERN_CODE_TAKEN,
+          message: 'A concern with this code already exists under the target specialty.',
+        });
+      }
+      throw error;
+    }
     if (!updated) throw concernNotFound();
 
     await this.audit.write({

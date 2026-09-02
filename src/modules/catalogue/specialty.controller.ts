@@ -1,6 +1,7 @@
 import { Controller, Get, Param } from '@nestjs/common';
 import { AccountType, CurrentUser } from '../../shared/auth/auth.decorator';
 import type { AuthContext } from '../../shared/auth/auth.types';
+import { createUuidValidationPipe } from '../../shared/errors/uuid-param.pipe';
 import { SpecialtyService } from './specialty.service';
 
 /**
@@ -22,7 +23,7 @@ export class SpecialtyController {
 
   /** Visible when active, or when the caller is an admin. 404 (never 403) otherwise — see `specialty.service.ts#getByIdForCaller`. */
   @Get(':id')
-  getById(@CurrentUser() auth: AuthContext, @Param('id') id: string) {
+  getById(@CurrentUser() auth: AuthContext, @Param('id', createUuidValidationPipe('id')) id: string) {
     return this.service.getByIdForCaller(id, auth);
   }
 }

@@ -1,4 +1,4 @@
-import { IsArray, IsBoolean, IsInt, IsOptional, IsString, IsUUID, Length, Max, Min } from 'class-validator';
+import { ArrayMaxSize, IsArray, IsBoolean, IsInt, IsOptional, IsString, IsUUID, Length, Max, Min } from 'class-validator';
 
 export class CreateConcernDto {
   @IsUUID()
@@ -15,7 +15,9 @@ export class CreateConcernDto {
 
   @IsOptional()
   @IsArray()
+  @ArrayMaxSize(30)
   @IsString({ each: true })
+  @Length(1, 120, { each: true })
   matchPhrases?: string[];
 
   /** `smallint` column — bounded to its Postgres range. */
@@ -66,7 +68,9 @@ export class UpdateConcernDto {
 export class UpdateConcernMappingDto {
   @IsOptional()
   @IsArray()
+  @ArrayMaxSize(30)
   @IsString({ each: true })
+  @Length(1, 120, { each: true })
   matchPhrases?: string[];
 
   @IsOptional()
