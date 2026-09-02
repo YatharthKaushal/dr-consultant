@@ -1,6 +1,6 @@
 import type { ZodSchema } from 'zod';
 import type { PublicConcern, PublicSpecialty } from '../../catalogue/catalogue.contract';
-import type { PublicDoctorProfile } from '../../doctor/doctor.contract';
+import type { ListedDoctorSummary } from '../../doctor/doctor.contract';
 
 /* -------------------------------------------------------------------------- */
 /* The tool interface                                                          */
@@ -95,6 +95,18 @@ export interface ListListedDoctorsFilter {
   limit?: number;
 }
 
+/*
+ * NOTE ON THIS FILTER'S SHAPE (M-09 merge).
+ *
+ * `DoctorFacade.listListedDoctors` takes the PLURAL `ListedDoctorFilter`
+ * (`specialtyIds[]`/`languages[]`, a decimal-string `maxFeeInr`, and required
+ * `limit`/`offset`). This singular shape is kept deliberately as the
+ * AGENT-FACING one: a model filling a tool call reasons about "a psychiatrist
+ * who speaks Hindi", not about arrays and page offsets, and every field here
+ * maps onto the richer one without loss. `doctor-tool.adapter.ts` does that
+ * translation in one place — which is exactly what the port is for.
+ */
+
 /**
  * The slice of `CatalogueFacade` these tools need.
  *
@@ -117,5 +129,5 @@ export interface CatalogueToolPort {
  * read at all in this worktree's checkout.
  */
 export interface DoctorToolPort {
-  listListedDoctors(filter: ListListedDoctorsFilter): Promise<PublicDoctorProfile[]>;
+  listListedDoctors(filter: ListListedDoctorsFilter): Promise<ListedDoctorSummary[]>;
 }

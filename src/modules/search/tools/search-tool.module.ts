@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { CatalogueModule } from '../../catalogue/catalogue.module';
 import { DoctorModule } from '../../doctor/doctor.module';
+import { SearchModule } from '../search.module';
 import { CatalogueToolAdapter } from './catalogue-tool.adapter';
 import { DiscoverCareTool } from './discover-care.tool';
 import { DoctorToolAdapter } from './doctor-tool.adapter';
@@ -11,7 +12,7 @@ import { ListDoctorsTool } from './list-doctors.tool';
 import { ListServiceCatalogueTool } from './list-service-catalogue.tool';
 import { AGENT_TOOLS, CATALOGUE_TOOL_PORT, DISCOVERY_PORT, DOCTOR_TOOL_PORT } from './search-tool.constants';
 import { ToolRegistry } from './search-tool.registry';
-import { UnavailableDiscoveryProvider } from './unavailable-discovery.provider';
+import { SearchDiscoveryProvider } from './search-discovery.provider';
 
 /**
  * THE ONE REGISTRATION LINE.
@@ -49,12 +50,19 @@ const TOOL_PROVIDERS = [
  * Modules are read ONLY through those facades (`backend/README.md` §2); no
  * tool here touches `specialties`, `concerns` or `doctors` directly.
  *
- * DISCOVERY_PORT is bound to the placeholder `UnavailableDiscoveryProvider`.
- * POST-MERGE: rebind that single provider entry to the M-09 pipeline's own
- * `DiscoveryPort` implementation. That is the whole integration step.
+ * `DISCOVERY_PORT` is bound to `SearchDiscoveryProvider`, which delegates to
+ * the real M-09 pipeline through `SearchFacade` (M-09 merge). That adapter
+ * narrows the patient-app response to the agent-facing union — see its own
+ * doc comment for what is deliberately not forwarded, and why the crisis
+ * branch cannot carry routing data.
+ *
+ * `SearchModule` is a real import for that facade; it does not import this
+ * module back, so there is no cycle. `UnavailableDiscoveryProvider` stays in
+ * the tree as the null-object to rebind here if this surface ever needs to be
+ * served without the pipeline.
  */
 @Module({
-  imports: [CatalogueModule, DoctorModule],
+  imports: [CatalogueModule, DoctorModule, SearchModule],
   providers: [
     ...TOOL_PROVIDERS,
     {
@@ -66,7 +74,7 @@ const TOOL_PROVIDERS = [
     DoctorToolAdapter,
     { provide: CATALOGUE_TOOL_PORT, useExisting: CatalogueToolAdapter },
     { provide: DOCTOR_TOOL_PORT, useExisting: DoctorToolAdapter },
-    { provide: DISCOVERY_PORT, useClass: UnavailableDiscoveryProvider },
+    { provide: DISCOVERY_PORT, useClass: SearchDiscoveryProvider },
     ToolRegistry,
     LangChainToolAdapter,
   ],

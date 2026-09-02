@@ -1,4 +1,6 @@
 import { Module } from '@nestjs/common';
+import { AiFacade } from '../ai/ai.facade';
+import { AiModule } from '../ai/ai.module';
 import { AvailabilityModule } from '../availability/availability.module';
 import { CatalogueModule } from '../catalogue/catalogue.module';
 import { DoctorModule } from '../doctor/doctor.module';
@@ -9,7 +11,6 @@ import { GuidedIntakeService } from './guided-intake.service';
 import { QueryInterpreterService } from './query-interpreter.service';
 import { ResponseValidatorService } from './response-validator.service';
 import { SearchAdminController } from './search-admin.controller';
-import { SearchAiNullProvider } from './search-ai-null.provider';
 import { SearchConfigRepository } from './search-config.repository';
 import { SearchConfigService } from './search-config.service';
 import { SearchController } from './search.controller';
@@ -31,27 +32,19 @@ import { SEARCH_AI_PORT } from './search.constants';
  * — same as the three modules above.
  *
  * ---------------------------------------------------------------------------
- * *** POST-MERGE WIRING — THE COORDINATOR'S ONE JOB IN THIS FILE ***
+ * `SEARCH_AI_PORT` is bound to `AiFacade` (M-09 merge). `AiFacade` satisfies
+ * `SearchAiPort` structurally (see `search-ai.contract.ts`) — no adapter, no
+ * cast — so a signature drift on either side surfaces here as a `tsc` error
+ * rather than a runtime surprise.
  *
- * `SEARCH_AI_PORT` is currently bound to `SearchAiNullProvider`, a
- * null-object that reports unavailable, so this module is fully functional
- * with no AI module present (every search is served by the deterministic
- * matcher). This mirrors `availability.module.ts`, which binds
- * `BUSY_INTERVAL_PROVIDER` to a placeholder until M-11 exists.
- *
- * Once `modules/ai` is merged, make exactly these two changes:
- *
- *     imports:   [CatalogueModule, DoctorModule, AvailabilityModule, AiModule]
- *     providers: [ ... , { provide: SEARCH_AI_PORT, useExisting: AiFacade } ]
- *
- * and drop `SearchAiNullProvider` from `providers` and its import. `AiFacade`
- * satisfies `SearchAiPort` structurally (see `search-ai.contract.ts`), so no
- * adapter and no cast is needed, and a signature drift on either side
- * surfaces here as a `tsc` error rather than a runtime surprise. Nothing else
- * in this module — and none of its tests — changes.
+ * `SearchAiNullProvider` remains in the tree, unbound: it is the null-object
+ * this module was built and tested against, and it is what you rebind here to
+ * take the LLM out of the request path at the DI level. That is a harder
+ * kill-switch than the `search.ai_enabled` config flag, which is the one an
+ * admin uses day to day.
  */
 @Module({
-  imports: [CatalogueModule, DoctorModule, AvailabilityModule],
+  imports: [CatalogueModule, DoctorModule, AvailabilityModule, AiModule],
   controllers: [SearchController, SearchAdminController],
   providers: [
     SearchRepository,
@@ -64,7 +57,7 @@ import { SEARCH_AI_PORT } from './search.constants';
     QueryInterpreterService,
     SearchService,
     GuidedIntakeService,
-    { provide: SEARCH_AI_PORT, useClass: SearchAiNullProvider },
+    { provide: SEARCH_AI_PORT, useExisting: AiFacade },
     SearchFacade,
   ],
   exports: [SearchFacade],
