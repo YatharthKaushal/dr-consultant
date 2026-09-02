@@ -12,6 +12,7 @@ function multipartFile(
     mimetype: string;
     fields: Record<string, unknown>;
     toBufferError: unknown;
+    truncated: boolean;
   }> = {},
 ) {
   const buffer = overrides.buffer ?? Buffer.from('file-bytes');
@@ -19,6 +20,10 @@ function multipartFile(
     filename: overrides.filename ?? 'photo.jpg',
     mimetype: overrides.mimetype ?? 'image/jpeg',
     fields: overrides.fields ?? {},
+    // The underlying busboy stream. `truncated` is what the plugin sets when
+    // `limits.fileSize` is hit — see the util's own comment on why reading it
+    // ourselves is load-bearing.
+    file: { truncated: overrides.truncated ?? false },
     toBuffer: async () => {
       if (overrides.toBufferError) throw overrides.toBufferError;
       return buffer;
@@ -99,6 +104,28 @@ describe('parseSingleFileRequest', () => {
     await expect(parseSingleFileRequest(request)).rejects.toMatchObject({
       status: 400,
       response: { code: 'MULTIPART_NO_FILE' },
+    });
+  });
+
+  describe('silent truncation — @fastify/multipart\'s own limit check races', () => {
+    it('rejects a TRUNCATED file even when toBuffer() resolved without throwing', async () => {
+      // The plugin only throws if busboy emits another chunk after setting
+      // `truncated`; when the stream ends on that chunk it returns a
+      // silently-truncated buffer instead. Reproduced live: the same 26MB
+      // upload returned 413 on one run and 201 Created on the next, storing a
+      // truncated credential document and reporting success.
+      const request = fakeRequest(async () => multipartFile({ truncated: true, buffer: Buffer.from('partial-content') }));
+
+      await expect(parseSingleFileRequest(request)).rejects.toMatchObject({
+        status: 413,
+        response: { code: 'MULTIPART_FILE_TOO_LARGE' },
+      });
+    });
+
+    it('still accepts a file that was not truncated', async () => {
+      const request = fakeRequest(async () => multipartFile({ truncated: false }));
+
+      await expect(parseSingleFileRequest(request)).resolves.toMatchObject({ fileName: 'photo.jpg' });
     });
   });
 

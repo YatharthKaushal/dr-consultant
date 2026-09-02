@@ -1,5 +1,4 @@
-import { ArrayMaxSize, IsArray, IsIn, IsOptional, IsString, Length } from 'class-validator';
-import { DOCTOR_DOCUMENT_TYPES, type DoctorDocumentType } from '../../schema/enums.schema';
+import { ArrayMaxSize, IsArray, IsOptional, IsString, Length } from 'class-validator';
 
 /**
  * Self-editable fields ONLY (`PATCH /doctors/me`). Everything else on
@@ -22,20 +21,20 @@ export class UpdateOwnDoctorProfileDto {
   languages?: string[];
 }
 
-export class CreateDoctorDocumentDto {
-  @IsIn(DOCTOR_DOCUMENT_TYPES)
-  documentType!: DoctorDocumentType;
-
-  /**
-   * The object-store key the caller already has from elsewhere — this module
-   * owns the document METADATA/review workflow row, not the upload
-   * mechanism (M-10 doesn't exist yet).
-   */
-  @IsString()
-  @Length(1, 2048)
-  storageKey!: string;
-
-  @IsString()
-  @Length(1, 255)
-  fileName!: string;
-}
+/**
+ * `POST /doctors/me/documents` is a real `multipart/form-data` upload, not a
+ * JSON body — `documentType` arrives as a plain form field read off
+ * `parseSingleFileRequest`'s `fields` (`doctor.controller.ts`), validated in
+ * `doctor-document.service.ts#validateDocumentType` the same way
+ * `patient-file.service.ts#validateCategory` validates its own raw field.
+ * There is deliberately no DTO class here: a `class-validator`/`ValidationPipe`
+ * DTO binds to `@Body()`, and a multipart request's non-file fields never
+ * reach that pipe (`multipart-file.util.ts`'s own header comment).
+ *
+ * There used to be a `CreateDoctorDocumentDto` here that took a
+ * caller-supplied `storageKey` directly and trusted it as a real object-store
+ * key with zero verification — a placeholder from before `modules/storage`
+ * existed. Replaced outright (not kept as a legacy dual path — this is
+ * pre-launch code with nothing depending on the old shape): the server now
+ * mints `storageKey` itself from a real `StorageFacade.store()` call.
+ */

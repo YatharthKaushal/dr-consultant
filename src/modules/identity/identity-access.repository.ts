@@ -14,7 +14,7 @@ import type { Executor } from './identity.repository';
 /**
  * SQL for the RBAC+ABAC tables. `listEffectivePermissions` deliberately
  * runs as two plain SELECTs merged in application code rather than a single
- * hand-written SQL UNION — the working set is tiny (41 permissions, 6
+ * hand-written SQL UNION — the working set is tiny (52 permissions, 6
  * roles, a handful of admins), so the extra round trip is immaterial, and a
  * union query's exact drizzle-orm syntax is easy to get subtly wrong in a
  * way type-checking alone won't catch without a live database to verify
@@ -34,7 +34,7 @@ export class IdentityAccessRepository {
     return row !== undefined;
   }
 
-  /** The super_admin short-circuit: seeded with all 41 permissions, but also granted every permission unconditionally here, so a permission added between deploys can never lock the owner out before the seed re-runs. */
+  /** The super_admin short-circuit: seeded with all 52 permissions, but also granted every permission unconditionally here, so a permission added between deploys can never lock the owner out before the seed re-runs. */
   async listEffectivePermissions(adminId: string, executor: Executor = this.db): Promise<PermissionKey[]> {
     if (await this.holdsRoleCode(adminId, 'super_admin', executor)) {
       const all = await executor.select({ key: permissionsTable.key }).from(permissionsTable);
