@@ -1,4 +1,5 @@
 import { boolean, index, jsonb, pgTable, text, timestamp, uuid, varchar } from 'drizzle-orm/pg-core';
+import { consultationsTable } from './consultations.schema';
 import { riskCategoryEnum } from './enums.schema';
 
 /**
@@ -6,9 +7,12 @@ import { riskCategoryEnum } from './enums.schema';
  * either a medicine line (prescribing specialty) or the advice fields
  * (non-prescribing). The same transaction clears `doctors.blocked_by_consultation_id`.
  *
- * `clinical_records.consultation_id` is the FK target for `consultations.id`
- * (see `consultations.schema.ts`), so this file needs no reference back to
- * `consultations`.
+ * `consultation_id` references `consultations.id` and is UNIQUE, so the
+ * relationship is 1:1. Migration 0006 corrected this direction: it used to run
+ * backwards (`consultations.id -> clinical_records.consultation_id`) and
+ * non-deferrably, which meant a booking could not be inserted without first
+ * fabricating a clinical record — impossible, since `chief_complaint` and
+ * `risk_category` are NOT NULL and only exist AFTER the consult.
  *
  * There is no `has_clinical_doubt` flag — a doubt IS a `clarification_cases`
  * row with `source_consultation_id` set.
@@ -21,7 +25,10 @@ export const clinicalRecordsTable = pgTable(
   'clinical_records',
   {
     id: uuid('id').defaultRandom().primaryKey(),
-    consultationId: uuid('consultation_id').notNull().unique(),
+    consultationId: uuid('consultation_id')
+      .notNull()
+      .unique()
+      .references(() => consultationsTable.id),
     chiefComplaint: text('chief_complaint').notNull(),
     clinicalHistory: text('clinical_history'),
     /** Diagnosis or provisional diagnosis. */

@@ -11,7 +11,6 @@ import {
   varchar,
   type AnyPgColumn,
 } from 'drizzle-orm/pg-core';
-import { clinicalRecordsTable } from './clinical-records.schema';
 import { concernsTable } from './concerns.schema';
 // Forward reference for `doctor_id` — genuinely circular with doctors.schema.ts
 // (which references consultations.id via `blocked_by_consultation_id`).
@@ -22,10 +21,6 @@ import { doctorSpecialtiesTable } from './doctor-specialties.schema';
 import { consultationModeEnum, consultationStatusEnum, followupStatusEnum, partyEnum } from './enums.schema';
 import { followupPathwaysTable } from './followup-pathways.schema';
 import { patientsTable } from './patients.schema';
-// Only `consultations.id -> payments.consultation_id` exists (see below) —
-// payments.schema.ts has no FK back to this table, so this import is
-// one-directional, not circular.
-import { paymentsTable } from './payments.schema';
 import { specialtiesTable } from './specialties.schema';
 
 /**
@@ -34,10 +29,11 @@ import { specialtiesTable } from './specialties.schema';
  * for that party is what names the no-show. The follow-up window ends at
  * `followup_starts_on` plus the pinned pathway `duration_days`.
  *
- * `id` carries two FKs the *other* way round, exactly as `docs/erd.sql`
- * declares them — `payments.consultation_id` and `clinical_records.consultation_id`
- * are each UNIQUE NOT NULL, and it is `consultations.id` that references
- * them, not the reverse. See `foreignKey()` entries below.
+ * `payments` and `clinical_records` each reference THIS table via their own
+ * `consultation_id` (UNIQUE NOT NULL, so still strictly 1:1). `docs/erd.sql`
+ * declared that relationship inverted, and migration 0000 applied it
+ * non-deferrably — which made inserting a consultation impossible. Migration
+ * 0006 corrected the direction; see the note beside the index list below.
  *
  * Double-booking prevention and the partial index behind the
  * pending-documentation worklist are, per `docs/erd.sql`, added by hand in
@@ -106,16 +102,22 @@ export const consultationsTable = pgTable(
     index().on(table.followupStatus, table.followupStartsOn),
     index().on(table.holdExpiresAt),
     index().on(table.followupOfConsultationId),
-    foreignKey({
-      columns: [table.id],
-      foreignColumns: [paymentsTable.consultationId],
-      name: 'consultations_id_payments_consultation_id_fk',
-    }),
-    foreignKey({
-      columns: [table.id],
-      foreignColumns: [clinicalRecordsTable.consultationId],
-      name: 'consultations_id_clinical_records_consultation_id_fk',
-    }),
+    // NOTE (M-11): the two reverse FKs that used to live here —
+    // `consultations.id -> payments.consultation_id` and
+    // `-> clinical_records.consultation_id` — were REMOVED in migration 0006.
+    // They ran backwards and were non-deferrable, which made it impossible to
+    // insert a consultation at all: doing so required a `clinical_records` row
+    // to already exist, and that table demands `chief_complaint`/`risk_category`
+    // /`medicines` — clinical data that only exists AFTER the consult.
+    //
+    // They were trying to express "every consultation eventually has a payment
+    // and a clinical record". That is a LIFECYCLE invariant owned by the status
+    // machine, not an immediate referential one, and encoding it as an FK was
+    // the original modelling error. The relationship now runs the normal way:
+    // `payments.consultation_id` and `clinical_records.consultation_id` each
+    // reference this table and carry their own UNIQUE, which preserves 1:1 and
+    // adds the orphan protection that was genuinely missing before.
+    //
     // An assigned doctor must actually practise the specialty this
     // consultation was booked under. Vacuously satisfied while doctor_id is
     // still null during instant-request routing (MATCH SIMPLE); enforced

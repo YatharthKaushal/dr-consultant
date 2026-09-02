@@ -117,9 +117,39 @@ export const instantConsultancyOutcomeEnum = pgEnum(
   INSTANT_CONSULTANCY_OUTCOMES,
 );
 
-export const PAYMENT_STATUSES = ['created', 'pending', 'paid', 'failed', 'refunded'] as const;
+/**
+ * `partially_refunded` was added with the `refunds` table (M-12): once one
+ * payment can carry MANY refunds, "some but not all of it came back" became a
+ * representable state that `refunded` alone could not express.
+ *
+ * Ordering note: new values are appended, never inserted mid-list. Postgres
+ * enum values have an ordinal, and `ALTER TYPE ... ADD VALUE BEFORE` would
+ * renumber — appending keeps every existing row's stored ordinal stable.
+ */
+export const PAYMENT_STATUSES = [
+  'created',
+  'pending',
+  'paid',
+  'failed',
+  'refunded',
+  'partially_refunded',
+] as const;
 export type PaymentStatus = (typeof PAYMENT_STATUSES)[number];
 export const paymentStatusEnum = pgEnum('payment_status', PAYMENT_STATUSES);
+
+/**
+ * One refund's own lifecycle, distinct from the PAYMENT's status.
+ *
+ * `pending` = recorded by us, not yet sent to the gateway (an auto-refund
+ * awaiting its worker, or an admin-queued one awaiting approval).
+ * `processing` = the gateway accepted it and is settling.
+ * `processed` = the gateway confirmed it by webhook — the only state that
+ * means money actually moved.
+ * `failed` = the gateway rejected or reversed it; `failure_reason` says why.
+ */
+export const REFUND_STATUSES = ['pending', 'processing', 'processed', 'failed'] as const;
+export type RefundStatus = (typeof REFUND_STATUSES)[number];
+export const refundStatusEnum = pgEnum('refund_status', REFUND_STATUSES);
 
 export const RISK_CATEGORIES = ['low', 'moderate', 'high'] as const;
 export type RiskCategory = (typeof RISK_CATEGORIES)[number];

@@ -92,18 +92,14 @@ interface Fixtures {
  * Builds the minimum real row graph an upload-against-a-report-request needs.
  *
  * *** THE CONSULTATION INSERT ORDER IS NOT ARBITRARY. ***
- * `consultations` carries two REVERSE foreign keys — `consultations.id`
- * references `payments.consultation_id` AND `clinical_records.consultation_id`
- * — both non-deferrable, with no FK pointing the normal way. So a
- * `consultations` row cannot be inserted until stub `payments` and
- * `clinical_records` rows already exist carrying the id it is about to use,
- * which also means the consultation's UUID must be generated HERE rather than
- * left to `defaultRandom()`.
- *
- * This is a known schema defect, already logged as the first thing M-11
- * (booking) must fix by dropping both reverse FKs and adding proper forward
- * ones. The stub rows below are a WORKAROUND for that defect, not a model of
- * intended behaviour — do not copy them as "how bookings are made".
+ * A `consultations` row inserts on its own. It did not always: until
+ * migration 0006 two REVERSE, non-deferrable foreign keys ran from
+ * `consultations.id` to `payments.consultation_id` and
+ * `clinical_records.consultation_id`, so a booking could not exist until stub
+ * payment and clinical-record rows already carried its id — impossible in
+ * practice, since a clinical record needs `chief_complaint`/`risk_category`
+ * that only exist after the consult. This fixture used to carry that
+ * workaround; 0006 corrected the FK direction and it is gone.
  */
 async function seedFixtures(db: Database): Promise<Fixtures> {
   const runId = randomUUID().slice(0, 8);
@@ -129,21 +125,6 @@ async function seedFixtures(db: Database): Promise<Fixtures> {
     .returning({ id: doctorsTable.id });
 
   await db.insert(doctorSpecialtiesTable).values({ doctorId: doctor.id, specialtyId: specialty.id });
-
-  // The two stub rows the reverse FKs demand, before the consultation itself.
-  await db.insert(paymentsTable).values({
-    consultationId,
-    consultationFee: '500.00',
-    convenienceFeePct: '20.00',
-    convenienceFee: '100.00',
-    gstPct: '18.00',
-    gstAmount: '108.00',
-  });
-  await db.insert(clinicalRecordsTable).values({
-    consultationId,
-    chiefComplaint: 'Integration test fixture',
-    riskCategory: 'low',
-  });
 
   await db.insert(consultationsTable).values({
     id: consultationId,
@@ -176,9 +157,14 @@ async function teardown(db: Database, fixtures: Fixtures): Promise<void> {
   await db.delete(patientFilesTable).where(eq(patientFilesTable.patientId, fixtures.patientId));
   await db.delete(reportRequestsTable).where(eq(reportRequestsTable.consultationId, fixtures.consultationId));
   await db.execute(sql`delete from audit_log where actor_id = ${fixtures.patientId}`);
-  await db.delete(consultationsTable).where(eq(consultationsTable.id, fixtures.consultationId));
+  // `payments`/`clinical_records` are CHILDREN of `consultations` since
+  // migration 0006 flipped the FK direction, so they go first. This fixture no
+  // longer creates either, making both deletes no-ops — they stay as defensive
+  // cleanup for any test that later does, and in the order that will actually
+  // work when one does.
   await db.delete(clinicalRecordsTable).where(eq(clinicalRecordsTable.consultationId, fixtures.consultationId));
   await db.delete(paymentsTable).where(eq(paymentsTable.consultationId, fixtures.consultationId));
+  await db.delete(consultationsTable).where(eq(consultationsTable.id, fixtures.consultationId));
   await db.delete(doctorSpecialtiesTable).where(eq(doctorSpecialtiesTable.doctorId, fixtures.doctorId));
   await db.delete(doctorsTable).where(eq(doctorsTable.id, fixtures.doctorId));
   await db.delete(patientsTable).where(eq(patientsTable.id, fixtures.patientId));
