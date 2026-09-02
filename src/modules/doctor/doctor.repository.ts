@@ -125,7 +125,13 @@ export class DoctorRepository {
       const wanted = filter.languages.map((language) => language.trim().toLowerCase()).filter((language) => language.length > 0);
       if (wanted.length > 0) {
         conditions.push(
-          sql`exists (select 1 from jsonb_array_elements_text(${doctorsTable.languages}) as spoken(language) where lower(spoken.language) = any(${wanted}::text[]))`,
+          // `sql.param(wanted)` binds the whole list as ONE `text[]`
+          // parameter. Interpolating the array directly makes drizzle expand
+          // it into a parameter LIST, which renders as `any(($3, $4)::text[])`
+          // — a row constructor Postgres rejects, so any filter naming two or
+          // more languages failed with a syntax error while a single-language
+          // filter happened to work.
+          sql`exists (select 1 from jsonb_array_elements_text(${doctorsTable.languages}) as spoken(language) where lower(spoken.language) = any(${sql.param(wanted)}::text[]))`,
         );
       }
     }
