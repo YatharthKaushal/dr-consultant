@@ -43,12 +43,23 @@ describe('IdentityFacade', () => {
   });
 
   describe('revokeAllSessions', () => {
-    it('delegates to IdentityService.logoutAll with the same accountType/id', async () => {
+    it('delegates to IdentityService.logoutAll with the same accountType/id, no actor override by default', async () => {
       const { facade, identityService } = createDeps();
 
       await facade.revokeAllSessions('doctor', 'doctor-1');
 
-      expect(identityService.logoutAll).toHaveBeenCalledWith('doctor', 'doctor-1');
+      expect(identityService.logoutAll).toHaveBeenCalledWith('doctor', 'doctor-1', undefined);
+    });
+
+    it('passes an explicit actor override through, e.g. an admin suspending a doctor', async () => {
+      const { facade, identityService } = createDeps();
+
+      await facade.revokeAllSessions('doctor', 'doctor-1', { actorType: 'admin', actorId: 'admin-1' });
+
+      expect(identityService.logoutAll).toHaveBeenCalledWith('doctor', 'doctor-1', {
+        actorType: 'admin',
+        actorId: 'admin-1',
+      });
     });
   });
 
