@@ -375,6 +375,70 @@ describe('availability-slot.engine', () => {
       expect(result.every((s) => s.doctorId === 'doctor-xyz')).toBe(true);
     });
 
+    it('a custom_hours override on a day with NO weekly rule at all still produces slots (override does not depend on a base weekly rule existing)', () => {
+      // No weekly rule for Monday whatsoever — only a one-off override.
+      const rules = [customHours(MONDAY, '14:00', '15:00')];
+      const result = computeBookableSlots({
+        doctorId: DOCTOR_ID,
+        ...wideWindow(MONDAY),
+        now: ist(MONDAY, '00:00'),
+        rules,
+        schedulingParams: DEFAULT_PARAMS,
+        windowLimits: NO_NOTICE_WIDE_HORIZON,
+        busyIntervals: [],
+      });
+      expect(result).toEqual([{ doctorId: DOCTOR_ID, startsAt: ist(MONDAY, '14:00'), endsAt: ist(MONDAY, '14:30') }]);
+    });
+
+    it('a blocked rule for a date with NO weekly rule for that weekday is a no-op, not an error (nothing to block, nothing produced either way)', () => {
+      const rules = [fullDayBlock(MONDAY)]; // no weekly(1, ...) at all
+      const result = computeBookableSlots({
+        doctorId: DOCTOR_ID,
+        ...wideWindow(MONDAY),
+        now: ist(MONDAY, '00:00'),
+        rules,
+        schedulingParams: DEFAULT_PARAMS,
+        windowLimits: NO_NOTICE_WIDE_HORIZON,
+        busyIntervals: [],
+      });
+      expect(result).toEqual([]);
+    });
+
+    it('a duration longer than the entire working window produces zero slots cleanly (no hang, no error)', () => {
+      const rules = [weekly(1, '09:00', '09:20')]; // 20-minute window, 30-minute consult duration doesn't fit even once
+      const result = computeBookableSlots({
+        doctorId: DOCTOR_ID,
+        ...wideWindow(MONDAY),
+        now: ist(MONDAY, '00:00'),
+        rules,
+        schedulingParams: DEFAULT_PARAMS, // 30-min duration
+        windowLimits: NO_NOTICE_WIDE_HORIZON,
+        busyIntervals: [],
+      });
+      expect(result).toEqual([]);
+    });
+
+    it('correctly attributes slots to IST calendar days across a UTC-midnight boundary — an early-morning IST slot (whose UTC instant falls on the PREVIOUS UTC calendar date) is still attributed to the right IST weekday', () => {
+      // Tuesday 00:00-01:00 IST = Monday 18:30-19:30 UTC (IST is UTC+05:30, so early-IST-morning hours land on the
+      // previous UTC calendar date). Querying a UTC range that straddles this boundary must still produce the
+      // Tuesday-IST slot, proving day iteration keys off IST calendar dates, not UTC ones.
+      const rules = [weekly(2, '00:00', '01:00')]; // Tuesday
+      const result = computeBookableSlots({
+        doctorId: DOCTOR_ID,
+        fromUtc: ist(MONDAY, '23:30'),
+        toUtc: ist(TUESDAY, '02:00'),
+        now: ist(MONDAY, '00:00'),
+        rules,
+        schedulingParams: DEFAULT_PARAMS,
+        windowLimits: NO_NOTICE_WIDE_HORIZON,
+        busyIntervals: [],
+      });
+      expect(result).toEqual([{ doctorId: DOCTOR_ID, startsAt: ist(TUESDAY, '00:00'), endsAt: ist(TUESDAY, '00:30') }]);
+      // Sanity check that this genuinely exercises the UTC-day boundary: the slot's UTC calendar date is the day
+      // BEFORE its IST calendar date (Sept 7 UTC vs. Sept 8 IST).
+      expect(result[0]!.startsAt.getUTCDate()).toBe(7);
+    });
+
     it('excludes candidates outside the requested [fromUtc, toUtc) range even if the day iteration margin computes them', () => {
       const rules = [weekly(1, '09:00', '09:30')];
       const result = computeBookableSlots({

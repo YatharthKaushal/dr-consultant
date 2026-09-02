@@ -1,6 +1,7 @@
 import { BadRequestException, ConflictException, Inject, Injectable, NotFoundException } from '@nestjs/common';
+import { sql } from 'drizzle-orm';
 import { DATABASE } from '../../config/db/database.module';
-import type { Database } from '../../config/db/database.config';
+import type { Database, DatabaseTransaction } from '../../config/db/database.config';
 import type { DoctorAvailabilityRow } from '../../schema/doctor-availability.schema';
 import type { ActorType } from '../../schema/enums.schema';
 import { AuditService } from '../../shared/audit/audit.service';
@@ -120,20 +121,27 @@ export class AvailabilityRuleService {
   async addOverride(doctorId: string, actorType: ActorType, actorId: string, dto: OverrideRuleInput): Promise<DoctorAvailabilityRow> {
     this.assertTimeOrder(dto.startTime, dto.endTime);
 
-    const existing = await this.repo.listForRange(doctorId, dto.specificDate, dto.specificDate);
-    const sameDateOverrides = existing.filter((r) => r.ruleType === 'custom_hours' && r.specificDate === dto.specificDate);
-    this.assertNoOverlapForDate(dto, sameDateOverrides, 'An override for this date already exists and would overlap.');
+    return this.db.transaction(async (tx) => {
+      await this.lockDateGuard(tx, doctorId, dto.specificDate);
 
-    const row = await this.repo.addOverride(doctorId, dto);
-    await this.audit.write({
-      actorType,
-      actorId,
-      action: 'create',
-      entityType: AVAILABILITY_AUDIT_ENTITY_TYPES.OVERRIDE,
-      entityId: row.id,
-      metadata: { after: dto },
+      const existing = await this.repo.listForRange(doctorId, dto.specificDate, dto.specificDate, tx);
+      const sameDateOverrides = existing.filter((r) => r.ruleType === 'custom_hours' && r.specificDate === dto.specificDate);
+      this.assertNoOverlapForDate(dto, sameDateOverrides, 'An override for this date already exists and would overlap.');
+
+      const row = await this.repo.addOverride(doctorId, dto, tx);
+      await this.audit.write(
+        {
+          actorType,
+          actorId,
+          action: 'create',
+          entityType: AVAILABILITY_AUDIT_ENTITY_TYPES.OVERRIDE,
+          entityId: row.id,
+          metadata: { after: dto },
+        },
+        tx,
+      );
+      return row;
     });
-    return row;
   }
 
   async removeOverride(doctorId: string, actorType: ActorType, actorId: string, id: string): Promise<void> {
@@ -163,24 +171,31 @@ export class AvailabilityRuleService {
       this.assertTimeOrder(dto.startTime, dto.endTime);
     }
 
-    const existing = await this.repo.listForRange(doctorId, dto.specificDate, dto.specificDate);
-    const sameDateBlocks = existing.filter((r) => r.ruleType === 'blocked' && r.specificDate === dto.specificDate);
-    this.assertNoOverlapForDate(
-      { startTime: dto.startTime ?? null, endTime: dto.endTime ?? null },
-      sameDateBlocks,
-      'A block for this date already exists and would overlap.',
-    );
+    return this.db.transaction(async (tx) => {
+      await this.lockDateGuard(tx, doctorId, dto.specificDate);
 
-    const row = await this.repo.addBlock(doctorId, dto);
-    await this.audit.write({
-      actorType,
-      actorId,
-      action: 'create',
-      entityType: AVAILABILITY_AUDIT_ENTITY_TYPES.BLOCK,
-      entityId: row.id,
-      metadata: { after: dto },
+      const existing = await this.repo.listForRange(doctorId, dto.specificDate, dto.specificDate, tx);
+      const sameDateBlocks = existing.filter((r) => r.ruleType === 'blocked' && r.specificDate === dto.specificDate);
+      this.assertNoOverlapForDate(
+        { startTime: dto.startTime ?? null, endTime: dto.endTime ?? null },
+        sameDateBlocks,
+        'A block for this date already exists and would overlap.',
+      );
+
+      const row = await this.repo.addBlock(doctorId, dto, tx);
+      await this.audit.write(
+        {
+          actorType,
+          actorId,
+          action: 'create',
+          entityType: AVAILABILITY_AUDIT_ENTITY_TYPES.BLOCK,
+          entityId: row.id,
+          metadata: { after: dto },
+        },
+        tx,
+      );
+      return row;
     });
-    return row;
   }
 
   async removeBlock(doctorId: string, actorType: ActorType, actorId: string, id: string): Promise<void> {
@@ -203,6 +218,23 @@ export class AvailabilityRuleService {
   /* ---------------------------------------------------------------------- */
   /* Shared validation                                                        */
   /* ---------------------------------------------------------------------- */
+
+  /**
+   * Serializes `addOverride`/`addBlock` for one `(doctorId, specificDate)`
+   * pair against a single named advisory lock for the lifetime of the
+   * caller's transaction — same `pg_advisory_xact_lock` pattern
+   * `identity-access.repository.ts#lockSuperAdminGuard` uses. Without this,
+   * two concurrent requests adding an override/block for the SAME date could
+   * each read "nothing here yet, no overlap" under READ COMMITTED before
+   * either commits, and both insert — silently producing two overlapping
+   * `doctor_availability` rows despite `assertNoOverlapForDate`'s check, since
+   * there is no DB constraint (unique or exclusion) backing overlap-freedom
+   * here (see the class doc comment). Call BEFORE reading existing rows for
+   * that date, inside the same transaction as the insert.
+   */
+  private async lockDateGuard(executor: DatabaseTransaction, doctorId: string, specificDate: string): Promise<void> {
+    await executor.execute(sql`select pg_advisory_xact_lock(hashtext(${`availability.date_guard:${doctorId}:${specificDate}`}))`);
+  }
 
   private assertTimeOrder(startTime: string, endTime: string): void {
     if (parseTimeToMinutes(endTime) <= parseTimeToMinutes(startTime)) {
