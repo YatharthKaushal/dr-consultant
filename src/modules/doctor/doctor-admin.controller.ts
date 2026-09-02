@@ -2,6 +2,7 @@ import { Body, Controller, Delete, Get, HttpCode, HttpStatus, Param, Patch, Post
 import { AccountType, CurrentUser, RequirePermission } from '../../shared/auth/auth.decorator';
 import type { AuthContext } from '../../shared/auth/auth.types';
 import { PERMISSIONS } from '../../shared/auth/permission.catalog';
+import { createUuidValidationPipe } from '../../shared/errors/uuid-param.pipe';
 import {
   AssignDoctorSpecialtyDto,
   CreateDoctorDto,
@@ -38,7 +39,7 @@ export class DoctorAdminController {
 
   @Get(':id')
   @RequirePermission(PERMISSIONS.DOCTORS_READ)
-  getDetail(@Param('id') id: string) {
+  getDetail(@Param('id', createUuidValidationPipe('id')) id: string) {
     return this.doctorService.adminGetDetail(id);
   }
 
@@ -50,37 +51,53 @@ export class DoctorAdminController {
 
   @Patch(':id')
   @RequirePermission(PERMISSIONS.DOCTORS_UPDATE)
-  update(@CurrentUser() auth: AuthContext, @Param('id') id: string, @Body() dto: UpdateDoctorDto) {
+  update(@CurrentUser() auth: AuthContext, @Param('id', createUuidValidationPipe('id')) id: string, @Body() dto: UpdateDoctorDto) {
     return this.doctorService.adminUpdateProfileFields(auth.accountId, id, dto);
   }
 
   @Patch(':id/verification')
   @RequirePermission(PERMISSIONS.DOCTORS_VERIFY)
-  setVerification(@CurrentUser() auth: AuthContext, @Param('id') id: string, @Body() dto: UpdateDoctorVerificationDto) {
+  setVerification(
+    @CurrentUser() auth: AuthContext,
+    @Param('id', createUuidValidationPipe('id')) id: string,
+    @Body() dto: UpdateDoctorVerificationDto,
+  ) {
     return this.verificationService.setVerificationStatus(auth.accountId, id, dto);
   }
 
   @Patch(':id/listing')
   @RequirePermission(PERMISSIONS.DOCTORS_MANAGE_LISTING)
-  setListing(@CurrentUser() auth: AuthContext, @Param('id') id: string, @Body() dto: UpdateDoctorListingDto) {
+  setListing(
+    @CurrentUser() auth: AuthContext,
+    @Param('id', createUuidValidationPipe('id')) id: string,
+    @Body() dto: UpdateDoctorListingDto,
+  ) {
     return this.verificationService.setListing(auth.accountId, id, dto);
   }
 
   @Patch(':id/fee')
   @RequirePermission(PERMISSIONS.DOCTORS_MANAGE_FEE)
-  setFee(@CurrentUser() auth: AuthContext, @Param('id') id: string, @Body() dto: UpdateDoctorFeeDto) {
+  setFee(@CurrentUser() auth: AuthContext, @Param('id', createUuidValidationPipe('id')) id: string, @Body() dto: UpdateDoctorFeeDto) {
     return this.verificationService.setFee(auth.accountId, id, dto);
   }
 
   @Patch(':id/expert-role')
   @RequirePermission(PERMISSIONS.DOCTORS_MANAGE_EXPERT_ROLE)
-  setExpertRole(@CurrentUser() auth: AuthContext, @Param('id') id: string, @Body() dto: UpdateDoctorExpertRoleDto) {
+  setExpertRole(
+    @CurrentUser() auth: AuthContext,
+    @Param('id', createUuidValidationPipe('id')) id: string,
+    @Body() dto: UpdateDoctorExpertRoleDto,
+  ) {
     return this.verificationService.setExpertRole(auth.accountId, id, dto);
   }
 
   @Post(':id/specialties')
   @RequirePermission(PERMISSIONS.DOCTORS_UPDATE)
-  assignSpecialty(@CurrentUser() auth: AuthContext, @Param('id') id: string, @Body() dto: AssignDoctorSpecialtyDto) {
+  assignSpecialty(
+    @CurrentUser() auth: AuthContext,
+    @Param('id', createUuidValidationPipe('id')) id: string,
+    @Body() dto: AssignDoctorSpecialtyDto,
+  ) {
     return this.specialtyService.assign(auth.accountId, id, dto);
   }
 
@@ -89,15 +106,15 @@ export class DoctorAdminController {
   @HttpCode(HttpStatus.NO_CONTENT)
   async removeSpecialty(
     @CurrentUser() auth: AuthContext,
-    @Param('id') id: string,
-    @Param('specialtyId') specialtyId: string,
+    @Param('id', createUuidValidationPipe('id')) id: string,
+    @Param('specialtyId', createUuidValidationPipe('specialtyId')) specialtyId: string,
   ): Promise<void> {
     await this.specialtyService.remove(auth.accountId, id, specialtyId);
   }
 
   @Get(':id/documents')
   @RequirePermission(PERMISSIONS.DOCTORS_READ)
-  listDocuments(@Param('id') id: string) {
+  listDocuments(@Param('id', createUuidValidationPipe('id')) id: string) {
     return this.documentService.listForAdmin(id);
   }
 
@@ -105,8 +122,8 @@ export class DoctorAdminController {
   @RequirePermission(PERMISSIONS.DOCTORS_VERIFY)
   reviewDocument(
     @CurrentUser() auth: AuthContext,
-    @Param('id') id: string,
-    @Param('documentId') documentId: string,
+    @Param('id', createUuidValidationPipe('id')) id: string,
+    @Param('documentId', createUuidValidationPipe('documentId')) documentId: string,
     @Body() dto: ReviewDoctorDocumentDto,
   ) {
     return this.documentService.review(auth.accountId, id, documentId, dto);
@@ -114,7 +131,7 @@ export class DoctorAdminController {
 
   @Get(':id/reliability')
   @RequirePermission(PERMISSIONS.GOVERNANCE_READ_QUALITY)
-  getReliability(@Param('id') id: string) {
+  getReliability(@Param('id', createUuidValidationPipe('id')) id: string) {
     return this.reliabilityService.getMetrics(id);
   }
 }

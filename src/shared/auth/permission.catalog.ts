@@ -42,6 +42,9 @@ export const PERMISSIONS = {
   SPECIALTIES_MANAGE: 'specialties.manage',
   SPECIALTIES_MANAGE_CLINICAL_TEMPLATES: 'specialties.manage_clinical_templates',
 
+  CONCERNS_READ: 'concerns.read',
+  CONCERNS_MANAGE: 'concerns.manage',
+
   APPOINTMENTS_READ: 'appointments.read',
   APPOINTMENTS_MANAGE: 'appointments.manage',
 
@@ -112,6 +115,8 @@ const DESCRIPTIONS: Record<PermissionKey, string> = {
   [PERMISSIONS.SPECIALTIES_MANAGE]: 'Add or edit specialties and their intake forms.',
   [PERMISSIONS.SPECIALTIES_MANAGE_CLINICAL_TEMPLATES]:
     'Edit a specialty’s default prescription/advice templates.',
+  [PERMISSIONS.CONCERNS_READ]: 'View the concern taxonomy under each specialty.',
+  [PERMISSIONS.CONCERNS_MANAGE]: 'Add or edit concerns in the taxonomy.',
   [PERMISSIONS.APPOINTMENTS_READ]: 'View scheduled and instant consultations.',
   [PERMISSIONS.APPOINTMENTS_MANAGE]: 'Cancel, reschedule or mark a consultation no-show.',
   [PERMISSIONS.AVAILABILITY_READ]: "View a doctor's schedule, blocked dates and bookable slots.",
@@ -209,6 +214,7 @@ export const ROLE_PERMISSIONS: Record<RoleCode, readonly PermissionKey[]> = {
     PERMISSIONS.DOCTORS_UPDATE,
     PERMISSIONS.DOCTORS_MANAGE_LISTING,
     PERMISSIONS.SPECIALTIES_READ,
+    PERMISSIONS.CONCERNS_READ,
     PERMISSIONS.APPOINTMENTS_READ,
     PERMISSIONS.APPOINTMENTS_MANAGE,
     PERMISSIONS.AVAILABILITY_READ,
@@ -234,6 +240,8 @@ export const ROLE_PERMISSIONS: Record<RoleCode, readonly PermissionKey[]> = {
     PERMISSIONS.SPECIALTIES_READ,
     PERMISSIONS.SPECIALTIES_MANAGE,
     PERMISSIONS.SPECIALTIES_MANAGE_CLINICAL_TEMPLATES,
+    PERMISSIONS.CONCERNS_READ,
+    PERMISSIONS.CONCERNS_MANAGE,
     PERMISSIONS.APPOINTMENTS_READ,
     PERMISSIONS.CLINICAL_READ_RECORDS,
     PERMISSIONS.GOVERNANCE_READ_QUEUES,
@@ -281,6 +289,7 @@ export const ROLE_PERMISSIONS: Record<RoleCode, readonly PermissionKey[]> = {
 
   content: [
     PERMISSIONS.SPECIALTIES_READ,
+    PERMISSIONS.CONCERNS_READ,
     PERMISSIONS.CONTENT_READ,
     PERMISSIONS.CONTENT_AUTHOR,
     PERMISSIONS.CONTENT_MANAGE_NOTIFICATION_TEMPLATES,

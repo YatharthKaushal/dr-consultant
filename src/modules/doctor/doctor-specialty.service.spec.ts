@@ -140,28 +140,30 @@ describe('DoctorSpecialtyService', () => {
       expect(repo.clearPrimary).not.toHaveBeenCalled();
     });
 
-    it('throws doctorNotFound if insert unexpectedly returns no row (race)', async () => {
+    it('throws DOCTOR_SPECIALTY_NOT_FOUND (not DOCTOR_NOT_FOUND) if insert unexpectedly returns no row (race)', async () => {
       const { service, doctorRepo, repo, catalogue } = createDeps();
       doctorRepo.findById.mockResolvedValue(baseDoctor());
       catalogue.getSpecialtyById.mockResolvedValue(baseSpecialty());
       repo.findByDoctorAndSpecialty.mockResolvedValue(null);
       repo.insert.mockResolvedValue(null as never);
 
-      await expect(service.assign('admin-1', 'doctor-1', { specialtyId: 'specialty-1' })).rejects.toBeInstanceOf(
-        NotFoundException,
-      );
+      await expect(service.assign('admin-1', 'doctor-1', { specialtyId: 'specialty-1' })).rejects.toMatchObject({
+        status: 404,
+        response: { code: 'DOCTOR_SPECIALTY_NOT_FOUND' },
+      });
     });
 
-    it('throws doctorNotFound if setPrimaryFlag unexpectedly returns null (race)', async () => {
+    it('throws DOCTOR_SPECIALTY_NOT_FOUND (not DOCTOR_NOT_FOUND) if setPrimaryFlag unexpectedly returns null (race)', async () => {
       const { service, doctorRepo, repo, catalogue } = createDeps();
       doctorRepo.findById.mockResolvedValue(baseDoctor());
       catalogue.getSpecialtyById.mockResolvedValue(baseSpecialty());
       repo.findByDoctorAndSpecialty.mockResolvedValue({ id: 'ds-1', doctorId: 'doctor-1', specialtyId: 'specialty-1', isPrimary: false, createdAt: new Date() });
       repo.setPrimaryFlag.mockResolvedValue(null);
 
-      await expect(service.assign('admin-1', 'doctor-1', { specialtyId: 'specialty-1', isPrimary: true })).rejects.toBeInstanceOf(
-        NotFoundException,
-      );
+      await expect(service.assign('admin-1', 'doctor-1', { specialtyId: 'specialty-1', isPrimary: true })).rejects.toMatchObject({
+        status: 404,
+        response: { code: 'DOCTOR_SPECIALTY_NOT_FOUND' },
+      });
     });
   });
 

@@ -9,6 +9,7 @@ import {
   IsString,
   IsUUID,
   Length,
+  Max,
   Min,
 } from 'class-validator';
 import {
@@ -51,19 +52,25 @@ export class UpdateDoctorDto {
   @Length(1, 80)
   registrationNumber?: string;
 
+  /** `smallint` column — bounded to its Postgres range. */
   @IsOptional()
   @IsInt()
   @Min(0)
+  @Max(32767)
   yearsOfExperience?: number;
 
+  /** `smallint` column — bounded to its Postgres range. */
   @IsOptional()
   @IsInt()
   @Min(1)
+  @Max(32767)
   consultationDurationMinutes?: number;
 
+  /** `smallint` column — bounded to its Postgres range. */
   @IsOptional()
   @IsInt()
   @Min(0)
+  @Max(32767)
   bufferMinutes?: number;
 }
 
@@ -83,8 +90,17 @@ export class UpdateDoctorListingDto {
 }
 
 export class UpdateDoctorFeeDto {
-  @IsNumber()
+  /**
+   * `numeric(10, 2)` column — true ceiling is 99999999.99, but nothing in
+   * the SRS names a real fee ceiling for a consultation, so this is capped
+   * well below that at a clearly-generous-but-finite ₹10,00,000 (1,000,000)
+   * to reject an obvious fat-fingered/overflow value before it reaches
+   * Postgres as a `numeric field overflow`. `maxDecimalPlaces: 2` matches
+   * the column's `scale`.
+   */
+  @IsNumber({ maxDecimalPlaces: 2 })
   @IsPositive()
+  @Max(1000000)
   consultationFeeInr!: number;
 }
 

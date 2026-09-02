@@ -1,6 +1,7 @@
 import { ConflictException, Injectable, NotFoundException } from '@nestjs/common';
 import { AuditService } from '../../shared/audit/audit.service';
 import type { AuthContext } from '../../shared/auth/auth.types';
+import { isUniqueConstraintViolation } from '../../shared/errors/postgres-error.util';
 import type { CreateSpecialtyDto, UpdateSpecialtyDto, UpdateSpecialtyTemplatesDto } from './specialty-admin.dto';
 import { CATALOGUE_AUDIT_ENTITY_TYPES, CATALOGUE_ERROR_CODES } from './catalogue.constants';
 import type { PublicSpecialty } from './catalogue.contract';
@@ -57,15 +58,31 @@ export class SpecialtyService {
       });
     }
 
-    const specialty = await this.repo.create({
-      code: dto.code,
-      name: dto.name,
-      description: dto.description,
-      canPrescribe: dto.canPrescribe,
-      intakeForm: dto.intakeForm,
-      firstConsultForm: dto.firstConsultForm,
-      requiredDocuments: dto.requiredDocuments,
-    });
+    let specialty: SpecialtyRow;
+    try {
+      specialty = await this.repo.create({
+        code: dto.code,
+        name: dto.name,
+        description: dto.description,
+        canPrescribe: dto.canPrescribe,
+        intakeForm: dto.intakeForm,
+        firstConsultForm: dto.firstConsultForm,
+        requiredDocuments: dto.requiredDocuments,
+      });
+    } catch (error) {
+      // Safety net for the check-then-insert race: two concurrent callers
+      // can both pass the `findByCode` check above before either inserts,
+      // so the second insert hits the `specialties_code_unique` constraint
+      // instead. Converts that raw driver error into the same 409 the
+      // sequential check already throws.
+      if (isUniqueConstraintViolation(error)) {
+        throw new ConflictException({
+          code: CATALOGUE_ERROR_CODES.SPECIALTY_CODE_TAKEN,
+          message: 'A specialty with this code already exists.',
+        });
+      }
+      throw error;
+    }
 
     await this.audit.write({
       actorType: 'admin',

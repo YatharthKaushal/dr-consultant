@@ -74,6 +74,33 @@ describe('ConcernService', () => {
       expect(repo.create).toHaveBeenCalled();
       expect(audit.write).toHaveBeenCalledWith(expect.objectContaining({ action: 'create', entityType: 'concern' }));
     });
+
+    it('converts a concurrent unique-violation on insert (the check-then-insert race) into the same 409 CONCERN_CODE_TAKEN', async () => {
+      const { service, specialtyService, repo, audit } = createDeps();
+      specialtyService.findRawById.mockResolvedValue(baseSpecialty());
+      repo.findBySpecialtyAndCode.mockResolvedValue(null); // sequential check passes...
+      repo.create.mockRejectedValue({ code: '23505', message: 'duplicate key value violates unique constraint' }); // ...but a concurrent insert beat this one to it
+
+      await expect(
+        service.adminCreate('admin-1', { specialtyId: 'specialty-1', code: 'anxiety', name: 'Anxiety' }),
+      ).rejects.toMatchObject({
+        status: 409,
+        response: { code: 'CONCERN_CODE_TAKEN' },
+      });
+      expect(audit.write).not.toHaveBeenCalled();
+    });
+
+    it('rethrows an unrelated insert error unchanged (not a unique violation)', async () => {
+      const { service, specialtyService, repo } = createDeps();
+      specialtyService.findRawById.mockResolvedValue(baseSpecialty());
+      repo.findBySpecialtyAndCode.mockResolvedValue(null);
+      const dbError = new Error('connection reset');
+      repo.create.mockRejectedValue(dbError);
+
+      await expect(
+        service.adminCreate('admin-1', { specialtyId: 'specialty-1', code: 'anxiety', name: 'Anxiety' }),
+      ).rejects.toBe(dbError);
+    });
   });
 
   describe('adminUpdate — general fields', () => {
@@ -133,6 +160,29 @@ describe('ConcernService', () => {
           metadata: { before: { specialtyId: 'specialty-1' }, after: { specialtyId: 'specialty-2' } },
         }),
       );
+    });
+
+    it('converts a concurrent unique-violation on the reassignment update (the check-then-update race) into the same 409 CONCERN_CODE_TAKEN', async () => {
+      const { service, repo, specialtyService, audit } = createDeps();
+      repo.findById.mockResolvedValue(baseConcern({ id: 'concern-1', specialtyId: 'specialty-1', code: 'anxiety' }));
+      specialtyService.findRawById.mockResolvedValue(baseSpecialty({ id: 'specialty-2' }));
+      repo.findBySpecialtyAndCode.mockResolvedValue(null); // sequential check passes...
+      repo.updateGeneralFields.mockRejectedValue({ code: '23505', message: 'duplicate key value violates unique constraint' }); // ...but a concurrent write beat this one to it
+
+      await expect(service.adminUpdate('admin-1', 'concern-1', { specialtyId: 'specialty-2' })).rejects.toMatchObject({
+        status: 409,
+        response: { code: 'CONCERN_CODE_TAKEN' },
+      });
+      expect(audit.write).not.toHaveBeenCalled();
+    });
+
+    it('rethrows an unrelated update error unchanged (not a unique violation)', async () => {
+      const { service, repo } = createDeps();
+      repo.findById.mockResolvedValue(baseConcern());
+      const dbError = new Error('connection reset');
+      repo.updateGeneralFields.mockRejectedValue(dbError);
+
+      await expect(service.adminUpdate('admin-1', 'concern-1', { name: 'New Name' })).rejects.toBe(dbError);
     });
 
     it('does not accept matchPhrases/matchWeight — field isolation from the mapping endpoint', async () => {
