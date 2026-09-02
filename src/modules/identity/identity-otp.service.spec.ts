@@ -166,6 +166,16 @@ describe('IdentityOtpService', () => {
     await expect(service.send('+919876543210')).rejects.toBeInstanceOf(ServiceUnavailableException);
   });
 
+  it('maps SlideValidationError on verifyToken to a generic 400 INVALID_OTP too', async () => {
+    otpMock.verifyToken.mockRejectedValue(new SlideValidationError('token already consumed'));
+    const service = createService();
+
+    await expect(service.verifyToken('some.jwt.token')).rejects.toMatchObject({
+      status: HttpStatus.BAD_REQUEST,
+      response: expect.objectContaining({ code: IDENTITY_ERROR_CODES.INVALID_OTP }),
+    });
+  });
+
   it('calls verifyToken exactly once per invocation (single-use, no internal retry)', async () => {
     otpMock.verifyToken.mockResolvedValue({ verified: true, identifier: '+919876543210', verifiedAt: new Date().toISOString() });
     const service = createService();

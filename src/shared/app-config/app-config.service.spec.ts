@@ -63,4 +63,33 @@ describe('AppConfigService', () => {
 
     expect(db.select).toHaveBeenCalledTimes(2);
   });
+
+  it('re-reads once the 30-second memo TTL has elapsed, without an explicit invalidate()', async () => {
+    jest.useFakeTimers().setSystemTime(new Date('2026-01-01T00:00:00.000Z'));
+    try {
+      const db = createFakeDb([{ value: 5 }]);
+      const service = new AppConfigService(db as unknown as Database);
+
+      await service.getNumber('otp.verify.max_attempts_per_challenge', 3);
+      jest.setSystemTime(new Date('2026-01-01T00:00:29.000Z')); // 29s later — still within TTL
+      await service.getNumber('otp.verify.max_attempts_per_challenge', 3);
+      expect(db.select).toHaveBeenCalledTimes(1);
+
+      jest.setSystemTime(new Date('2026-01-01T00:00:31.000Z')); // 31s later — past the 30s TTL
+      await service.getNumber('otp.verify.max_attempts_per_challenge', 3);
+      expect(db.select).toHaveBeenCalledTimes(2);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('caches keys independently — a read of one key does not memoize another', async () => {
+    const db = createFakeDb([{ value: 7 }]);
+    const service = new AppConfigService(db as unknown as Database);
+
+    await service.getNumber('otp.request.max_per_number_per_hour', 3);
+    await service.getNumber('otp.resend.max_per_challenge', 3);
+
+    expect(db.select).toHaveBeenCalledTimes(2);
+  });
 });

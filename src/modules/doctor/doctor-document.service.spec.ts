@@ -53,6 +53,16 @@ describe('DoctorDocumentService', () => {
       expect(result).not.toHaveProperty('storageKey');
     });
 
+    it('createForDoctor 404s when the doctor does not exist', async () => {
+      const { service, doctorRepo, repo } = createDeps();
+      doctorRepo.findById.mockResolvedValue(null);
+
+      await expect(
+        service.createForDoctor('missing', { documentType: 'registration_certificate', storageKey: 'k', fileName: 'x.pdf' }),
+      ).rejects.toBeInstanceOf(NotFoundException);
+      expect(repo.create).not.toHaveBeenCalled();
+    });
+
     it('listForDoctor strips storageKey from every row', async () => {
       const { service, repo } = createDeps();
       repo.listByDoctor.mockResolvedValue([baseDocument()]);
@@ -63,7 +73,36 @@ describe('DoctorDocumentService', () => {
     });
   });
 
+  describe('listForAdmin', () => {
+    it('404s when the doctor does not exist', async () => {
+      const { service, doctorRepo, repo } = createDeps();
+      doctorRepo.findById.mockResolvedValue(null);
+
+      await expect(service.listForAdmin('missing')).rejects.toBeInstanceOf(NotFoundException);
+      expect(repo.listByDoctor).not.toHaveBeenCalled();
+    });
+
+    it('strips storageKey from every listed row', async () => {
+      const { service, repo } = createDeps();
+      repo.listByDoctor.mockResolvedValue([baseDocument()]);
+
+      const [result] = await service.listForAdmin('doctor-1');
+
+      expect(result).not.toHaveProperty('storageKey');
+    });
+  });
+
   describe('review', () => {
+    it('404s when the doctor does not exist', async () => {
+      const { service, doctorRepo, repo } = createDeps();
+      doctorRepo.findById.mockResolvedValue(null);
+
+      await expect(service.review('admin-1', 'missing', 'doc-1', { reviewStatus: 'approved' })).rejects.toBeInstanceOf(
+        NotFoundException,
+      );
+      expect(repo.findByIdForDoctor).not.toHaveBeenCalled();
+    });
+
     it('rejects a rejection with no rejectionReason', async () => {
       const { service, doctorRepo, repo } = createDeps();
       repo.findByIdForDoctor.mockResolvedValue(baseDocument());
@@ -73,6 +112,35 @@ describe('DoctorDocumentService', () => {
       ).rejects.toBeInstanceOf(BadRequestException);
       expect(repo.review).not.toHaveBeenCalled();
       expect(doctorRepo.findById).toHaveBeenCalled();
+    });
+
+    it('404s when repo.review returns null (document removed between lookup and write)', async () => {
+      const { service, repo } = createDeps();
+      repo.findByIdForDoctor.mockResolvedValue(baseDocument());
+      repo.review.mockResolvedValue(null);
+
+      await expect(
+        service.review('admin-1', 'doctor-1', 'doc-1', { reviewStatus: 'approved' }),
+      ).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    it('audits the review with the actor, document type, and review status', async () => {
+      const { service, repo, audit } = createDeps();
+      repo.findByIdForDoctor.mockResolvedValue(baseDocument({ documentType: 'registration_certificate' }));
+      repo.review.mockResolvedValue(baseDocument({ reviewStatus: 'approved' }));
+
+      await service.review('admin-1', 'doctor-1', 'doc-1', { reviewStatus: 'approved' });
+
+      expect(audit.write).toHaveBeenCalledWith(
+        expect.objectContaining({
+          actorType: 'admin',
+          actorId: 'admin-1',
+          action: 'verify',
+          entityType: 'doctor_document',
+          entityId: 'doc-1',
+          metadata: expect.objectContaining({ doctorId: 'doctor-1', documentType: 'registration_certificate', reviewStatus: 'approved' }),
+        }),
+      );
     });
 
     it('accepts a rejection with a rejectionReason and sets it on the row', async () => {
