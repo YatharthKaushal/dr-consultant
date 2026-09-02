@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { CatalogueModule } from '../catalogue/catalogue.module';
 import { IdentityModule } from '../identity/identity.module';
 import { DoctorAdminController } from './doctor-admin.controller';
 import { DoctorDocumentRepository } from './doctor-document.repository';
@@ -20,9 +21,12 @@ import { DoctorService } from './doctor.service';
  * `IdentityModule` is imported for clarity even though it's `@Global()` (Nest
  * resolves global providers regardless of import graph) — `DoctorVerification
  * Service` injects `IdentityFacade` directly for `revokeAllSessions`.
+ * `CatalogueModule` is a real (non-global) import — `DoctorService`/
+ * `DoctorSpecialtyService` resolve `CatalogueFacade` from it to enrich
+ * `doctor_specialties` rows instead of reading `specialties` directly.
  */
 @Module({
-  imports: [IdentityModule],
+  imports: [IdentityModule, CatalogueModule],
   controllers: [DoctorController, DoctorAdminController],
   providers: [
     DoctorRepository,

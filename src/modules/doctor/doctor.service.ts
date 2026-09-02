@@ -1,6 +1,7 @@
 import { ConflictException, Injectable, NotFoundException } from '@nestjs/common';
 import { AuditService } from '../../shared/audit/audit.service';
 import type { AuthContext } from '../../shared/auth/auth.types';
+import { CatalogueFacade } from '../catalogue/catalogue.facade';
 import { DoctorDocumentRepository } from './doctor-document.repository';
 import { DoctorSpecialtyRepository } from './doctor-specialty.repository';
 import type { CreateDoctorDto, UpdateDoctorDto } from './doctor-admin.dto';
@@ -12,11 +13,13 @@ import {
   toPublicDoctorSpecialties,
   toSafeDoctorDocumentRow,
   toSafeDoctorRow,
+  type DoctorSpecialtyWithDetails,
   type SafeDoctorDocumentRow,
   type SafeDoctorRow,
 } from './doctor.mapper';
 import { normalizeMobileNumber } from './doctor-phone.util';
 import { DoctorRepository, type DoctorProfileFieldsUpdate } from './doctor.repository';
+import type { DoctorSpecialtyRow } from '../../schema/doctor-specialties.schema';
 
 export interface DoctorProfileWithDetails extends SafeDoctorRow {
   specialties: PublicDoctorProfile['specialties'];
@@ -46,7 +49,30 @@ export class DoctorService {
     private readonly specialtyRepo: DoctorSpecialtyRepository,
     private readonly documentRepo: DoctorDocumentRepository,
     private readonly audit: AuditService,
+    private readonly catalogue: CatalogueFacade,
   ) {}
+
+  /**
+   * Enriches raw `doctor_specialties` rows with catalogue-owned `code`/`name`
+   * via `CatalogueFacade` — the module never reads `specialties` directly
+   * (`backend/README.md`: tables belong to one module only). A doctor holds
+   * at most a handful of specialties, so N parallel facade calls stays cheap;
+   * a `null` back from the facade means the FK points at a specialty that no
+   * longer exists, which should be structurally impossible (specialties are
+   * deactivated, never deleted) — treated as a data-integrity error, not a
+   * silently-dropped row.
+   */
+  private async enrichSpecialties(rows: DoctorSpecialtyRow[]): Promise<DoctorSpecialtyWithDetails[]> {
+    return Promise.all(
+      rows.map(async (row) => {
+        const specialty = await this.catalogue.getSpecialtyById(row.specialtyId);
+        if (!specialty) {
+          throw new Error(`doctor_specialties row ${row.id} references specialty ${row.specialtyId}, which no longer exists.`);
+        }
+        return { id: row.id, specialtyId: row.specialtyId, code: specialty.code, name: specialty.name, isPrimary: row.isPrimary };
+      }),
+    );
+  }
 
   /* ---------------------------------------------------------------------- */
   /* Self-service (GET/PATCH /doctors/me)                                    */
@@ -57,10 +83,11 @@ export class DoctorService {
     if (!doctor) {
       throw doctorNotFound();
     }
-    const [specialties, documents] = await Promise.all([
+    const [specialtyRows, documents] = await Promise.all([
       this.specialtyRepo.listByDoctor(doctorId),
       this.documentRepo.listByDoctor(doctorId),
     ]);
+    const specialties = await this.enrichSpecialties(specialtyRows);
     return {
       ...toSafeDoctorRow(doctor),
       specialties: toPublicDoctorSpecialties(specialties),
@@ -110,7 +137,8 @@ export class DoctorService {
       throw doctorNotFound();
     }
 
-    const specialties = await this.specialtyRepo.listByDoctor(doctorId);
+    const specialtyRows = await this.specialtyRepo.listByDoctor(doctorId);
+    const specialties = await this.enrichSpecialties(specialtyRows);
     return toPublicDoctorProfile(doctor, specialties);
   }
 
@@ -121,7 +149,8 @@ export class DoctorService {
   async getPublicProfile(doctorId: string): Promise<PublicDoctorProfile | null> {
     const doctor = await this.repo.findById(doctorId);
     if (!doctor) return null;
-    const specialties = await this.specialtyRepo.listByDoctor(doctorId);
+    const specialtyRows = await this.specialtyRepo.listByDoctor(doctorId);
+    const specialties = await this.enrichSpecialties(specialtyRows);
     return toPublicDoctorProfile(doctor, specialties);
   }
 
@@ -142,10 +171,11 @@ export class DoctorService {
   async adminGetDetail(doctorId: string): Promise<DoctorProfileWithDetails> {
     const doctor = await this.repo.findById(doctorId);
     if (!doctor) throw doctorNotFound();
-    const [specialties, documents] = await Promise.all([
+    const [specialtyRows, documents] = await Promise.all([
       this.specialtyRepo.listByDoctor(doctorId),
       this.documentRepo.listByDoctor(doctorId),
     ]);
+    const specialties = await this.enrichSpecialties(specialtyRows);
     return {
       ...toSafeDoctorRow(doctor),
       specialties: toPublicDoctorSpecialties(specialties),

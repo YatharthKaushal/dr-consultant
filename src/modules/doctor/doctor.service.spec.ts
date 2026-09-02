@@ -2,10 +2,27 @@ import { ConflictException, NotFoundException } from '@nestjs/common';
 import type { DoctorRow } from '../../schema/doctors.schema';
 import type { AuditService } from '../../shared/audit/audit.service';
 import type { AuthContext } from '../../shared/auth/auth.types';
+import type { CatalogueFacade } from '../catalogue/catalogue.facade';
+import type { PublicSpecialty } from '../catalogue/catalogue.contract';
 import { DoctorDocumentRepository } from './doctor-document.repository';
 import { DoctorSpecialtyRepository } from './doctor-specialty.repository';
 import { DoctorRepository } from './doctor.repository';
 import { DoctorService } from './doctor.service';
+
+function baseCatalogueSpecialty(overrides: Partial<PublicSpecialty> = {}): PublicSpecialty {
+  return {
+    id: 'spec-1',
+    code: 'psychiatry',
+    name: 'Psychiatry',
+    description: null,
+    canPrescribe: true,
+    intakeForm: null,
+    firstConsultForm: null,
+    requiredDocuments: [],
+    isActive: true,
+    ...overrides,
+  };
+}
 
 const NOW = new Date('2026-01-01T00:00:00.000Z');
 
@@ -61,8 +78,12 @@ function createDeps() {
 
   const audit = { write: jest.fn().mockResolvedValue(undefined) } as unknown as jest.Mocked<AuditService>;
 
-  const service = new DoctorService(repo, specialtyRepo, documentRepo, audit);
-  return { service, repo, specialtyRepo, documentRepo, audit };
+  const catalogue = {
+    getSpecialtyById: jest.fn().mockResolvedValue(baseCatalogueSpecialty()),
+  } as unknown as jest.Mocked<CatalogueFacade>;
+
+  const service = new DoctorService(repo, specialtyRepo, documentRepo, audit, catalogue);
+  return { service, repo, specialtyRepo, documentRepo, audit, catalogue };
 }
 
 describe('DoctorService', () => {
@@ -75,11 +96,12 @@ describe('DoctorService', () => {
     });
 
     it('assembles the profile with specialties and documents (stripping tokenVersion/storageKey)', async () => {
-      const { service, repo, specialtyRepo, documentRepo } = createDeps();
+      const { service, repo, specialtyRepo, documentRepo, catalogue } = createDeps();
       repo.findById.mockResolvedValue(baseDoctor());
       specialtyRepo.listByDoctor.mockResolvedValue([
-        { id: 'ds-1', specialtyId: 'spec-1', code: 'psychiatry', name: 'Psychiatry', isPrimary: true },
+        { id: 'ds-1', doctorId: 'doctor-1', specialtyId: 'spec-1', isPrimary: true, createdAt: NOW },
       ]);
+      catalogue.getSpecialtyById.mockResolvedValue(baseCatalogueSpecialty({ id: 'spec-1', code: 'psychiatry', name: 'Psychiatry' }));
       documentRepo.listByDoctor.mockResolvedValue([
         {
           id: 'doc-1',
@@ -100,6 +122,18 @@ describe('DoctorService', () => {
       expect(result.specialties).toEqual([{ id: 'spec-1', code: 'psychiatry', name: 'Psychiatry', isPrimary: true }]);
       expect(result.documents[0]).not.toHaveProperty('storageKey');
       expect(result).not.toHaveProperty('tokenVersion');
+    });
+
+    it('throws when a doctor_specialties row references a specialty the catalogue no longer has (data integrity, should be unreachable)', async () => {
+      const { service, repo, specialtyRepo, documentRepo, catalogue } = createDeps();
+      repo.findById.mockResolvedValue(baseDoctor());
+      specialtyRepo.listByDoctor.mockResolvedValue([
+        { id: 'ds-1', doctorId: 'doctor-1', specialtyId: 'spec-missing', isPrimary: true, createdAt: NOW },
+      ]);
+      documentRepo.listByDoctor.mockResolvedValue([]);
+      catalogue.getSpecialtyById.mockResolvedValue(null);
+
+      await expect(service.getOwnProfile('doctor-1')).rejects.toThrow(/no longer exists/);
     });
   });
 

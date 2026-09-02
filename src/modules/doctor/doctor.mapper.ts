@@ -1,7 +1,15 @@
 import type { DoctorDocumentRow } from '../../schema/doctor-documents.schema';
 import type { DoctorRow } from '../../schema/doctors.schema';
-import type { DoctorSpecialtyWithDetails } from './doctor-specialty.repository';
 import type { PublicDoctorProfile, PublicDoctorSpecialty } from './doctor.contract';
+
+/** A `doctor_specialties` row enriched with catalogue-owned `code`/`name` — assembled by the service layer via `CatalogueFacade`, never read directly off a join (see `doctor-specialty.repository.ts`). */
+export interface DoctorSpecialtyWithDetails {
+  id: string;
+  specialtyId: string;
+  code: string;
+  name: string;
+  isPrimary: boolean;
+}
 
 /**
  * Safe to return to ANY client — strips the identity-owned auth internal
