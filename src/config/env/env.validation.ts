@@ -63,6 +63,30 @@ const requiredEnv = z.object({
       /^[0-9a-fA-F]{64}$/,
       'must be exactly 64 hexadecimal characters (32 bytes) — generate one with `openssl rand -hex 32`',
     ),
+
+  /**
+   * Razorpay (`modules/payment`, M-12). All three are REQUIRED, deliberately
+   * unlike the optional S3/Cloudinary credentials above.
+   *
+   * The difference is that blob storage has TWO providers and a missing
+   * credential just makes one of them unusable, whereas Razorpay is the SOLE
+   * payment gateway this release integrates — `payments.schema.ts` is explicit
+   * that there is "no `gateway` column: Razorpay is the only one this release
+   * integrates". There is no fallback path, so a deployment missing a key
+   * cannot take a single payment. Failing at boot with the variable named is
+   * strictly better than failing at the first checkout with a 500, which is
+   * the same reasoning `SLIDE_API_KEY` is required under.
+   *
+   * `RAZORPAY_KEY_ID` is the publishable half and reaches the mobile client
+   * (`CreatedOrder.gatewayKeyId`); the other two never leave the server.
+   * `RAZORPAY_WEBHOOK_SECRET` is a SEPARATE secret from the API key pair — it
+   * is set independently in the Razorpay dashboard when the webhook is
+   * registered, and it is the only thing standing between the `@Public()`
+   * webhook route and an attacker marking any consultation paid.
+   */
+  RAZORPAY_KEY_ID: z.string().min(1, 'must be the Razorpay key id (e.g. rzp_test_... or rzp_live_...)'),
+  RAZORPAY_KEY_SECRET: z.string().min(1),
+  RAZORPAY_WEBHOOK_SECRET: z.string().min(1),
 });
 
 /* -------------------------------------------------------------------------- */
