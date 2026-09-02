@@ -21,8 +21,10 @@ async function bootstrap(): Promise<void> {
   );
 
   // `@fastify/multipart` — registered globally so any module's controller
-  // can call `request.file()`/`request.parts()` (currently only `modules/
-  // document`'s `POST /documents`, via `multipart-file.util.ts`).
+  // can call `request.file()`/`request.parts()`. Two routes use it today,
+  // both through `multipart-file.util.ts`: `modules/document`'s
+  // `POST /documents` (patient uploads) and `modules/doctor`'s
+  // `POST /doctors/me/documents` (a doctor's own credential documents).
   // `limits.fileSize` is the TRANSPORT hard ceiling — a defensive backstop
   // above the real, business-rule cap a patient actually hits
   // (`documents.max_file_size_mb`, default 15MB, enforced in

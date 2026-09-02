@@ -31,6 +31,13 @@ import {
 } from './document.constants';
 import type { ConsultationLookupPort } from './consultation-lookup.provider';
 import type { DocumentStoragePort, StoredFileResult } from './document-storage.contract';
+// A pure, stateless util — imported directly rather than through a facade or
+// DI token, exactly as `modules/doctor` imports this module's own
+// `parseSingleFileRequest`. `backend/README.md` §2's "a module's only public
+// surface is its facade" governs a module's SERVICES and DATA, not a
+// dependency-free function; see that util's own header comment for why
+// content sniffing lives in `modules/storage`.
+import { verifyDeclaredContentType } from '../storage/file-content-type.util';
 import { toSafePatientFileRow, type SafePatientFileRow } from './document.mapper';
 import { PatientFileRepository } from './patient-file.repository';
 import { ReportRequestRepository } from './report-request.repository';
@@ -84,10 +91,14 @@ export class PatientFileService {
    * insert is built ONLY from a confirmed `StoredFileResult` — never the
    * reverse. A DB row is therefore never created pointing at a `storageKey`
    * that was never actually stored.
+   *
+   * The content type handed to storage is the VERIFIED one — the file's
+   * actual sniffed type — never the client's declared header. See
+   * `resolveVerifiedContentType`.
    */
   async upload(patientId: string, input: UploadFileInput): Promise<SafePatientFileRow> {
     const category = this.validateCategory(input.category);
-    this.validateMimeType(category, input.contentType);
+    const verifiedContentType = this.resolveVerifiedContentType(category, input.contentType, input.buffer);
     await this.validateSize(input.sizeBytes);
 
     const consultationId = await this.resolveConsultationId(patientId, input.consultationId);
@@ -99,7 +110,7 @@ export class PatientFileService {
       stored = await this.storage.store({
         buffer: input.buffer,
         fileName: input.fileName,
-        contentType: input.contentType,
+        contentType: verifiedContentType,
         category,
       });
     } catch (error) {
@@ -278,14 +289,50 @@ export class PatientFileService {
     return raw as PatientUploadableCategory;
   }
 
-  private validateMimeType(category: PatientUploadableCategory, contentType: string): void {
-    const allowed = DOCUMENT_MIME_ALLOWLIST[category];
-    if (!allowed.includes(contentType.toLowerCase())) {
-      throw new UnsupportedMediaTypeException({
+  /**
+   * TWO checks, ONE indistinguishable failure.
+   *
+   *   1. The DECLARED type is on this category's allowlist.
+   *   2. The file's ACTUAL BYTES are that type (`verifyDeclaredContentType`,
+   *      `modules/storage`) — because the declared type is just a header the
+   *      client wrote, and a client that wants to store an executable in a
+   *      patient's medical record only has to call it `image/jpeg`.
+   *
+   * Both failures raise the IDENTICAL exception, built once below rather than
+   * duplicated, so the two cases are indistinguishable from outside. That is
+   * deliberate: an error that said "you declared JPEG but these bytes are a
+   * PDF" would turn this endpoint into an oracle for probing what the server
+   * thinks arbitrary bytes are.
+   *
+   * Returns the VERIFIED content type, which is what gets handed to storage —
+   * so the object store later serves the file back as something this server
+   * confirmed rather than something a client asserted.
+   */
+  private resolveVerifiedContentType(category: PatientUploadableCategory, contentType: string, buffer: Buffer): string {
+    const rejected = (): UnsupportedMediaTypeException =>
+      new UnsupportedMediaTypeException({
         code: DOCUMENT_ERROR_CODES.INVALID_FILE_TYPE,
         message: `File type '${contentType}' is not accepted for category '${category}'.`,
       });
+
+    // Normalised ONCE and reused for both checks — see the matching note in
+    // `doctor-document.service.ts#resolveVerifiedContentType`. HTTP header
+    // values carry optional surrounding whitespace (RFC 7231), and
+    // normalising in one place is what keeps the allowlist check and the
+    // sniff check from disagreeing about what was declared.
+    const declared = contentType.trim().toLowerCase();
+
+    const allowed = DOCUMENT_MIME_ALLOWLIST[category];
+    if (!allowed.includes(declared)) {
+      throw rejected();
     }
+
+    const verified = verifyDeclaredContentType(buffer, declared);
+    if (verified === null) {
+      throw rejected();
+    }
+
+    return verified;
   }
 
   private async validateSize(sizeBytes: number): Promise<void> {

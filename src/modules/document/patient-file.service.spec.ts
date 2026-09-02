@@ -63,10 +63,28 @@ function reportRequestRow(overrides: Partial<ReportRequestRow> = {}): ReportRequ
   };
 }
 
+/**
+ * REAL magic bytes. The upload path sniffs the buffer
+ * (`verifyDeclaredContentType`) and rejects a file whose bytes contradict its
+ * declared `contentType`, so a fixture carrying `Buffer.from('hello')` under
+ * `application/pdf` — which is what these tests used before content sniffing
+ * existed — is now correctly rejected, and would make every happy-path test
+ * here fail for the wrong reason.
+ */
+function fileStartingWith(signature: number[], totalLength = 64): Buffer {
+  const buffer = Buffer.alloc(totalLength, 0x00);
+  Buffer.from(signature).copy(buffer, 0);
+  return buffer;
+}
+
+const PDF_BYTES = fileStartingWith([0x25, 0x50, 0x44, 0x46, 0x2d, 0x31, 0x2e, 0x37]);
+const JPEG_BYTES = fileStartingWith([0xff, 0xd8, 0xff, 0xe0]);
+const PNG_BYTES = fileStartingWith([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+
 function uploadInput(overrides: Partial<UploadFileInput> = {}): UploadFileInput {
   return {
     category: 'medical_history',
-    buffer: Buffer.from('hello'),
+    buffer: PDF_BYTES,
     fileName: 'history.pdf',
     contentType: 'application/pdf',
     sizeBytes: 1024,
@@ -351,6 +369,88 @@ describe('PatientFileService.upload', () => {
         response: { code: DOCUMENT_ERROR_CODES.REPORT_REQUEST_NOT_OPEN },
       });
       expect(db.transaction).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('content sniffing — a lying Content-Type cannot get bytes stored', () => {
+    it('rejects a ZIP payload declared as application/pdf, with no storage/DB call', async () => {
+      const { service, storage, repo } = createService();
+      const zipBytes = fileStartingWith([0x50, 0x4b, 0x03, 0x04]);
+
+      await expect(
+        service.upload(PATIENT_ID, uploadInput({ buffer: zipBytes, contentType: 'application/pdf' })),
+      ).rejects.toMatchObject({ status: 415, response: { code: DOCUMENT_ERROR_CODES.INVALID_FILE_TYPE } });
+
+      expect(storage.store).not.toHaveBeenCalled();
+      expect(repo.create).not.toHaveBeenCalled();
+    });
+
+    it('rejects an ELF executable declared as image/jpeg — the malware-through-the-doctor-viewer shape', async () => {
+      const { service, storage } = createService();
+      const elfBytes = fileStartingWith([0x7f, 0x45, 0x4c, 0x46]);
+
+      await expect(
+        service.upload(PATIENT_ID, uploadInput({ category: 'photo', buffer: elfBytes, contentType: 'image/jpeg' })),
+      ).rejects.toMatchObject({ status: 415, response: { code: DOCUMENT_ERROR_CODES.INVALID_FILE_TYPE } });
+      expect(storage.store).not.toHaveBeenCalled();
+    });
+
+    it('rejects HTML declared as image/png', async () => {
+      const { service, storage } = createService();
+
+      await expect(
+        service.upload(PATIENT_ID, uploadInput({ category: 'report', buffer: Buffer.from('<html></html>'), contentType: 'image/png' })),
+      ).rejects.toMatchObject({ status: 415 });
+      expect(storage.store).not.toHaveBeenCalled();
+    });
+
+    it('rejects PNG bytes declared as image/jpeg — the declared type must be truthful, not merely allowlisted', async () => {
+      const { service, storage } = createService();
+
+      await expect(
+        service.upload(PATIENT_ID, uploadInput({ category: 'photo', buffer: PNG_BYTES, contentType: 'image/jpeg' })),
+      ).rejects.toMatchObject({ status: 415 });
+      expect(storage.store).not.toHaveBeenCalled();
+    });
+
+    it('gives the SAME code for a sniff mismatch as for a disallowed declared type — no probing oracle', async () => {
+      const { service } = createService();
+
+      const disallowed = await service
+        .upload(PATIENT_ID, uploadInput({ contentType: 'application/zip' }))
+        .catch((e: unknown) => (e as { getResponse(): unknown }).getResponse());
+      const mismatch = await service
+        .upload(PATIENT_ID, uploadInput({ buffer: PNG_BYTES, contentType: 'application/pdf' }))
+        .catch((e: unknown) => (e as { getResponse(): unknown }).getResponse());
+
+      expect(disallowed).toMatchObject({ code: DOCUMENT_ERROR_CODES.INVALID_FILE_TYPE });
+      expect(mismatch).toMatchObject({ code: DOCUMENT_ERROR_CODES.INVALID_FILE_TYPE });
+      // Nothing about what the bytes actually were leaks to the caller.
+      expect(JSON.stringify(mismatch)).not.toContain('png');
+    });
+
+    it('accepts a genuine JPEG for a photo and stores the VERIFIED content type', async () => {
+      const { service, repo, storage } = createService();
+      storage.store.mockResolvedValue({ storageKey: 'key-1', sizeBytes: 64 });
+      repo.create.mockResolvedValue(fileRow({ fileCategory: 'photo' }));
+
+      await service.upload(PATIENT_ID, uploadInput({ category: 'photo', buffer: JPEG_BYTES, contentType: '  IMAGE/JPEG  ' }));
+
+      expect(storage.store).toHaveBeenCalledWith(expect.objectContaining({ contentType: 'image/jpeg' }));
+    });
+
+    it('accepts a real HEIC photo declared as image/heif — the two spellings are one container, and exact-match would falsely reject an iPhone upload', async () => {
+      const { service, repo, storage } = createService();
+      const heic = Buffer.alloc(64, 0x00);
+      heic.writeUInt32BE(0x18, 0);
+      heic.write('ftyp', 4, 'latin1');
+      heic.write('heic', 8, 'latin1');
+      storage.store.mockResolvedValue({ storageKey: 'key-1', sizeBytes: 64 });
+      repo.create.mockResolvedValue(fileRow({ fileCategory: 'photo' }));
+
+      await service.upload(PATIENT_ID, uploadInput({ category: 'photo', buffer: heic, contentType: 'image/heif' }));
+
+      expect(storage.store).toHaveBeenCalledWith(expect.objectContaining({ contentType: 'image/heif' }));
     });
   });
 
