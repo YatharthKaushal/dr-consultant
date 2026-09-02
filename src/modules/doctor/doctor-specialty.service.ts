@@ -2,13 +2,15 @@ import { Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { DATABASE } from '../../config/db/database.module';
 import type { Database } from '../../config/db/database.config';
 import { AuditService } from '../../shared/audit/audit.service';
+import { CatalogueFacade } from '../catalogue/catalogue.facade';
 import type { AssignDoctorSpecialtyDto } from './doctor-admin.dto';
-import { DoctorSpecialtyRepository, type DoctorSpecialtyWithDetails } from './doctor-specialty.repository';
+import { DoctorSpecialtyRepository } from './doctor-specialty.repository';
 import { DOCTOR_AUDIT_ENTITY_TYPES, DOCTOR_ERROR_CODES } from './doctor.constants';
+import type { DoctorSpecialtyWithDetails } from './doctor.mapper';
 import { doctorNotFound } from './doctor.service';
 import { DoctorRepository } from './doctor.repository';
 
-/** `doctor_specialties` assignment, including the primary-swap transaction, plus the `getPrescribingEligibility` contract read. */
+/** `doctor_specialties` assignment, including the primary-swap transaction, plus the `getPrescribingEligibility` contract read. `code`/`name`/`canPrescribe` come from `CatalogueFacade` — this module never reads `specialties` directly. */
 @Injectable()
 export class DoctorSpecialtyService {
   constructor(
@@ -16,6 +18,7 @@ export class DoctorSpecialtyService {
     private readonly doctorRepo: DoctorRepository,
     private readonly repo: DoctorSpecialtyRepository,
     private readonly audit: AuditService,
+    private readonly catalogue: CatalogueFacade,
   ) {}
 
   /**
@@ -29,7 +32,7 @@ export class DoctorSpecialtyService {
     const doctor = await this.doctorRepo.findById(doctorId);
     if (!doctor) throw doctorNotFound();
 
-    const specialty = await this.repo.findSpecialtyById(dto.specialtyId);
+    const specialty = await this.catalogue.getSpecialtyById(dto.specialtyId);
     if (!specialty) {
       throw new NotFoundException({ code: DOCTOR_ERROR_CODES.SPECIALTY_NOT_FOUND, message: 'Specialty not found.' });
     }
@@ -98,6 +101,8 @@ export class DoctorSpecialtyService {
    */
   async getPrescribingEligibility(doctorId: string): Promise<boolean> {
     const primary = await this.repo.findPrimaryByDoctor(doctorId);
-    return primary?.canPrescribe ?? false;
+    if (!primary) return false;
+    const specialty = await this.catalogue.getSpecialtyById(primary.specialtyId);
+    return specialty?.canPrescribe ?? false;
   }
 }

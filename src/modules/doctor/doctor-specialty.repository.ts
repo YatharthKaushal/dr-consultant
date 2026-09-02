@@ -3,32 +3,20 @@ import { and, eq } from 'drizzle-orm';
 import { DATABASE } from '../../config/db/database.module';
 import type { Database } from '../../config/db/database.config';
 import { doctorSpecialtiesTable, type DoctorSpecialtyRow } from '../../schema/doctor-specialties.schema';
-import { specialtiesTable, type SpecialtyRow } from '../../schema/specialties.schema';
 import type { Executor } from '../identity/identity.repository';
 
-export interface DoctorSpecialtyWithDetails {
-  id: string;
-  specialtyId: string;
-  code: string;
-  name: string;
-  isPrimary: boolean;
-}
-
 /**
- * `doctor_specialties` CRUD, plus the read-only `specialties` lookups this
- * module needs (existence check on assign, `canPrescribe` for
- * `getPrescribingEligibility`). `specialties` itself is M-06-owned — writes
- * to it never happen here, per the task brief ("read-only from this module's
- * perspective... you just need to read `canPrescribe`").
+ * `doctor_specialties` CRUD — the junction row only. `specialties` is
+ * M-06/catalogue-owned; this repository never reads or writes that table
+ * (`backend/README.md`: "A module owns its folder, its Postgres schema and
+ * its tables. No other module reads or writes them" — that includes
+ * read-only joins, which is why this used to inner-join `specialtiesTable`
+ * and no longer does). Any code/name/canPrescribe enrichment happens at the
+ * service layer via `CatalogueFacade`.
  */
 @Injectable()
 export class DoctorSpecialtyRepository {
   constructor(@Inject(DATABASE) private readonly db: Database) {}
-
-  async findSpecialtyById(specialtyId: string, executor: Executor = this.db): Promise<SpecialtyRow | null> {
-    const [row] = await executor.select().from(specialtiesTable).where(eq(specialtiesTable.id, specialtyId)).limit(1);
-    return row ?? null;
-  }
 
   async findByDoctorAndSpecialty(
     doctorId: string,
@@ -43,29 +31,15 @@ export class DoctorSpecialtyRepository {
     return row ?? null;
   }
 
-  async listByDoctor(doctorId: string, executor: Executor = this.db): Promise<DoctorSpecialtyWithDetails[]> {
-    return executor
-      .select({
-        id: doctorSpecialtiesTable.id,
-        specialtyId: doctorSpecialtiesTable.specialtyId,
-        code: specialtiesTable.code,
-        name: specialtiesTable.name,
-        isPrimary: doctorSpecialtiesTable.isPrimary,
-      })
-      .from(doctorSpecialtiesTable)
-      .innerJoin(specialtiesTable, eq(specialtiesTable.id, doctorSpecialtiesTable.specialtyId))
-      .where(eq(doctorSpecialtiesTable.doctorId, doctorId));
+  async listByDoctor(doctorId: string, executor: Executor = this.db): Promise<DoctorSpecialtyRow[]> {
+    return executor.select().from(doctorSpecialtiesTable).where(eq(doctorSpecialtiesTable.doctorId, doctorId));
   }
 
-  /** The doctor's primary specialty joined with `specialties.canPrescribe` — `null` if the doctor has none. */
-  async findPrimaryByDoctor(
-    doctorId: string,
-    executor: Executor = this.db,
-  ): Promise<{ specialtyId: string; canPrescribe: boolean } | null> {
+  /** The doctor's primary specialty row — `null` if the doctor has none. `canPrescribe` is catalogue-owned; callers resolve it via `CatalogueFacade.getSpecialtyById(row.specialtyId)`. */
+  async findPrimaryByDoctor(doctorId: string, executor: Executor = this.db): Promise<DoctorSpecialtyRow | null> {
     const [row] = await executor
-      .select({ specialtyId: doctorSpecialtiesTable.specialtyId, canPrescribe: specialtiesTable.canPrescribe })
+      .select()
       .from(doctorSpecialtiesTable)
-      .innerJoin(specialtiesTable, eq(specialtiesTable.id, doctorSpecialtiesTable.specialtyId))
       .where(and(eq(doctorSpecialtiesTable.doctorId, doctorId), eq(doctorSpecialtiesTable.isPrimary, true)))
       .limit(1);
     return row ?? null;
