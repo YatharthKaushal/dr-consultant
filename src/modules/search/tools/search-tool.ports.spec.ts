@@ -71,31 +71,61 @@ describe('CatalogueToolAdapter', () => {
   });
 });
 
+/**
+ * `DoctorFacade.listListedDoctors` landed with the M-09 merge, so this
+ * adapter no longer guards against a missing method — it TRANSLATES. The
+ * agent-facing filter is singular (`specialtyId`/`language`), because a model
+ * filling a tool call reasons about "a psychiatrist who speaks Hindi", while
+ * the facade takes arrays plus an explicit page window. These tests pin that
+ * translation, which is the only place the two shapes meet.
+ */
 describe('DoctorToolAdapter', () => {
-  it('reports the directory unavailable while DoctorFacade has no listListedDoctors', () => {
-    const facade = { getPublicProfile: jest.fn() } as unknown as DoctorFacade;
-    expect(new DoctorToolAdapter(facade).isAvailable()).toBe(false);
+  function facadeWith(listListedDoctors: jest.Mock): DoctorFacade {
+    return { getPublicProfile: jest.fn(), listListedDoctors } as unknown as DoctorFacade;
+  }
+
+  it('reports the directory available — the facade read is now statically guaranteed', () => {
+    expect(new DoctorToolAdapter(facadeWith(jest.fn())).isAvailable()).toBe(true);
   });
 
-  it('refuses listListedDoctors with DOCTOR_DIRECTORY_UNAVAILABLE', async () => {
-    const facade = { getPublicProfile: jest.fn() } as unknown as DoctorFacade;
-
-    try {
-      await new DoctorToolAdapter(facade).listListedDoctors({});
-      fail('expected a refusal');
-    } catch (error) {
-      expect(bodyOf(error).code).toBe(TOOL_ERROR_CODES.DOCTOR_DIRECTORY_UNAVAILABLE);
-    }
-  });
-
-  it('reports available, and delegates, once the method lands', async () => {
+  it('lifts a singular specialtyId/language into the arrays the facade expects', async () => {
     const listListedDoctors = jest.fn().mockResolvedValue([doctor()]);
-    const facade = { getPublicProfile: jest.fn(), listListedDoctors } as unknown as DoctorFacade;
-    const adapter = new DoctorToolAdapter(facade);
 
-    expect(adapter.isAvailable()).toBe(true);
-    await adapter.listListedDoctors({ specialtyId: 'spec-1', limit: 5 });
-    expect(listListedDoctors).toHaveBeenCalledWith({ specialtyId: 'spec-1', limit: 5 });
+    await new DoctorToolAdapter(facadeWith(listListedDoctors)).listListedDoctors({
+      specialtyId: 'spec-1',
+      language: 'Hindi',
+      limit: 5,
+    });
+
+    expect(listListedDoctors).toHaveBeenCalledWith(
+      expect.objectContaining({ specialtyIds: ['spec-1'], languages: ['Hindi'], limit: 5, offset: 0 }),
+    );
+  });
+
+  it('leaves absent filters undefined rather than sending empty arrays, which would filter everything out', async () => {
+    const listListedDoctors = jest.fn().mockResolvedValue([]);
+
+    await new DoctorToolAdapter(facadeWith(listListedDoctors)).listListedDoctors({});
+
+    expect(listListedDoctors).toHaveBeenCalledWith(
+      expect.objectContaining({ specialtyIds: undefined, languages: undefined, maxFeeInr: undefined }),
+    );
+  });
+
+  it('sends maxFeeInr as a 2dp decimal string — the column is numeric, and a float would round a fee', async () => {
+    const listListedDoctors = jest.fn().mockResolvedValue([]);
+
+    await new DoctorToolAdapter(facadeWith(listListedDoctors)).listListedDoctors({ maxFeeInr: 1500 });
+
+    expect(listListedDoctors).toHaveBeenCalledWith(expect.objectContaining({ maxFeeInr: '1500.00' }));
+  });
+
+  it('always requests the first page — this surface pages by narrowing filters, not by offset', async () => {
+    const listListedDoctors = jest.fn().mockResolvedValue([]);
+
+    await new DoctorToolAdapter(facadeWith(listListedDoctors)).listListedDoctors({ limit: 3 });
+
+    expect(listListedDoctors).toHaveBeenCalledWith(expect.objectContaining({ offset: 0 }));
   });
 });
 

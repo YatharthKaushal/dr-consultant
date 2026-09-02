@@ -1,6 +1,6 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { z } from 'zod';
-import type { PublicDoctorProfile } from '../../doctor/doctor.contract';
+import type { ListedDoctorSummary } from '../../doctor/doctor.contract';
 import { toDoctorListing, type DoctorListing } from './list-doctors.tool';
 import { CATALOGUE_TOOL_PORT, DEFAULT_TOOL_RESULT_LIMIT, DISCOVERY_PORT, DOCTOR_TOOL_PORT, MAX_TOOL_RESULT_LIMIT, TOOL_NAMES } from './search-tool.constants';
 import type { AgentTool, CatalogueToolPort, CrisisGuidance, DiscoveryPort, DoctorToolPort } from './search-tool.contract';
@@ -163,7 +163,7 @@ export class DiscoverCareTool implements AgentTool<DiscoverCareInput, DiscoverCa
    * appears once, at the position of the higher-recommended one.
    */
   private async listDoctorsFor(specialties: RecommendedSpecialty[], limit: number): Promise<DoctorListing[]> {
-    const collected: PublicDoctorProfile[] = [];
+    const collected: ListedDoctorSummary[] = [];
     const seen = new Set<string>();
 
     for (const specialty of specialties) {

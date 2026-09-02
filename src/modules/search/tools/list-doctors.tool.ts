@@ -1,6 +1,6 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { z } from 'zod';
-import type { PublicDoctorProfile } from '../../doctor/doctor.contract';
+import type { ListedDoctorSummary } from '../../doctor/doctor.contract';
 import { DEFAULT_TOOL_RESULT_LIMIT, DOCTOR_TOOL_PORT, MAX_TOOL_RESULT_LIMIT, TOOL_NAMES } from './search-tool.constants';
 import type { AgentTool, DoctorToolPort } from './search-tool.contract';
 
@@ -16,7 +16,6 @@ export type ListDoctorsInput = z.infer<typeof inputSchema>;
 export interface DoctorListing {
   id: string;
   fullName: string;
-  bio: string | null;
   languages: string[];
   qualification: string | null;
   yearsOfExperience: number | null;
@@ -37,9 +36,12 @@ export interface ListDoctorsOutput {
  * filters a patient can express (type of professional, language, budget) and
  * nothing that could act as a relevance knob.
  *
- * `registrationNumber` is dropped from `PublicDoctorProfile` on the way out:
- * it is a regulator-facing credential identifier, and an external automation
- * client has no use for it that browsing a doctor's card requires.
+ * `registrationNumber` is dropped on the way out: it is a regulator-facing
+ * credential identifier, and an external automation client has no use for it
+ * that browsing a doctor's card requires. `bio` is absent for a different
+ * reason — the facade's listing projection (`ListedDoctorSummary`) excludes
+ * it by design, since unbounded profile prose belongs to FR-4.3's profile
+ * screen, not to an FR-4.2 listing row.
  */
 @Injectable()
 export class ListDoctorsTool implements AgentTool<ListDoctorsInput, ListDoctorsOutput> {
@@ -67,11 +69,10 @@ export class ListDoctorsTool implements AgentTool<ListDoctorsInput, ListDoctorsO
 }
 
 /** Shared with `discover-care.tool.ts` so both tools describe a doctor identically. */
-export function toDoctorListing(doctor: PublicDoctorProfile): DoctorListing {
+export function toDoctorListing(doctor: ListedDoctorSummary): DoctorListing {
   return {
     id: doctor.id,
     fullName: doctor.fullName,
-    bio: doctor.bio,
     languages: doctor.languages,
     qualification: doctor.qualification,
     yearsOfExperience: doctor.yearsOfExperience,
