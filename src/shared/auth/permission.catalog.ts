@@ -92,6 +92,10 @@ export const PERMISSIONS = {
   AI_READ: 'ai.read',
   /** Third-party credentials AND spend — the client's LLM account is billed at actuals. Treated like `admins.manage`: `super_admin` only. */
   AI_MANAGE: 'ai.manage',
+
+  MCP_READ: 'mcp.read',
+  /** Grants an external machine access to our catalogue, fee and doctor data — `super_admin` only. */
+  MCP_MANAGE: 'mcp.manage',
 } as const;
 
 export type PermissionKey = (typeof PERMISSIONS)[keyof typeof PERMISSIONS];
@@ -156,6 +160,8 @@ const DESCRIPTIONS: Record<PermissionKey, string> = {
   [PERMISSIONS.CONFIG_MANAGE]: 'Edit app configuration values.',
   [PERMISSIONS.AI_READ]: 'View the configured AI providers, models and API-key health.',
   [PERMISSIONS.AI_MANAGE]: 'Add or edit AI providers and API keys, and test a key against its provider.',
+  [PERMISSIONS.MCP_READ]: 'View external MCP client integrations and their tool scopes.',
+  [PERMISSIONS.MCP_MANAGE]: 'Create, rescope, deactivate or delete an external MCP client integration.',
 };
 
 export const PERMISSION_DEFINITIONS: readonly PermissionDefinition[] = Object.values(PERMISSIONS).map((key) => ({
@@ -208,7 +214,7 @@ export const ROLE_DEFINITIONS: readonly RoleDefinition[] = [
 const ALL_PERMISSIONS = Object.values(PERMISSIONS);
 
 export const ROLE_PERMISSIONS: Record<RoleCode, readonly PermissionKey[]> = {
-  // All 48 — seeded explicitly (so `GET /admin/roles` shows the truth) AND
+  // All 50 — seeded explicitly (so `GET /admin/roles` shows the truth) AND
   // short-circuited in the resolution query (identity-access.repository.ts),
   // so a permission added between deploys can never lock the owner out
   // before the seed re-runs.
@@ -244,6 +250,7 @@ export const ROLE_PERMISSIONS: Record<RoleCode, readonly PermissionKey[]> = {
     // support work; `ai.manage` (spend + third-party credentials) is not, and
     // stays super_admin-only.
     PERMISSIONS.AI_READ,
+    PERMISSIONS.MCP_READ,
   ],
 
   clinical_governance: [
