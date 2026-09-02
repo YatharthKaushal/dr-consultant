@@ -1,10 +1,20 @@
-import type { AccountType } from '../../schema/enums.schema';
+import type { AccountType, ActorType } from '../../schema/enums.schema';
 
 export interface ContactIdentity {
   id: string;
   accountType: AccountType;
   isActive: boolean;
   mobileNumber: string;
+}
+
+/**
+ * Who to attribute a `revokeAllSessions` call's `audit_log` entry to, when
+ * it isn't the account revoking its own sessions — e.g. an admin suspending
+ * a doctor/patient. See `revokeAllSessions`'s doc comment.
+ */
+export interface AuditActorOverride {
+  actorType: ActorType;
+  actorId: string;
 }
 
 /**
@@ -20,6 +30,17 @@ export interface ContactIdentity {
 export interface IdentityContract {
   getEffectivePermissions(adminId: string): Promise<string[]>;
   hasPermission(adminId: string, key: string): Promise<boolean>;
-  revokeAllSessions(accountType: AccountType, id: string): Promise<void>;
+  /**
+   * Revokes every live session for `(accountType, id)`. The resulting
+   * `audit_log` entry is attributed to `actor` when given (e.g. the admin
+   * who suspended this account); it defaults to self-attribution
+   * (`actorType: accountType, actorId: id`) when omitted, which is what
+   * `POST /auth/logout-all`'s own self-service call relies on. A caller
+   * acting on someone else's account — `PatientService`/
+   * `DoctorVerificationService` on suspension — MUST pass `actor` explicitly,
+   * or the audit trail wrongly reads as the affected account logging itself
+   * out.
+   */
+  revokeAllSessions(accountType: AccountType, id: string, actor?: AuditActorOverride): Promise<void>;
   getContactIdentity(accountType: AccountType, id: string): Promise<ContactIdentity | null>;
 }

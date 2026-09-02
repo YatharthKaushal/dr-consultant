@@ -43,6 +43,8 @@ export const IDENTITY_AUDIT_ENTITY_TYPES = {
 
 export const IDENTITY_ERROR_CODES = {
   ACCOUNT_NOT_FOUND_FOR_ROLE: 'ACCOUNT_NOT_FOUND_FOR_ROLE',
+  /** `GET /auth/me`: the account summary vanished between token resolution and this read — distinct from `ADMIN_NOT_FOUND` (an admin-management target lookup). */
+  ACCOUNT_NOT_FOUND: 'ACCOUNT_NOT_FOUND',
   CHALLENGE_NOT_FOUND: 'CHALLENGE_NOT_FOUND',
   CHALLENGE_ALREADY_USED: 'CHALLENGE_ALREADY_USED',
   CHALLENGE_EXPIRED: 'CHALLENGE_EXPIRED',
