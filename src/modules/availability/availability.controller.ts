@@ -6,7 +6,7 @@ import { CreateBlockDto, CreateOverrideDto, ListSlotsQueryDto, ReplaceWeeklySche
 import { AvailabilityRuleService } from './availability-rule.service';
 import { AvailabilitySettingsService } from './availability-settings.service';
 import { AvailabilitySlotService } from './availability-slot.service';
-import { uuidParam } from './availability-uuid.pipe';
+import { createUuidValidationPipe } from '../../shared/errors/uuid-param.pipe';
 
 /**
  * Doctor self-service: weekly schedule, date-wise overrides, blocked dates,
@@ -49,7 +49,7 @@ export class AvailabilityController {
 
   @Delete('availability/overrides/:id')
   @HttpCode(HttpStatus.NO_CONTENT)
-  async removeOverride(@CurrentUser() auth: AuthContext, @Param('id', uuidParam()) id: string): Promise<void> {
+  async removeOverride(@CurrentUser() auth: AuthContext, @Param('id', createUuidValidationPipe('id')) id: string): Promise<void> {
     await this.ruleService.removeOverride(auth.accountId, 'doctor', auth.accountId, id);
   }
 
@@ -61,7 +61,7 @@ export class AvailabilityController {
 
   @Delete('availability/blocks/:id')
   @HttpCode(HttpStatus.NO_CONTENT)
-  async removeBlock(@CurrentUser() auth: AuthContext, @Param('id', uuidParam()) id: string): Promise<void> {
+  async removeBlock(@CurrentUser() auth: AuthContext, @Param('id', createUuidValidationPipe('id')) id: string): Promise<void> {
     await this.ruleService.removeBlock(auth.accountId, 'doctor', auth.accountId, id);
   }
 

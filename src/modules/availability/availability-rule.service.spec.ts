@@ -34,8 +34,11 @@ function createDeps() {
   const audit = { write: jest.fn().mockResolvedValue(undefined) } as unknown as jest.Mocked<AuditService>;
 
   // A minimal fake `Database` whose `.transaction()` just invokes the callback with itself as `tx`.
+  // `.execute()` backs `lockDateGuard`'s `pg_advisory_xact_lock` call — a no-op here since there's
+  // no real Postgres connection in these unit tests.
   const db = {
     transaction: jest.fn(async (cb: (tx: unknown) => unknown) => cb(db)),
+    execute: jest.fn().mockResolvedValue(undefined),
   } as unknown as jest.Mocked<Database>;
 
   const service = new AvailabilityRuleService(db, repo, audit);
@@ -85,6 +88,18 @@ describe('AvailabilityRuleService', () => {
         expect.objectContaining({ action: 'update', entityType: 'availability_weekly_schedule', entityId: 'doctor-1' }),
         expect.anything(),
       );
+    });
+
+    it('allows two CONTIGUOUS rules for the same day (end of one exactly equals start of the next — touching, not overlapping)', async () => {
+      const { service, repo } = createDeps();
+      repo.replaceWeekly.mockResolvedValue([row(), row({ id: 'rule-2', startTime: '11:00:00', endTime: '13:00:00' })]);
+
+      await service.replaceWeekly('doctor-1', 'doctor', 'doctor-1', [
+        { dayOfWeek: 1, startTime: '09:00', endTime: '11:00' },
+        { dayOfWeek: 1, startTime: '11:00', endTime: '13:00' },
+      ]);
+
+      expect(repo.replaceWeekly).toHaveBeenCalled();
     });
 
     it('allows overlapping times on DIFFERENT days', async () => {
@@ -138,7 +153,10 @@ describe('AvailabilityRuleService', () => {
       const result = await service.addOverride('doctor-1', 'doctor', 'doctor-1', { specificDate: '2026-09-07', startTime: '14:00', endTime: '15:00' });
 
       expect(result.startTime).toBe('14:00:00');
-      expect(audit.write).toHaveBeenCalledWith(expect.objectContaining({ action: 'create', entityType: 'availability_override' }));
+      expect(audit.write).toHaveBeenCalledWith(
+        expect.objectContaining({ action: 'create', entityType: 'availability_override' }),
+        expect.anything(),
+      );
     });
 
     it('does not conflict with a block on the same date (different rule type)', async () => {
@@ -150,6 +168,25 @@ describe('AvailabilityRuleService', () => {
 
       expect(repo.addOverride).toHaveBeenCalled();
       expect(audit.write).toHaveBeenCalled();
+    });
+
+    it('acquires a per-(doctor, date) advisory lock inside the transaction BEFORE reading existing rows — closes the check-then-insert race under concurrent requests for the same date', async () => {
+      const { service, repo, db } = createDeps();
+      const callOrder: string[] = [];
+      (db.execute as jest.Mock).mockImplementation(async () => {
+        callOrder.push('lock');
+      });
+      repo.listForRange.mockImplementation(async () => {
+        callOrder.push('listForRange');
+        return [];
+      });
+      repo.addOverride.mockResolvedValue(row({ ruleType: 'custom_hours', dayOfWeek: null, specificDate: '2026-09-07', startTime: '14:00:00', endTime: '15:00:00' }));
+
+      await service.addOverride('doctor-1', 'doctor', 'doctor-1', { specificDate: '2026-09-07', startTime: '14:00', endTime: '15:00' });
+
+      expect(db.transaction).toHaveBeenCalled();
+      expect(db.execute).toHaveBeenCalledTimes(1);
+      expect(callOrder).toEqual(['lock', 'listForRange']);
     });
   });
 
@@ -257,6 +294,25 @@ describe('AvailabilityRuleService', () => {
 
       expect(repo.addBlock).toHaveBeenCalled();
       expect(audit.write).toHaveBeenCalled();
+    });
+
+    it('acquires a per-(doctor, date) advisory lock inside the transaction BEFORE reading existing rows', async () => {
+      const { service, repo, db } = createDeps();
+      const callOrder: string[] = [];
+      (db.execute as jest.Mock).mockImplementation(async () => {
+        callOrder.push('lock');
+      });
+      repo.listForRange.mockImplementation(async () => {
+        callOrder.push('listForRange');
+        return [];
+      });
+      repo.addBlock.mockResolvedValue(row({ ruleType: 'blocked', dayOfWeek: null, specificDate: '2026-09-07', startTime: null, endTime: null }));
+
+      await service.addBlock('doctor-1', 'doctor', 'doctor-1', { specificDate: '2026-09-07' });
+
+      expect(db.transaction).toHaveBeenCalled();
+      expect(db.execute).toHaveBeenCalledTimes(1);
+      expect(callOrder).toEqual(['lock', 'listForRange']);
     });
   });
 
