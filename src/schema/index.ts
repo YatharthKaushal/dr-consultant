@@ -62,6 +62,7 @@ export * from './agent-profiles.schema';
 export * from './agent-credentials.schema';
 export * from './mcp-clients.schema';
 export * from './mcp-request-attempts.schema';
+export * from './storage-providers.schema';
 
 export * from './content-items.schema';
 export * from './content-recommendations.schema';

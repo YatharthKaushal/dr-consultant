@@ -36,6 +36,13 @@
       "when": 1788344126321,
       "tag": "0004_search_ai_and_mcp",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1788354234194,
+      "tag": "0005_storage_providers",
+      "breakpoints": true
     }
   ]
 }
