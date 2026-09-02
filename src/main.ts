@@ -18,6 +18,25 @@ async function bootstrap(): Promise<void> {
     // load balancer, so per-IP OTP rate limiting (otp_challenges) sees each
     // caller's own IP rather than the proxy's.
     new FastifyAdapter({ logger: false, trustProxy: env.TRUST_PROXY }),
+    // *** rawBody: REQUIRED BY THE RAZORPAY WEBHOOK (M-12). ***
+    //
+    // `@nestjs/platform-fastify` only preserves the unparsed request body when
+    // this is set: its `useBodyParser` does `if (rawBody === true &&
+    // Buffer.isBuffer(body)) req.rawBody = body`, and without the flag
+    // `request.rawBody` is simply `undefined`. Verified by reading the
+    // installed adapter (11.2.1), not assumed.
+    //
+    // `payment-webhook.controller.ts` computes
+    // `HMAC-SHA256(rawBody, RAZORPAY_WEBHOOK_SECRET)` over those exact bytes
+    // and compares it against `x-razorpay-signature`. That check is the ENTIRE
+    // authentication for a `@Public()` route that can mark a consultation
+    // paid, so it has to be the bytes Razorpay actually signed — re-serialising
+    // the parsed object does not reproduce them (JSON round-tripping preserves
+    // neither key order nor number formatting).
+    //
+    // Cost is one retained Buffer per request with a parsed body; it is not
+    // retained for multipart, which never goes through this parser.
+    { rawBody: true },
   );
 
   // `@fastify/multipart` — registered globally so any module's controller

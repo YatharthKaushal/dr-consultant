@@ -13,6 +13,7 @@ import { DocumentModule } from './modules/document/document.module';
 import { IdentityModule } from './modules/identity/identity.module';
 import { McpModule } from './modules/mcp/mcp.module';
 import { PatientModule } from './modules/patient/patient.module';
+import { PaymentModule } from './modules/payment/payment.module';
 import { SearchModule } from './modules/search/search.module';
 import { SearchToolModule } from './modules/search/tools/search-tool.module';
 import { StorageModule } from './modules/storage/storage.module';
@@ -60,10 +61,17 @@ import { ErrorsModule } from './shared/errors/errors.module';
     // M-10: documents and file storage. Depends only on M-01/M-02
     // (`docs/MODULES.md`), so it needs no other feature module imported here.
     DocumentModule,
-    // M-11: booking. Imported after DocumentModule because it consumes
-    // `DocumentFacade` (and Patient/Doctor/Catalogue/Availability facades) —
-    // ordering is for readability, not correctness, since Nest resolves the
-    // provider graph regardless.
+    // M-12: payments and billing (Razorpay). Imports no feature module of its
+    // own — `docs/MODULES.md` lists M-12 as depending on M-05/M-11, but at the
+    // code level the dependency runs the other way: booking calls payments
+    // through `PaymentFacade`, and `createOrderForConsultation` takes the
+    // consultation id and fee as arguments rather than looking either up.
+    PaymentModule,
+    // M-11: booking. Listed after PaymentModule because it consumes
+    // `PaymentFacade` (bound at `BOOKING_PAYMENT_PORT`) as well as the
+    // Document/Patient/Doctor/Catalogue/Availability facades — ordering is for
+    // readability, not correctness, since Nest resolves the provider graph
+    // regardless.
     BookingModule,
     HealthModule,
   ],

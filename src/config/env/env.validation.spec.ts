@@ -7,6 +7,9 @@ const VALID: Record<string, string> = {
   SLIDE_API_KEY: 'sk_test_1234567890',
   SLIDE_OTP_WIDGET_ID: 'wgt_test_1234567890',
   AI_CREDENTIAL_ENCRYPTION_KEY: 'a'.repeat(64),
+  RAZORPAY_KEY_ID: 'rzp_test_1234567890',
+  RAZORPAY_KEY_SECRET: 'rzp_secret_1234567890',
+  RAZORPAY_WEBHOOK_SECRET: 'whsec_1234567890',
 };
 
 describe('env.validation', () => {
@@ -159,8 +162,54 @@ describe('env.validation', () => {
       'SLIDE_API_KEY',
       'SLIDE_OTP_WIDGET_ID',
       'AI_CREDENTIAL_ENCRYPTION_KEY',
+      'RAZORPAY_KEY_ID',
+      'RAZORPAY_KEY_SECRET',
+      'RAZORPAY_WEBHOOK_SECRET',
     ]);
     expect(Object.keys(envSchema.shape)).toContain('CORS_ORIGIN');
+  });
+
+  /**
+   * modules/payment (M-12). Razorpay's three variables are REQUIRED, in
+   * deliberate contrast to the four optional S3/Cloudinary ones above.
+   *
+   * The difference is that blob storage has two providers, so a missing
+   * credential only makes one of them unusable. Razorpay is the SOLE payment
+   * gateway this release integrates (`payments.schema.ts`: "No `gateway`
+   * column: Razorpay is the only one this release integrates"), so there is no
+   * fallback — a deployment missing a key cannot take a single payment, and
+   * finding that out at the first checkout instead of at boot is strictly
+   * worse. Same precedent as `SLIDE_API_KEY`.
+   */
+  it.each([['RAZORPAY_KEY_ID'], ['RAZORPAY_KEY_SECRET'], ['RAZORPAY_WEBHOOK_SECRET']])(
+    'refuses to boot without %s — Razorpay is the only gateway, so there is no degraded mode',
+    (key) => {
+      const withoutKey = { ...VALID };
+      delete withoutKey[key];
+
+      expect(() => validateEnv(withoutKey)).toThrow('process.exit:1');
+
+      const output = stderrSpy.mock.calls.map((call) => String(call[0])).join('');
+      expect(output).toContain('Missing required environment variable');
+      expect(output).toContain(`- ${key}`);
+    },
+  );
+
+  it('accepts the Razorpay credentials and exposes them typed', () => {
+    const env = validateEnv({ ...VALID });
+    expect(env.RAZORPAY_KEY_ID).toBe('rzp_test_1234567890');
+    expect(env.RAZORPAY_KEY_SECRET).toBe('rzp_secret_1234567890');
+    // The webhook secret is a SEPARATE secret from the API key pair — it is
+    // set independently when the webhook is registered, and it is the entire
+    // auth boundary for the public webhook route.
+    expect(env.RAZORPAY_WEBHOOK_SECRET).toBe('whsec_1234567890');
+    expect(env.RAZORPAY_WEBHOOK_SECRET).not.toBe(env.RAZORPAY_KEY_SECRET);
+  });
+
+  it('rejects an empty Razorpay key rather than treating it as absent-and-fine', () => {
+    expect(() => validateEnv({ ...VALID, RAZORPAY_KEY_ID: '' })).toThrow('process.exit:1');
+    const output = stderrSpy.mock.calls.map((call) => String(call[0])).join('');
+    expect(output).toContain('- RAZORPAY_KEY_ID');
   });
 
   it('rejects an AI_CREDENTIAL_ENCRYPTION_KEY that is not 64 hex characters', () => {
