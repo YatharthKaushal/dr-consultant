@@ -1,4 +1,4 @@
-import { Type } from 'class-transformer';
+import { Transform, Type } from 'class-transformer';
 import {
   ArrayMaxSize,
   IsArray,
@@ -128,12 +128,31 @@ export class ListConcernsQueryDto {
 }
 
 /** FR-4.4's filter and sort surface for the plain doctor listing. */
+/**
+ * A repeated query parameter (`?languages=Hindi&languages=English`) arrives
+ * as an array, but a SINGLE occurrence (`?languages=Hindi`) arrives as a bare
+ * string — which `@IsArray()` then rejects with a message about array size
+ * that tells the caller nothing useful. Coercing here means one language and
+ * several behave identically.
+ *
+ * Note this API takes the repeated-parameter form only. `?languages[]=Hindi`
+ * is NOT equivalent: Node's query parser reads `languages[]` as a key of that
+ * literal name, and the global `ValidationPipe`'s `whitelist` then drops it —
+ * so a bracket-style filter is silently ignored rather than applied. That is
+ * a property of the app-wide parser and whitelist settings, not of this DTO.
+ */
+function singleValueToArray({ value }: { value: unknown }): unknown {
+  if (typeof value === 'string') return [value];
+  return value;
+}
+
 export class ListDoctorsQueryDto {
   @IsOptional()
   @IsUUID()
   specialtyId?: string;
 
   @IsOptional()
+  @Transform(singleValueToArray)
   @IsArray()
   @ArrayMaxSize(MAX_LANGUAGES)
   @IsString({ each: true })
