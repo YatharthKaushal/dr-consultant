@@ -1,4 +1,4 @@
-import { ConflictException } from '@nestjs/common';
+import { ConflictException, NotFoundException } from '@nestjs/common';
 import type { DoctorRow } from '../../schema/doctors.schema';
 import type { AuditService } from '../../shared/audit/audit.service';
 import type { IdentityFacade } from '../identity/identity.facade';
@@ -55,7 +55,91 @@ function createDeps() {
 }
 
 describe('DoctorVerificationService', () => {
+  describe('404 handling — doctor does not exist', () => {
+    it('setVerificationStatus 404s when the doctor does not exist', async () => {
+      const { service, repo } = createDeps();
+      repo.findById.mockResolvedValue(null);
+
+      await expect(service.setVerificationStatus('admin-1', 'missing', { status: 'verified' })).rejects.toBeInstanceOf(
+        NotFoundException,
+      );
+    });
+
+    it('setListing 404s when the doctor does not exist', async () => {
+      const { service, repo } = createDeps();
+      repo.findById.mockResolvedValue(null);
+
+      await expect(service.setListing('admin-1', 'missing', { isListed: true })).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    it('setFee 404s when the doctor does not exist', async () => {
+      const { service, repo } = createDeps();
+      repo.findById.mockResolvedValue(null);
+
+      await expect(service.setFee('admin-1', 'missing', { consultationFeeInr: 500 })).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    it('setExpertRole 404s when the doctor does not exist', async () => {
+      const { service, repo } = createDeps();
+      repo.findById.mockResolvedValue(null);
+
+      await expect(service.setExpertRole('admin-1', 'missing', { seniorityLevel: 'expert' })).rejects.toBeInstanceOf(
+        NotFoundException,
+      );
+    });
+  });
+
+  describe('404 handling — repository update races (row disappears after the existence check)', () => {
+    it('setVerificationStatus 404s when updateVerification returns null', async () => {
+      const { service, repo } = createDeps();
+      repo.findById.mockResolvedValue(baseDoctor({ verificationStatus: 'pending' }));
+      repo.updateVerification.mockResolvedValue(null);
+
+      await expect(service.setVerificationStatus('admin-1', 'doctor-1', { status: 'verified' })).rejects.toBeInstanceOf(
+        NotFoundException,
+      );
+    });
+
+    it('setListing 404s when updateListing returns null', async () => {
+      const { service, repo } = createDeps();
+      repo.findById.mockResolvedValue(baseDoctor({ verificationStatus: 'verified', isListed: false }));
+      repo.updateListing.mockResolvedValue(null);
+
+      await expect(service.setListing('admin-1', 'doctor-1', { isListed: true })).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    it('setFee 404s when updateFee returns null', async () => {
+      const { service, repo } = createDeps();
+      repo.findById.mockResolvedValue(baseDoctor({ consultationFeeInr: '500.00' }));
+      repo.updateFee.mockResolvedValue(null);
+
+      await expect(service.setFee('admin-1', 'doctor-1', { consultationFeeInr: 750 })).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    it('setExpertRole 404s when updateSeniority returns null', async () => {
+      const { service, repo } = createDeps();
+      repo.findById.mockResolvedValue(baseDoctor({ seniorityLevel: 'standard' }));
+      repo.updateSeniority.mockResolvedValue(null);
+
+      await expect(service.setExpertRole('admin-1', 'doctor-1', { seniorityLevel: 'expert' })).rejects.toBeInstanceOf(
+        NotFoundException,
+      );
+    });
+  });
+
   describe('setVerificationStatus', () => {
+    it('moving from `pending` to `under_review` does NOT force isListed, set verifiedByAdminId/verifiedAt, or revoke sessions', async () => {
+      const { service, repo, identity } = createDeps();
+      repo.findById.mockResolvedValue(baseDoctor({ verificationStatus: 'pending', isListed: false }));
+      repo.updateVerification.mockResolvedValue(baseDoctor({ verificationStatus: 'under_review' }));
+
+      await service.setVerificationStatus('admin-1', 'doctor-1', { status: 'under_review' });
+
+      const [, update] = repo.updateVerification.mock.calls[0]!;
+      expect(update).toEqual({ verificationStatus: 'under_review' });
+      expect(identity.revokeAllSessions).not.toHaveBeenCalled();
+    });
+
     it('is a no-op (no update, no session revocation, no audit) when the status is unchanged', async () => {
       const { service, repo, audit, identity } = createDeps();
       repo.findById.mockResolvedValue(baseDoctor({ verificationStatus: 'verified' }));
@@ -142,6 +226,35 @@ describe('DoctorVerificationService', () => {
 
       expect(repo.updateListing).not.toHaveBeenCalled();
       expect(audit.write).not.toHaveBeenCalled();
+    });
+
+    it('changes only allowInstantConsult when isListed is omitted from the dto — isListed carries its EXISTING value forward, not a default', async () => {
+      const { service, repo, audit } = createDeps();
+      repo.findById.mockResolvedValue(baseDoctor({ verificationStatus: 'verified', isListed: true, allowInstantConsult: false }));
+      repo.updateListing.mockResolvedValue(baseDoctor({ verificationStatus: 'verified', isListed: true, allowInstantConsult: true }));
+
+      await service.setListing('admin-1', 'doctor-1', { allowInstantConsult: true });
+
+      expect(repo.updateListing).toHaveBeenCalledWith('doctor-1', { isListed: true, allowInstantConsult: true });
+      expect(audit.write).toHaveBeenCalled();
+    });
+
+    it('an empty dto (both fields omitted) is a no-op', async () => {
+      const { service, repo, audit } = createDeps();
+      repo.findById.mockResolvedValue(baseDoctor({ verificationStatus: 'verified', isListed: true, allowInstantConsult: false }));
+
+      await service.setListing('admin-1', 'doctor-1', {});
+
+      expect(repo.updateListing).not.toHaveBeenCalled();
+      expect(audit.write).not.toHaveBeenCalled();
+    });
+
+    it('allows explicitly setting isListed:false on a verified doctor without the verification-gate check firing', async () => {
+      const { service, repo } = createDeps();
+      repo.findById.mockResolvedValue(baseDoctor({ verificationStatus: 'verified', isListed: true }));
+      repo.updateListing.mockResolvedValue(baseDoctor({ verificationStatus: 'verified', isListed: false }));
+
+      await expect(service.setListing('admin-1', 'doctor-1', { isListed: false })).resolves.toBeDefined();
     });
   });
 

@@ -151,6 +151,33 @@ describe('PatientService', () => {
       expect(repo.updateProfile).toHaveBeenCalledWith('patient-1', { fullName: '   ' });
       expect(audit.write).not.toHaveBeenCalled();
     });
+
+    it('completes the profile using the EXISTING fullName when only dateOfBirth is submitted this call', async () => {
+      // Regression coverage for the `nextFullName = existing.fullName` fallback branch:
+      // a prior call already set a real fullName but dateOfBirth was still missing, so
+      // the account is still 'pending'. This call supplies only dateOfBirth.
+      const { service, repo, audit } = createDeps();
+      repo.findById.mockResolvedValue(basePatient({ status: 'pending', fullName: 'Jane', dateOfBirth: null }) as never);
+      repo.updateProfile.mockResolvedValue(basePatient({ status: 'active', fullName: 'Jane', dateOfBirth: '1990-01-01' }) as never);
+
+      await service.updateOwnProfile('patient-1', { dateOfBirth: '1990-01-01' });
+
+      expect(repo.updateProfile).toHaveBeenCalledWith('patient-1', { dateOfBirth: '1990-01-01', status: 'active' });
+      expect(audit.write).toHaveBeenCalledWith(
+        expect.objectContaining({ metadata: expect.objectContaining({ from: 'pending', to: 'active' }) }),
+      );
+    });
+
+    it('does NOT complete the profile from an existing WHITESPACE-ONLY fullName, even once dateOfBirth is supplied', async () => {
+      const { service, repo, audit } = createDeps();
+      repo.findById.mockResolvedValue(basePatient({ status: 'pending', fullName: '   ', dateOfBirth: null }) as never);
+      repo.updateProfile.mockResolvedValue(basePatient({ status: 'pending', fullName: '   ', dateOfBirth: '1990-01-01' }) as never);
+
+      await service.updateOwnProfile('patient-1', { dateOfBirth: '1990-01-01' });
+
+      expect(repo.updateProfile).toHaveBeenCalledWith('patient-1', { dateOfBirth: '1990-01-01' });
+      expect(audit.write).not.toHaveBeenCalled();
+    });
   });
 
   describe('admin: listForAdmin / getForAdmin', () => {

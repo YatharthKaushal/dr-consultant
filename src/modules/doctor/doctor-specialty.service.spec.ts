@@ -101,9 +101,67 @@ describe('DoctorSpecialtyService', () => {
       expect(repo.setPrimaryFlag).toHaveBeenCalledWith('ds-1', true, expect.anything());
       expect(repo.insert).not.toHaveBeenCalled();
     });
+
+    it('demotes an already-primary specialty to non-primary WITHOUT calling clearPrimary (nothing else needs unsetting)', async () => {
+      const { service, doctorRepo, repo } = createDeps();
+      doctorRepo.findById.mockResolvedValue(baseDoctor());
+      repo.findSpecialtyById.mockResolvedValue(baseSpecialty());
+      repo.findByDoctorAndSpecialty.mockResolvedValue({ id: 'ds-1', doctorId: 'doctor-1', specialtyId: 'specialty-1', isPrimary: true, createdAt: new Date() });
+      repo.setPrimaryFlag.mockResolvedValue({ id: 'ds-1', doctorId: 'doctor-1', specialtyId: 'specialty-1', isPrimary: false, createdAt: new Date() });
+
+      await service.assign('admin-1', 'doctor-1', { specialtyId: 'specialty-1', isPrimary: false });
+
+      expect(repo.clearPrimary).not.toHaveBeenCalled();
+      expect(repo.setPrimaryFlag).toHaveBeenCalledWith('ds-1', false, expect.anything());
+    });
+
+    it('defaults isPrimary to false when the dto omits it', async () => {
+      const { service, doctorRepo, repo } = createDeps();
+      doctorRepo.findById.mockResolvedValue(baseDoctor());
+      repo.findSpecialtyById.mockResolvedValue(baseSpecialty());
+      repo.findByDoctorAndSpecialty.mockResolvedValue(null);
+      repo.insert.mockResolvedValue({ id: 'ds-3', doctorId: 'doctor-1', specialtyId: 'specialty-1', isPrimary: false, createdAt: new Date() });
+
+      await service.assign('admin-1', 'doctor-1', { specialtyId: 'specialty-1' });
+
+      expect(repo.insert).toHaveBeenCalledWith('doctor-1', 'specialty-1', false, expect.anything());
+      expect(repo.clearPrimary).not.toHaveBeenCalled();
+    });
+
+    it('throws doctorNotFound if insert unexpectedly returns no row (race)', async () => {
+      const { service, doctorRepo, repo } = createDeps();
+      doctorRepo.findById.mockResolvedValue(baseDoctor());
+      repo.findSpecialtyById.mockResolvedValue(baseSpecialty());
+      repo.findByDoctorAndSpecialty.mockResolvedValue(null);
+      repo.insert.mockResolvedValue(null as never);
+
+      await expect(service.assign('admin-1', 'doctor-1', { specialtyId: 'specialty-1' })).rejects.toBeInstanceOf(
+        NotFoundException,
+      );
+    });
+
+    it('throws doctorNotFound if setPrimaryFlag unexpectedly returns null (race)', async () => {
+      const { service, doctorRepo, repo } = createDeps();
+      doctorRepo.findById.mockResolvedValue(baseDoctor());
+      repo.findSpecialtyById.mockResolvedValue(baseSpecialty());
+      repo.findByDoctorAndSpecialty.mockResolvedValue({ id: 'ds-1', doctorId: 'doctor-1', specialtyId: 'specialty-1', isPrimary: false, createdAt: new Date() });
+      repo.setPrimaryFlag.mockResolvedValue(null);
+
+      await expect(service.assign('admin-1', 'doctor-1', { specialtyId: 'specialty-1', isPrimary: true })).rejects.toBeInstanceOf(
+        NotFoundException,
+      );
+    });
   });
 
   describe('remove', () => {
+    it('404s when the doctor does not exist', async () => {
+      const { service, doctorRepo, repo } = createDeps();
+      doctorRepo.findById.mockResolvedValue(null);
+
+      await expect(service.remove('admin-1', 'missing', 'specialty-1')).rejects.toBeInstanceOf(NotFoundException);
+      expect(repo.remove).not.toHaveBeenCalled();
+    });
+
     it('does not audit a remove that was already a no-op (specialty not assigned)', async () => {
       const { service, doctorRepo, repo, audit } = createDeps();
       doctorRepo.findById.mockResolvedValue(baseDoctor());
