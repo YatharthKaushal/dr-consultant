@@ -20,9 +20,12 @@
     "db:studio": "drizzle-kit studio",
     "db:seed": "ts-node -r tsconfig-paths/register src/modules/identity/identity.seed.ts",
     "db:seed:catalogue": "ts-node -r tsconfig-paths/register src/modules/catalogue/catalogue.seed.ts",
-    "db:seed:search": "ts-node -r tsconfig-paths/register src/modules/search/search.seed.ts"
+    "db:seed:search": "ts-node -r tsconfig-paths/register src/modules/search/search.seed.ts",
+    "db:seed:storage": "ts-node -r tsconfig-paths/register src/modules/storage/storage.seed.ts"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1124.0",
+    "@aws-sdk/s3-request-presigner": "^3.1124.0",
     "@langchain/anthropic": "^1.5.9",
     "@langchain/core": "^1.2.9",
     "@langchain/google-genai": "^2.3.0",
@@ -37,6 +40,7 @@
     "@synquic/slide": "^0.2.0",
     "class-transformer": "^0.5.1",
     "class-validator": "^0.14.1",
+    "cloudinary": "^2.11.0",
     "dotenv": "^17.4.2",
     "drizzle-orm": "^0.45.2",
     "libphonenumber-js": "^1.13.12",

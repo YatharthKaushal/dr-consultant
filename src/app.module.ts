@@ -13,6 +13,7 @@ import { McpModule } from './modules/mcp/mcp.module';
 import { PatientModule } from './modules/patient/patient.module';
 import { SearchModule } from './modules/search/search.module';
 import { SearchToolModule } from './modules/search/tools/search-tool.module';
+import { StorageModule } from './modules/storage/storage.module';
 import { AppConfigModule } from './shared/app-config/app-config.module';
 import { AuditModule } from './shared/audit/audit.module';
 import { AuthModule } from './shared/auth/auth.module';
@@ -53,6 +54,7 @@ import { ErrorsModule } from './shared/errors/errors.module';
     // own LangChain agent) without them having to reach through MCP.
     SearchToolModule,
     McpModule,
+    StorageModule,
     HealthModule,
   ],
 })

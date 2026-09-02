@@ -96,6 +96,10 @@ export const PERMISSIONS = {
   MCP_READ: 'mcp.read',
   /** Grants an external machine access to our catalogue, fee and doctor data — `super_admin` only. */
   MCP_MANAGE: 'mcp.manage',
+
+  STORAGE_READ: 'storage.read',
+  /** Third-party blob-storage config AND platform-wide upload availability — misconfiguring it breaks uploads for everyone. Treated like `ai.manage`: `super_admin` only. */
+  STORAGE_MANAGE: 'storage.manage',
 } as const;
 
 export type PermissionKey = (typeof PERMISSIONS)[keyof typeof PERMISSIONS];
@@ -162,6 +166,8 @@ const DESCRIPTIONS: Record<PermissionKey, string> = {
   [PERMISSIONS.AI_MANAGE]: 'Add or edit AI providers and API keys, and test a key against its provider.',
   [PERMISSIONS.MCP_READ]: 'View external MCP client integrations and their tool scopes.',
   [PERMISSIONS.MCP_MANAGE]: 'Create, rescope, deactivate or delete an external MCP client integration.',
+  [PERMISSIONS.STORAGE_READ]: 'View the configured blob-storage providers and their health/cooldown state.',
+  [PERMISSIONS.STORAGE_MANAGE]: 'Edit a blob-storage provider’s bucket/cloud config, active state and priority.',
 };
 
 export const PERMISSION_DEFINITIONS: readonly PermissionDefinition[] = Object.values(PERMISSIONS).map((key) => ({
@@ -214,7 +220,7 @@ export const ROLE_DEFINITIONS: readonly RoleDefinition[] = [
 const ALL_PERMISSIONS = Object.values(PERMISSIONS);
 
 export const ROLE_PERMISSIONS: Record<RoleCode, readonly PermissionKey[]> = {
-  // All 50 — seeded explicitly (so `GET /admin/roles` shows the truth) AND
+  // All 52 — seeded explicitly (so `GET /admin/roles` shows the truth) AND
   // short-circuited in the resolution query (identity-access.repository.ts),
   // so a permission added between deploys can never lock the owner out
   // before the seed re-runs.
@@ -251,6 +257,9 @@ export const ROLE_PERMISSIONS: Record<RoleCode, readonly PermissionKey[]> = {
     // stays super_admin-only.
     PERMISSIONS.AI_READ,
     PERMISSIONS.MCP_READ,
+    // Read-only, same reasoning: diagnosing "why are uploads failing" is
+    // day-to-day support work; `storage.manage` stays super_admin-only.
+    PERMISSIONS.STORAGE_READ,
   ],
 
   clinical_governance: [

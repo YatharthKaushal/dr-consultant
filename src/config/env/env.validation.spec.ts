@@ -56,7 +56,31 @@ describe('env.validation', () => {
     expect(env.CORS_ORIGIN).toBeUndefined();
     expect(env.SLIDE_BASE_URL).toBeUndefined();
     expect(env.BOOTSTRAP_SUPER_ADMIN_MOBILE).toBeUndefined();
+    expect(env.S3_ACCESS_KEY_ID).toBeUndefined();
+    expect(env.S3_SECRET_ACCESS_KEY).toBeUndefined();
+    expect(env.CLOUDINARY_API_KEY).toBeUndefined();
+    expect(env.CLOUDINARY_API_SECRET).toBeUndefined();
     expect(stderrSpy).not.toHaveBeenCalled();
+  });
+
+  it('boots with no storage-provider credentials at all — a missing one degrades that provider, never the server', () => {
+    // modules/storage: unlike AI_CREDENTIAL_ENCRYPTION_KEY, none of the four
+    // S3/Cloudinary variables are in requiredEnv, so a build with neither
+    // provider configured must still validate cleanly.
+    expect(() => validateEnv({ ...VALID })).not.toThrow();
+    expect(REQUIRED_ENV_KEYS).not.toContain('S3_ACCESS_KEY_ID');
+    expect(REQUIRED_ENV_KEYS).not.toContain('S3_SECRET_ACCESS_KEY');
+    expect(REQUIRED_ENV_KEYS).not.toContain('CLOUDINARY_API_KEY');
+    expect(REQUIRED_ENV_KEYS).not.toContain('CLOUDINARY_API_SECRET');
+  });
+
+  it('accepts S3/Cloudinary credentials when only one provider is configured', () => {
+    const env = validateEnv({ ...VALID, S3_ACCESS_KEY_ID: 'AKIAEXAMPLE', S3_SECRET_ACCESS_KEY: 'shhh' });
+
+    expect(env.S3_ACCESS_KEY_ID).toBe('AKIAEXAMPLE');
+    expect(env.S3_SECRET_ACCESS_KEY).toBe('shhh');
+    expect(env.CLOUDINARY_API_KEY).toBeUndefined();
+    expect(env.CLOUDINARY_API_SECRET).toBeUndefined();
   });
 
   it('coerces numeric and boolean strings', () => {

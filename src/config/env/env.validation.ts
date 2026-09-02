@@ -127,6 +127,22 @@ const optionalEnv = z.object({
   // admin creation entirely when absent. Never read outside the seed script.
   BOOTSTRAP_SUPER_ADMIN_MOBILE: z.string().optional(),
   BOOTSTRAP_SUPER_ADMIN_NAME: z.string().min(1).default('Platform Owner'),
+
+  // modules/storage — S3 (primary). Deliberately OPTIONAL, unlike
+  // AI_CREDENTIAL_ENCRYPTION_KEY: a deployment may legitimately run with only
+  // one blob-storage provider configured (e.g. Cloudinary alone during early
+  // development, or S3 alone once Cloudinary is decommissioned). A missing
+  // credential here just means that one provider is unusable — exactly as if
+  // it started failing every call — never a boot failure. Non-secret settings
+  // (bucket, region, optional custom endpoint) are admin-editable, not env:
+  // see `storage_providers.config` (`storage-providers.schema.ts`).
+  S3_ACCESS_KEY_ID: z.string().optional(),
+  S3_SECRET_ACCESS_KEY: z.string().optional(),
+
+  // modules/storage — Cloudinary (automatic secondary). Optional for the
+  // same reason. Non-secret `cloudName` lives in `storage_providers.config`.
+  CLOUDINARY_API_KEY: z.string().optional(),
+  CLOUDINARY_API_SECRET: z.string().optional(),
 });
 
 export const envSchema = requiredEnv.extend(optionalEnv.shape);
