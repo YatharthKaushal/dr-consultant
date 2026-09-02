@@ -21,7 +21,8 @@
     "db:seed": "ts-node -r tsconfig-paths/register src/modules/identity/identity.seed.ts",
     "db:seed:catalogue": "ts-node -r tsconfig-paths/register src/modules/catalogue/catalogue.seed.ts",
     "db:seed:search": "ts-node -r tsconfig-paths/register src/modules/search/search.seed.ts",
-    "db:seed:storage": "ts-node -r tsconfig-paths/register src/modules/storage/storage.seed.ts"
+    "db:seed:storage": "ts-node -r tsconfig-paths/register src/modules/storage/storage.seed.ts",
+    "db:seed:payments": "ts-node -r tsconfig-paths/register src/modules/payment/payment.seed.ts"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1124.0",
