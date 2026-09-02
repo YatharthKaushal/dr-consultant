@@ -1,4 +1,6 @@
 import { Module } from '@nestjs/common';
+import { StorageFacade } from '../storage/storage.facade';
+import { StorageModule } from '../storage/storage.module';
 import { CONSULTATION_LOOKUP_PROVIDER, DOCUMENT_STORAGE_PORT } from './document.constants';
 import { ConsultationLookupProvider } from './consultation-lookup.provider';
 import { DocumentConsultationController } from './document-consultation.controller';
@@ -8,31 +10,28 @@ import { PatientFileRepository } from './patient-file.repository';
 import { PatientFileService } from './patient-file.service';
 import { ReportRequestRepository } from './report-request.repository';
 import { ReportRequestService } from './report-request.service';
-import { UnavailableDocumentStorageProvider } from './unavailable-document-storage.provider';
 
 /**
  * Not `@Global()` — like `DoctorModule`/`CatalogueModule`/`AvailabilityModule`
  * /`SearchModule`, nothing outside this module resolves a DI token from
  * here; other modules consume `DocumentFacade` via normal constructor
- * injection after importing `DocumentModule`. No `imports` needed: `DATABASE`,
- * `AuditService` and `AppConfigService` are all `@Global()`, and this module
- * has no dependency on any other feature module's facade — its one
+ * injection after importing `DocumentModule`. `DATABASE`, `AuditService` and
+ * `AppConfigService` are all `@Global()`, so no `imports` entry is needed for
+ * those — `StorageModule` is a real import, because `DOCUMENT_STORAGE_PORT`
+ * resolves `StorageFacade` from it (below). This module's one OTHER
  * cross-module read (`consultations`) goes through the placeholder below,
  * not a facade call, because M-11 doesn't exist yet.
  *
  * ---------------------------------------------------------------------------
- * `DOCUMENT_STORAGE_PORT` is bound to `UnavailableDocumentStorageProvider` —
- * a placeholder, since `modules/storage` is being built in a parallel
- * worktree and does not exist here. *** POST-MERGE WIRING ***: once
- * `modules/storage` is merged, change ONE entry below:
- *
- *   imports:   [..., StorageModule]
- *   providers: [..., { provide: DOCUMENT_STORAGE_PORT, useExisting: StorageFacade }]
- *
- * exactly like `SEARCH_AI_PORT` was rebound to `AiFacade` post-M-09-merge
- * (see `search.module.ts`). `StorageFacade` must satisfy `DocumentStoragePort`
- * structurally — see `document-storage.contract.ts`. Nothing else in this
- * module, or its tests, needs to change.
+ * `DOCUMENT_STORAGE_PORT` is bound to the real `StorageFacade` (M-10 merge).
+ * `StorageFacade` satisfies `DocumentStoragePort` structurally (see
+ * `document-storage.contract.ts`) — no adapter, no cast — so a signature
+ * drift on either side surfaces here as a `tsc` error rather than a runtime
+ * surprise. `UnavailableDocumentStorageProvider` stays in the tree, unbound:
+ * it is the null-object this module was built and tested against, and it is
+ * what you rebind here to take storage out of the request path at the DI
+ * level — the harder kill-switch, one level below `StorageFacade`'s own
+ * provider-priority/`isActive` admin controls.
  *
  * `CONSULTATION_LOOKUP_PROVIDER` is bound to `ConsultationLookupProvider` (a
  * placeholder reading `consultations` directly — M-11/Booking doesn't exist
@@ -41,12 +40,13 @@ import { UnavailableDocumentStorageProvider } from './unavailable-document-stora
  * change to either service in this module.
  */
 @Module({
+  imports: [StorageModule],
   controllers: [DocumentController, DocumentConsultationController],
   providers: [
     PatientFileRepository,
     ReportRequestRepository,
     { provide: CONSULTATION_LOOKUP_PROVIDER, useClass: ConsultationLookupProvider },
-    { provide: DOCUMENT_STORAGE_PORT, useClass: UnavailableDocumentStorageProvider },
+    { provide: DOCUMENT_STORAGE_PORT, useExisting: StorageFacade },
     PatientFileService,
     ReportRequestService,
     DocumentFacade,
