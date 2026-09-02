@@ -23,6 +23,7 @@
     "db:seed:search": "ts-node -r tsconfig-paths/register src/modules/search/search.seed.ts"
   },
   "dependencies": {
+    "@fastify/multipart": "^10.1.1",
     "@langchain/anthropic": "^1.5.9",
     "@langchain/core": "^1.2.9",
     "@langchain/google-genai": "^2.3.0",
