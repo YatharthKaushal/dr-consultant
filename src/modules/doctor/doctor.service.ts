@@ -1,6 +1,7 @@
 import { ConflictException, Injectable, NotFoundException } from '@nestjs/common';
 import { AuditService } from '../../shared/audit/audit.service';
 import type { AuthContext } from '../../shared/auth/auth.types';
+import { isUniqueConstraintViolation } from '../../shared/errors/postgres-error.util';
 import { CatalogueFacade } from '../catalogue/catalogue.facade';
 import { DoctorDocumentRepository } from './doctor-document.repository';
 import { DoctorSpecialtyRepository } from './doctor-specialty.repository';
@@ -20,6 +21,7 @@ import {
 import { normalizeMobileNumber } from './doctor-phone.util';
 import { DoctorRepository, type DoctorProfileFieldsUpdate } from './doctor.repository';
 import type { DoctorSpecialtyRow } from '../../schema/doctor-specialties.schema';
+import type { DoctorRow } from '../../schema/doctors.schema';
 
 export interface DoctorProfileWithDetails extends SafeDoctorRow {
   specialties: PublicDoctorProfile['specialties'];
@@ -194,7 +196,24 @@ export class DoctorService {
       });
     }
 
-    const doctor = await this.repo.create({ mobileNumber, fullName: dto.fullName });
+    let doctor: DoctorRow;
+    try {
+      doctor = await this.repo.create({ mobileNumber, fullName: dto.fullName });
+    } catch (error) {
+      // Safety net for the check-then-insert race: two concurrent callers
+      // can both pass the `findByMobile` check above before either inserts,
+      // so the second insert hits the `doctors_mobile_number_unique`
+      // constraint instead. Converts that raw driver error into the same
+      // 409 the sequential check already throws, rather than letting it
+      // fall through to `HttpExceptionFilter`'s generic-500 branch.
+      if (isUniqueConstraintViolation(error)) {
+        throw new ConflictException({
+          code: DOCTOR_ERROR_CODES.MOBILE_NUMBER_TAKEN,
+          message: 'A doctor with this mobile number already exists.',
+        });
+      }
+      throw error;
+    }
     await this.audit.write({
       actorType: 'admin',
       actorId: actingAdminId,
@@ -231,7 +250,23 @@ export class DoctorService {
       }
     }
 
-    const updated = await this.repo.updateProfileFields(doctorId, fields);
+    let updated: DoctorRow | null;
+    try {
+      updated = await this.repo.updateProfileFields(doctorId, fields);
+    } catch (error) {
+      // Safety net for the check-then-update race: two concurrent callers
+      // can both pass the `findByRegistrationNumber` check above before
+      // either writes, so the second update hits the `doctors_registration_
+      // number_unique` constraint instead. Converts that raw driver error
+      // into the same 409 the sequential check already throws.
+      if (isUniqueConstraintViolation(error)) {
+        throw new ConflictException({
+          code: DOCTOR_ERROR_CODES.REGISTRATION_NUMBER_TAKEN,
+          message: 'This registration number is already in use.',
+        });
+      }
+      throw error;
+    }
     if (!updated) throw doctorNotFound();
 
     await this.audit.write({

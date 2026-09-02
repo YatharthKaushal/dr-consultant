@@ -71,6 +71,31 @@ describe('SpecialtyService', () => {
         expect.objectContaining({ action: 'create', entityType: 'specialty', entityId: 'specialty-1' }),
       );
     });
+
+    it('converts a concurrent unique-violation on insert (the check-then-insert race) into the same 409 SPECIALTY_CODE_TAKEN', async () => {
+      const { service, repo, audit } = createDeps();
+      repo.findByCode.mockResolvedValue(null); // sequential check passes...
+      repo.create.mockRejectedValue({ code: '23505', message: 'duplicate key value violates unique constraint' }); // ...but a concurrent insert beat this one to it
+
+      await expect(
+        service.adminCreate('admin-1', { code: 'psychiatry', name: 'Psychiatry', canPrescribe: true }),
+      ).rejects.toMatchObject({
+        status: 409,
+        response: { code: 'SPECIALTY_CODE_TAKEN' },
+      });
+      expect(audit.write).not.toHaveBeenCalled();
+    });
+
+    it('rethrows an unrelated insert error unchanged (not a unique violation)', async () => {
+      const { service, repo } = createDeps();
+      repo.findByCode.mockResolvedValue(null);
+      const dbError = new Error('connection reset');
+      repo.create.mockRejectedValue(dbError);
+
+      await expect(
+        service.adminCreate('admin-1', { code: 'psychiatry', name: 'Psychiatry', canPrescribe: true }),
+      ).rejects.toBe(dbError);
+    });
   });
 
   describe('adminUpdate — canPrescribe/prescriptionTemplate rule', () => {

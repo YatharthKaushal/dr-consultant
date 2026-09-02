@@ -341,6 +341,27 @@ describe('DoctorService', () => {
       );
       expect(repo.create).not.toHaveBeenCalled();
     });
+
+    it('converts a concurrent unique-violation on insert (the check-then-insert race) into the same 409 MOBILE_NUMBER_TAKEN', async () => {
+      const { service, repo, audit } = createDeps();
+      repo.findByMobile.mockResolvedValue(null); // sequential check passes...
+      repo.create.mockRejectedValue({ code: '23505', message: 'duplicate key value violates unique constraint' }); // ...but a concurrent insert beat this one to it
+
+      await expect(service.adminCreate('admin-1', { mobileNumber: '+919876543210', fullName: 'X' })).rejects.toMatchObject({
+        status: 409,
+        response: { code: 'MOBILE_NUMBER_TAKEN' },
+      });
+      expect(audit.write).not.toHaveBeenCalled();
+    });
+
+    it('rethrows an unrelated insert error unchanged (not a unique violation)', async () => {
+      const { service, repo } = createDeps();
+      repo.findByMobile.mockResolvedValue(null);
+      const dbError = new Error('connection reset');
+      repo.create.mockRejectedValue(dbError);
+
+      await expect(service.adminCreate('admin-1', { mobileNumber: '+919876543210', fullName: 'X' })).rejects.toBe(dbError);
+    });
   });
 
   describe('adminUpdateProfileFields', () => {
@@ -416,6 +437,30 @@ describe('DoctorService', () => {
       expect(audit.write).toHaveBeenCalledWith(
         expect.objectContaining({ action: 'update', entityType: 'doctor', entityId: 'doctor-1' }),
       );
+    });
+
+    it('converts a concurrent unique-violation on update (the check-then-update race) into the same 409 REGISTRATION_NUMBER_TAKEN', async () => {
+      const { service, repo, audit } = createDeps();
+      repo.findById.mockResolvedValue(baseDoctor({ registrationNumber: 'OLD-1' }));
+      repo.findByRegistrationNumber.mockResolvedValue(null); // sequential check passes...
+      repo.updateProfileFields.mockRejectedValue({ code: '23505', message: 'duplicate key value violates unique constraint' }); // ...but a concurrent update beat this one to it
+
+      await expect(
+        service.adminUpdateProfileFields('admin-1', 'doctor-1', { registrationNumber: 'NEW-1' }),
+      ).rejects.toMatchObject({
+        status: 409,
+        response: { code: 'REGISTRATION_NUMBER_TAKEN' },
+      });
+      expect(audit.write).not.toHaveBeenCalled();
+    });
+
+    it('rethrows an unrelated update error unchanged (not a unique violation)', async () => {
+      const { service, repo } = createDeps();
+      repo.findById.mockResolvedValue(baseDoctor());
+      const dbError = new Error('connection reset');
+      repo.updateProfileFields.mockRejectedValue(dbError);
+
+      await expect(service.adminUpdateProfileFields('admin-1', 'doctor-1', { fullName: 'New Name' })).rejects.toBe(dbError);
     });
   });
 });
