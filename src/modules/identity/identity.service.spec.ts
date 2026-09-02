@@ -1,4 +1,4 @@
-import { ForbiddenException, HttpException, NotFoundException } from '@nestjs/common';
+import { ForbiddenException, HttpException, NotFoundException, UnauthorizedException } from '@nestjs/common';
 import type { Database } from '../../config/db/database.config';
 import type { AppConfigService } from '../../shared/app-config/app-config.service';
 import type { AuditService } from '../../shared/audit/audit.service';
@@ -298,6 +298,197 @@ describe('IdentityService', () => {
           metadata: expect.objectContaining({ reason: 'logout_all', newTokenVersion: 3 }),
         }),
       );
+    });
+  });
+
+  describe('resendOtp', () => {
+    it('404s when the challenge does not exist', async () => {
+      const { service, repo } = createDeps();
+      repo.findChallengeById.mockResolvedValue(null);
+
+      await expect(service.resendOtp({ challengeId: 'missing' })).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    it('refuses an already-verified challenge', async () => {
+      const { service, repo, otp } = createDeps();
+      repo.findChallengeById.mockResolvedValue(baseChallenge({ verifiedAt: NOW }) as never);
+
+      await expect(service.resendOtp({ challengeId: 'challenge-1' })).rejects.toBeInstanceOf(HttpException);
+      expect(otp.retry).not.toHaveBeenCalled();
+    });
+
+    it('refuses a locally-expired challenge', async () => {
+      const { service, repo, otp } = createDeps();
+      repo.findChallengeById.mockResolvedValue(baseChallenge({ expiresAt: new Date(NOW.getTime() - 1000) }) as never);
+
+      await expect(service.resendOtp({ challengeId: 'challenge-1' })).rejects.toBeInstanceOf(HttpException);
+      expect(otp.retry).not.toHaveBeenCalled();
+    });
+
+    it('rejects at exactly the max resend count, without calling Slide', async () => {
+      const { service, repo, otp, appConfig } = createDeps();
+      (appConfig.getNumber as jest.Mock).mockImplementation((key: string) =>
+        Promise.resolve(key.includes('resend.max_per_challenge') ? 3 : 999),
+      );
+      repo.findChallengeById.mockResolvedValue(baseChallenge({ resendCount: 3 }) as never);
+
+      await expect(service.resendOtp({ challengeId: 'challenge-1' })).rejects.toBeInstanceOf(HttpException);
+      expect(otp.retry).not.toHaveBeenCalled();
+    });
+
+    it('allows a resend one below the max resend count', async () => {
+      const { service, repo, otp, appConfig } = createDeps();
+      (appConfig.getNumber as jest.Mock).mockImplementation((key: string) =>
+        Promise.resolve(key.includes('resend.max_per_challenge') ? 3 : key.includes('cooldown') ? 0 : 999),
+      );
+      repo.findChallengeById.mockResolvedValueOnce(baseChallenge({ resendCount: 2 }) as never);
+      otp.retry.mockResolvedValue({ requestId: 'otpreq_1' });
+      repo.recordResend.mockResolvedValue(undefined);
+      repo.findChallengeById.mockResolvedValueOnce(baseChallenge({ resendCount: 3 }) as never);
+
+      await service.resendOtp({ challengeId: 'challenge-1' });
+
+      expect(otp.retry).toHaveBeenCalledWith('otpreq_1');
+      expect(repo.recordResend).toHaveBeenCalledWith('challenge-1', expect.any(Date));
+    });
+
+    it('rejects while still inside the cooldown window', async () => {
+      const { service, repo, otp, appConfig } = createDeps();
+      (appConfig.getNumber as jest.Mock).mockImplementation((key: string) =>
+        Promise.resolve(key.includes('cooldown') ? 30 : 999),
+      );
+      repo.findChallengeById.mockResolvedValue(baseChallenge({ lastSentAt: NOW }) as never);
+
+      await expect(service.resendOtp({ challengeId: 'challenge-1' })).rejects.toBeInstanceOf(HttpException);
+      expect(otp.retry).not.toHaveBeenCalled();
+    });
+
+    it('allows a resend exactly when the cooldown has elapsed', async () => {
+      const { service, repo, otp, appConfig } = createDeps();
+      (appConfig.getNumber as jest.Mock).mockImplementation((key: string) =>
+        Promise.resolve(key.includes('cooldown') ? 30 : 999),
+      );
+      const lastSentAt = new Date(NOW.getTime() - 30 * 1000);
+      repo.findChallengeById.mockResolvedValueOnce(baseChallenge({ lastSentAt }) as never);
+      otp.retry.mockResolvedValue({ requestId: 'otpreq_1' });
+      repo.findChallengeById.mockResolvedValueOnce(baseChallenge({ lastSentAt }) as never);
+
+      await expect(service.resendOtp({ challengeId: 'challenge-1' })).resolves.toBeDefined();
+    });
+
+    it('reuses the same providerRequestId — calls otp.retry, never otp.send', async () => {
+      const { service, repo, otp } = createDeps();
+      const lastSentAt = new Date(NOW.getTime() - 60 * 1000);
+      repo.findChallengeById.mockResolvedValueOnce(baseChallenge({ lastSentAt }) as never);
+      otp.retry.mockResolvedValue({ requestId: 'otpreq_1' });
+      repo.findChallengeById.mockResolvedValueOnce(baseChallenge({ resendCount: 1, lastSentAt }) as never);
+
+      await service.resendOtp({ challengeId: 'challenge-1' });
+
+      expect(otp.retry).toHaveBeenCalledWith('otpreq_1');
+      expect(otp.send).not.toHaveBeenCalled();
+    });
+
+    it('throws if the challenge vanishes immediately after its own resend (should be unreachable)', async () => {
+      const { service, repo, otp } = createDeps();
+      const lastSentAt = new Date(NOW.getTime() - 60 * 1000);
+      repo.findChallengeById.mockResolvedValueOnce(baseChallenge({ lastSentAt }) as never);
+      otp.retry.mockResolvedValue({ requestId: 'otpreq_1' });
+      repo.findChallengeById.mockResolvedValueOnce(null);
+
+      await expect(service.resendOtp({ challengeId: 'challenge-1' })).rejects.toThrow(
+        'Challenge vanished immediately after its own resend',
+      );
+    });
+  });
+
+  describe('refreshToken', () => {
+    it('rejects an unparseable/invalid refresh token', async () => {
+      const { service, tokenService } = createDeps();
+      (tokenService.verifyRefreshToken as jest.Mock).mockResolvedValue(null);
+
+      await expect(service.refreshToken({ refreshToken: 'bad' })).rejects.toBeInstanceOf(UnauthorizedException);
+    });
+
+    it('rejects when the account is no longer active', async () => {
+      const { service, repo, tokenService } = createDeps();
+      (tokenService.verifyRefreshToken as jest.Mock).mockResolvedValue({ sub: 'patient-1', act: 'patient', tv: 0, typ: 'refresh' });
+      repo.findPatientAuthStateById.mockResolvedValue({ id: 'patient-1', isActive: false, tokenVersion: 0 });
+
+      await expect(service.refreshToken({ refreshToken: 'tok' })).rejects.toBeInstanceOf(UnauthorizedException);
+    });
+
+    it('rejects on a tokenVersion mismatch (the token was revoked by a logout-all since it was minted)', async () => {
+      const { service, repo, tokenService } = createDeps();
+      (tokenService.verifyRefreshToken as jest.Mock).mockResolvedValue({ sub: 'patient-1', act: 'patient', tv: 0, typ: 'refresh' });
+      repo.findPatientAuthStateById.mockResolvedValue({ id: 'patient-1', isActive: true, tokenVersion: 1 });
+
+      await expect(service.refreshToken({ refreshToken: 'tok' })).rejects.toBeInstanceOf(UnauthorizedException);
+    });
+
+    it('rejects when the account no longer exists', async () => {
+      const { service, repo, tokenService } = createDeps();
+      (tokenService.verifyRefreshToken as jest.Mock).mockResolvedValue({ sub: 'doctor-1', act: 'doctor', tv: 0, typ: 'refresh' });
+      repo.findDoctorAuthStateById.mockResolvedValue(null);
+
+      await expect(service.refreshToken({ refreshToken: 'tok' })).rejects.toBeInstanceOf(UnauthorizedException);
+    });
+
+    it('mints a fresh token pair with the current tokenVersion when the refresh token is valid', async () => {
+      const { service, repo, tokenService } = createDeps();
+      (tokenService.verifyRefreshToken as jest.Mock).mockResolvedValue({ sub: 'admin-1', act: 'admin', tv: 2, typ: 'refresh' });
+      repo.findAdminAuthStateById.mockResolvedValue({ id: 'admin-1', isActive: true, tokenVersion: 2 });
+
+      const result = await service.refreshToken({ refreshToken: 'tok' });
+
+      expect(tokenService.mintTokenPair).toHaveBeenCalledWith('admin', 'admin-1', 2);
+      expect(result.accessToken).toBe('access');
+    });
+  });
+
+  describe('getMe', () => {
+    it('404s when the account no longer exists', async () => {
+      const { service, repo } = createDeps();
+      repo.getAccountSummary.mockResolvedValue(null);
+
+      await expect(service.getMe({ accountType: 'patient', accountId: 'patient-1' })).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    it('returns the base profile without roles/permissions for a patient', async () => {
+      const { service, repo, accessService } = createDeps();
+      repo.getAccountSummary.mockResolvedValue({ id: 'patient-1', mobileNumber: '+919876543210', fullName: 'Jane' });
+
+      const result = await service.getMe({ accountType: 'patient', accountId: 'patient-1' });
+
+      expect(result).toEqual({
+        id: 'patient-1',
+        accountType: 'patient',
+        fullName: 'Jane',
+        mobileNumber: '+919876543210',
+      });
+      expect(accessService.listAdminRoleCodes).not.toHaveBeenCalled();
+    });
+
+    it('returns the base profile without roles/permissions for a doctor', async () => {
+      const { service, repo, accessService } = createDeps();
+      repo.getAccountSummary.mockResolvedValue({ id: 'doctor-1', mobileNumber: '+919876543210', fullName: 'Dr. X' });
+
+      const result = await service.getMe({ accountType: 'doctor', accountId: 'doctor-1' });
+
+      expect(result).not.toHaveProperty('roles');
+      expect(accessService.listAdminRoleCodes).not.toHaveBeenCalled();
+    });
+
+    it('includes roles and permissions for an admin', async () => {
+      const { service, repo, accessService } = createDeps();
+      repo.getAccountSummary.mockResolvedValue({ id: 'admin-1', mobileNumber: '+919876543210', fullName: 'Admin' });
+      accessService.listAdminRoleCodes.mockResolvedValue(['operations']);
+      accessService.listEffectivePermissions.mockResolvedValue(['doctors.verify'] as never);
+
+      const result = await service.getMe({ accountType: 'admin', accountId: 'admin-1' });
+
+      expect(result.roles).toEqual(['operations']);
+      expect(result.permissions).toEqual(['doctors.verify']);
     });
   });
 });
