@@ -36,6 +36,7 @@ export * from './audit-log.schema';
 
 export * from './payments.schema';
 export * from './payment-events.schema';
+export * from './refunds.schema';
 export * from './clinical-records.schema';
 
 export * from './doctors.schema';

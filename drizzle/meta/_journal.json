@@ -43,6 +43,13 @@
       "when": 1788354234194,
       "tag": "0005_storage_providers",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1788360600780,
+      "tag": "0006_booking_payments_foundation",
+      "breakpoints": true
     }
   ]
 }
