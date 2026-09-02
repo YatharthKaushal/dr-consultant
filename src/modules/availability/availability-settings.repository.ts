@@ -1,5 +1,5 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { eq } from 'drizzle-orm';
+import { eq, inArray } from 'drizzle-orm';
 import { DATABASE } from '../../config/db/database.module';
 import type { Database, DatabaseTransaction } from '../../config/db/database.config';
 import { doctorSchedulingSettingsTable, type DoctorSchedulingSettingsRow } from '../../schema/doctor-scheduling-settings.schema';
@@ -25,6 +25,15 @@ export class AvailabilitySettingsRepository {
       .where(eq(doctorSchedulingSettingsTable.doctorId, doctorId))
       .limit(1);
     return row ?? null;
+  }
+
+  /** ADDITIVE (M-09/search): overrides for many doctors in one statement, backing `getEarliestBookableSlots`. Doctors with no overrides simply have no row — the caller falls back to the platform default for those. */
+  async listByDoctorIds(doctorIds: readonly string[], executor: Executor = this.db): Promise<DoctorSchedulingSettingsRow[]> {
+    if (doctorIds.length === 0) return [];
+    return executor
+      .select()
+      .from(doctorSchedulingSettingsTable)
+      .where(inArray(doctorSchedulingSettingsTable.doctorId, [...doctorIds]));
   }
 
   /** Insert-or-update in one statement — `doctorId` is both the PK and the FK, so there is at most one row per doctor. */

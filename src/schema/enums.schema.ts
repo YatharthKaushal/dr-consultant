@@ -125,6 +125,18 @@ export const RISK_CATEGORIES = ['low', 'moderate', 'high'] as const;
 export type RiskCategory = (typeof RISK_CATEGORIES)[number];
 export const riskCategoryEnum = pgEnum('risk_category', RISK_CATEGORIES);
 
+/**
+ * Where a symptom search entered the system (M-09). `app` is the patient app
+ * or admin panel acting for a signed-in patient; `mcp` and `whatsapp` are
+ * discovery surfaces with NO authenticated patient, which is why
+ * `search_queries.patient_id` is nullable. Kept as its own enum rather than
+ * reusing `party`/`actor_type`: those name WHO acted, this names WHICH
+ * SURFACE the query arrived through, and the two value sets do not overlap.
+ */
+export const SEARCH_SOURCES = ['app', 'mcp', 'whatsapp'] as const;
+export type SearchSource = (typeof SEARCH_SOURCES)[number];
+export const searchSourceEnum = pgEnum('search_source', SEARCH_SOURCES);
+
 export const PATIENT_FILE_CATEGORIES = [
   'medical_history',
   'report',

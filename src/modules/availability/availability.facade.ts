@@ -1,5 +1,11 @@
 import { Injectable } from '@nestjs/common';
-import type { AvailabilityContract, BookableSlot, SlotBookability, WeeklyAvailabilityRule } from './availability.contract';
+import type {
+  AvailabilityContract,
+  BookableSlot,
+  EarliestBookableSlot,
+  SlotBookability,
+  WeeklyAvailabilityRule,
+} from './availability.contract';
 import { toPublicWeeklyRule } from './availability.mapper';
 import { AvailabilityRuleService } from './availability-rule.service';
 import { AvailabilitySlotService } from './availability-slot.service';
@@ -22,5 +28,10 @@ export class AvailabilityFacade implements AvailabilityContract {
   async getWeeklyRules(doctorId: string): Promise<WeeklyAvailabilityRule[]> {
     const rows = await this.ruleService.listWeekly(doctorId);
     return rows.map(toPublicWeeklyRule);
+  }
+
+  /** ADDITIVE (M-09/search) — see `availability.contract.ts`. */
+  async getEarliestBookableSlots(doctorIds: readonly string[], fromUtc: Date, toUtc: Date): Promise<EarliestBookableSlot[]> {
+    return this.slotService.getEarliestBookableSlots(doctorIds, fromUtc, toUtc);
   }
 }

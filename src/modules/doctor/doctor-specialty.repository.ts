@@ -1,5 +1,5 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { and, eq } from 'drizzle-orm';
+import { and, eq, inArray } from 'drizzle-orm';
 import { DATABASE } from '../../config/db/database.module';
 import type { Database } from '../../config/db/database.config';
 import { doctorSpecialtiesTable, type DoctorSpecialtyRow } from '../../schema/doctor-specialties.schema';
@@ -33,6 +33,12 @@ export class DoctorSpecialtyRepository {
 
   async listByDoctor(doctorId: string, executor: Executor = this.db): Promise<DoctorSpecialtyRow[]> {
     return executor.select().from(doctorSpecialtiesTable).where(eq(doctorSpecialtiesTable.doctorId, doctorId));
+  }
+
+  /** ADDITIVE (M-09/search): every junction row for a whole page of doctors in one `IN`, so a listing does not pay one round trip per doctor. */
+  async listByDoctorIds(doctorIds: readonly string[], executor: Executor = this.db): Promise<DoctorSpecialtyRow[]> {
+    if (doctorIds.length === 0) return [];
+    return executor.select().from(doctorSpecialtiesTable).where(inArray(doctorSpecialtiesTable.doctorId, [...doctorIds]));
   }
 
   /** The doctor's primary specialty row — `null` if the doctor has none. `canPrescribe` is catalogue-owned; callers resolve it via `CatalogueFacade.getSpecialtyById(row.specialtyId)`. */

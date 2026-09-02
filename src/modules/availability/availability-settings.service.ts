@@ -93,6 +93,34 @@ export class AvailabilitySettingsService {
     };
   }
 
+  /**
+   * ADDITIVE (M-09/search): `resolveWindowLimits` for many doctors, with the
+   * override rows fetched in ONE statement and the two `app_config` reads
+   * done ONCE for the whole batch instead of once per doctor. Same
+   * three-level resolution, same fallbacks; a doctor with no override row
+   * gets the platform default, exactly as the single-doctor path does.
+   */
+  async resolveWindowLimitsForMany(doctorIds: readonly string[]): Promise<Map<string, WindowLimits>> {
+    const resolved = new Map<string, WindowLimits>();
+    if (doctorIds.length === 0) return resolved;
+
+    const [rows, configMinNotice, configHorizonDays] = await Promise.all([
+      this.repo.listByDoctorIds(doctorIds),
+      this.appConfig.getNumber(AVAILABILITY_CONFIG_KEYS.MIN_NOTICE_MINUTES, AVAILABILITY_CONFIG_FALLBACKS.MIN_NOTICE_MINUTES),
+      this.appConfig.getNumber(AVAILABILITY_CONFIG_KEYS.BOOKING_HORIZON_DAYS, AVAILABILITY_CONFIG_FALLBACKS.BOOKING_HORIZON_DAYS),
+    ]);
+
+    const overrideByDoctor = new Map(rows.map((row) => [row.doctorId, row]));
+    for (const doctorId of doctorIds) {
+      const row = overrideByDoctor.get(doctorId);
+      resolved.set(doctorId, {
+        minNoticeMinutes: row?.minNoticeMinutes ?? configMinNotice,
+        bookingHorizonDays: row?.bookingHorizonDays ?? configHorizonDays,
+      });
+    }
+    return resolved;
+  }
+
   private definedFieldsOnly(dto: SchedulingSettingsUpsert): SchedulingSettingsUpsert {
     const fields: SchedulingSettingsUpsert = {};
     if (dto.minNoticeMinutes !== undefined) fields.minNoticeMinutes = dto.minNoticeMinutes;
