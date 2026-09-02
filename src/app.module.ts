@@ -5,6 +5,7 @@ import { EventsModule } from './config/events/events.module';
 import { getEnv } from './config/env/env.validation';
 import { HealthModule } from './health/health.module';
 import { IdentityModule } from './modules/identity/identity.module';
+import { PatientModule } from './modules/patient/patient.module';
 import { AppConfigModule } from './shared/app-config/app-config.module';
 import { AuditModule } from './shared/audit/audit.module';
 import { AuthModule } from './shared/auth/auth.module';
@@ -29,6 +30,7 @@ import { AuthModule } from './shared/auth/auth.module';
     // providers regardless of import order).
     IdentityModule,
     AuthModule,
+    PatientModule,
     HealthModule,
   ],
 })
