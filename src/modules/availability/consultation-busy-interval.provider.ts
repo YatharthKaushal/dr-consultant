@@ -3,7 +3,7 @@ import { and, eq, gte, inArray, isNotNull, lt } from 'drizzle-orm';
 import { DATABASE } from '../../config/db/database.module';
 import type { Database } from '../../config/db/database.config';
 import { consultationsTable } from '../../schema/consultations.schema';
-import type { BusyInterval, BusyIntervalProvider } from './availability.contract';
+import type { BusyInterval, BusyIntervalProvider, DoctorBusyIntervals } from './availability.contract';
 
 /**
  * Consultation statuses that occupy a doctor's calendar slot — mirrors the
@@ -65,5 +65,44 @@ export class ConsultationBusyIntervalProvider implements BusyIntervalProvider {
         startsAt: row.scheduledStartAt,
         endsAt: new Date(row.scheduledStartAt.getTime() + row.durationMinutes * 60_000),
       }));
+  }
+
+  /**
+   * The batch form (`BusyIntervalProvider.getBusyIntervalsForMany`) — the
+   * identical predicate with `doctor_id IN (...)`, so ranking a candidate set
+   * costs one statement rather than one per doctor. Returns an entry for
+   * EVERY requested id, including doctors with no occupying consultation, so
+   * the caller never has to distinguish "no rows" from "not asked about".
+   */
+  async getBusyIntervalsForMany(doctorIds: readonly string[], fromUtc: Date, toUtc: Date): Promise<DoctorBusyIntervals[]> {
+    if (doctorIds.length === 0) return [];
+
+    const rows = await this.db
+      .select({
+        doctorId: consultationsTable.doctorId,
+        scheduledStartAt: consultationsTable.scheduledStartAt,
+        durationMinutes: consultationsTable.durationMinutes,
+      })
+      .from(consultationsTable)
+      .where(
+        and(
+          inArray(consultationsTable.doctorId, [...doctorIds]),
+          isNotNull(consultationsTable.scheduledStartAt),
+          inArray(consultationsTable.status, [...OCCUPYING_STATUSES]),
+          gte(consultationsTable.scheduledStartAt, new Date(fromUtc.getTime() - QUERY_MARGIN_MS)),
+          lt(consultationsTable.scheduledStartAt, toUtc),
+        ),
+      );
+
+    const byDoctor = new Map<string, BusyInterval[]>(doctorIds.map((doctorId) => [doctorId, []]));
+    for (const row of rows) {
+      if (row.scheduledStartAt === null || row.doctorId === null) continue;
+      byDoctor.get(row.doctorId)?.push({
+        startsAt: row.scheduledStartAt,
+        endsAt: new Date(row.scheduledStartAt.getTime() + row.durationMinutes * 60_000),
+      });
+    }
+
+    return [...byDoctor].map(([doctorId, intervals]) => ({ doctorId, intervals }));
   }
 }

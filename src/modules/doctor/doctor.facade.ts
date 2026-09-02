@@ -1,6 +1,13 @@
 import { Injectable } from '@nestjs/common';
 import { DoctorSpecialtyService } from './doctor-specialty.service';
-import type { DoctorContract, DoctorSchedulingParameters, PublicDoctorProfile } from './doctor.contract';
+import type {
+  DoctorContract,
+  DoctorSchedulingParameters,
+  DoctorSchedulingParametersById,
+  ListedDoctorFilter,
+  ListedDoctorSummary,
+  PublicDoctorProfile,
+} from './doctor.contract';
 import { DoctorService } from './doctor.service';
 
 @Injectable()
@@ -25,5 +32,15 @@ export class DoctorFacade implements DoctorContract {
   /** ADDITIVE (M-07/availability) — see `doctor.contract.ts`. */
   async getSchedulingParameters(doctorId: string): Promise<DoctorSchedulingParameters | null> {
     return this.doctorService.getSchedulingParameters(doctorId);
+  }
+
+  /** ADDITIVE (M-07/availability, forced by M-09) — see `doctor.contract.ts`. */
+  async getSchedulingParametersForMany(doctorIds: readonly string[]): Promise<DoctorSchedulingParametersById[]> {
+    return this.doctorService.getSchedulingParametersForMany(doctorIds);
+  }
+
+  /** ADDITIVE (M-09/search) — see `doctor.contract.ts`. */
+  async listListedDoctors(filter: ListedDoctorFilter): Promise<ListedDoctorSummary[]> {
+    return this.doctorService.listListedDoctors(filter);
   }
 }
