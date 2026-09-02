@@ -18,7 +18,8 @@
     "db:migrate": "drizzle-kit migrate",
     "db:push": "drizzle-kit push",
     "db:studio": "drizzle-kit studio",
-    "db:seed": "ts-node -r tsconfig-paths/register src/modules/identity/identity.seed.ts"
+    "db:seed": "ts-node -r tsconfig-paths/register src/modules/identity/identity.seed.ts",
+    "db:seed:catalogue": "ts-node -r tsconfig-paths/register src/modules/catalogue/catalogue.seed.ts"
   },
   "dependencies": {
     "@nestjs/common": "^11.0.0",
