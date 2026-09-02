@@ -4,6 +4,8 @@ import { CatalogueModule } from '../catalogue/catalogue.module';
 import { DoctorModule } from '../doctor/doctor.module';
 import { DocumentModule } from '../document/document.module';
 import { PatientModule } from '../patient/patient.module';
+import { PaymentFacade } from '../payment/payment.facade';
+import { PaymentModule } from '../payment/payment.module';
 import { BOOKING_PAYMENT_PORT } from './booking.constants';
 import { BookingAdminController } from './booking-admin.controller';
 import { BookingController } from './booking.controller';
@@ -12,7 +14,6 @@ import { BookingFacade } from './booking.facade';
 import { BookingRepository } from './booking.repository';
 import { BookingService } from './booking.service';
 import { BookingSlotHoldService } from './booking-slot-hold.service';
-import { UnavailableBookingPaymentProvider } from './unavailable-booking-payment.provider';
 
 /**
  * Not `@Global()` — like every other feature module here, nothing outside
@@ -28,18 +29,19 @@ import { UnavailableBookingPaymentProvider } from './unavailable-booking-payment
  * ---------------------------------------------------------------------------
  * *** `BOOKING_PAYMENT_PORT` IS THE M-12 SEAM. ***
  *
- * It is bound here to `UnavailableBookingPaymentProvider`, a null object that
- * throws `PAYMENT_PORT_UNAVAILABLE` (503), because `modules/payment` is being
- * built in a PARALLEL WORKTREE and does not exist in this one.
+ * Bound to the real `PaymentFacade` (M-11/M-12 merge). `PaymentFacade`
+ * satisfies `BookingPaymentPort` structurally (see
+ * `booking-payment.contract.ts`) — no adapter, no cast — so a signature drift
+ * on either side surfaces HERE as a `tsc` error rather than a runtime
+ * surprise. This module was built in a parallel worktree against a local
+ * mirror of that interface and the rebind was a one-line change, which is the
+ * whole point of the pattern.
  *
- * *** POST-MERGE THE COORDINATOR REBINDS THIS ONE LINE TO: ***
- *
- *     { provide: BOOKING_PAYMENT_PORT, useExisting: PaymentFacade }
- *
- * with `PaymentModule` added to `imports`. `PaymentFacade` satisfies
- * `BookingPaymentPort` structurally (see `booking-payment.contract.ts`) — no
- * adapter, no cast — so a signature drift on either side surfaces HERE as a
- * `tsc` error rather than a runtime surprise. That is the entire handover.
+ * NOTE the dependency direction: booking calls payments, not the reverse.
+ * `docs/MODULES.md` lists M-12 as depending on M-05/M-11, but at the code
+ * level `createOrderForConsultation` takes the consultation id and fee as
+ * arguments rather than looking either up, so `PaymentModule` imports no
+ * feature module and there is no cycle.
  *
  * `UnavailableBookingPaymentProvider` stays in the tree afterwards, unbound:
  * it is the null object this module was built and tested against, and
@@ -61,11 +63,11 @@ import { UnavailableBookingPaymentProvider } from './unavailable-booking-payment
  * module writes.
  */
 @Module({
-  imports: [PatientModule, DoctorModule, CatalogueModule, AvailabilityModule, DocumentModule],
+  imports: [PatientModule, DoctorModule, CatalogueModule, AvailabilityModule, DocumentModule, PaymentModule],
   controllers: [BookingController, BookingDoctorController, BookingAdminController],
   providers: [
     BookingRepository,
-    { provide: BOOKING_PAYMENT_PORT, useClass: UnavailableBookingPaymentProvider },
+    { provide: BOOKING_PAYMENT_PORT, useExisting: PaymentFacade },
     BookingService,
     BookingSlotHoldService,
     BookingFacade,
