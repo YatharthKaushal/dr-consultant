@@ -1,4 +1,4 @@
-import { IsArray, IsBoolean, IsObject, IsOptional, IsString, Length } from 'class-validator';
+import { ArrayMaxSize, IsArray, IsBoolean, IsObject, IsOptional, IsString, Length } from 'class-validator';
 
 /**
  * `intakeForm`/`firstConsultForm` are jsonb `unknown` columns holding an
@@ -18,6 +18,7 @@ export class CreateSpecialtyDto {
 
   @IsOptional()
   @IsString()
+  @Length(0, 4000)
   description?: string;
 
   @IsBoolean()
@@ -33,7 +34,9 @@ export class CreateSpecialtyDto {
 
   @IsOptional()
   @IsArray()
+  @ArrayMaxSize(20)
   @IsString({ each: true })
+  @Length(1, 120, { each: true })
   requiredDocuments?: string[];
 }
 
@@ -52,6 +55,7 @@ export class UpdateSpecialtyDto {
 
   @IsOptional()
   @IsString()
+  @Length(0, 4000)
   description?: string;
 
   /**
@@ -73,7 +77,9 @@ export class UpdateSpecialtyDto {
 
   @IsOptional()
   @IsArray()
+  @ArrayMaxSize(20)
   @IsString({ each: true })
+  @Length(1, 120, { each: true })
   requiredDocuments?: string[];
 
   @IsOptional()
