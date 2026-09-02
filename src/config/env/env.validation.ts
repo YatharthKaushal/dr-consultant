@@ -42,6 +42,27 @@ const requiredEnv = z.object({
   SLIDE_API_KEY: z.string().min(1),
   /** ID of the OTP widget configured in the Slide dashboard (length, expiry, resend rules, channel). */
   SLIDE_OTP_WIDGET_ID: z.string().min(1),
+
+  /**
+   * Master key for the AES-256-GCM envelope around `agent_credentials.
+   * encrypted_key` (`modules/ai/ai-crypto.service.ts`). 64 hex characters =
+   * the exact 32 bytes AES-256 requires; validated here so a truncated or
+   * mistyped key fails at boot rather than on the first LLM call, when the
+   * only symptom would be every provider credential failing to decrypt at
+   * once.
+   *
+   * REQUIRED, not optional-with-a-default: a compiled-in default would mean
+   * every deployment that forgot to set one shares a key that is in the git
+   * history, and admin-entered third-party API keys are billed to the client
+   * at actuals. Rotating it re-encrypts nothing — existing rows become
+   * undecryptable and the keys must be re-entered.
+   */
+  AI_CREDENTIAL_ENCRYPTION_KEY: z
+    .string()
+    .regex(
+      /^[0-9a-fA-F]{64}$/,
+      'must be exactly 64 hexadecimal characters (32 bytes) — generate one with `openssl rand -hex 32`',
+    ),
 });
 
 /* -------------------------------------------------------------------------- */

@@ -86,6 +86,10 @@ export const PERMISSIONS = {
 
   CONFIG_READ: 'config.read',
   CONFIG_MANAGE: 'config.manage',
+
+  AI_READ: 'ai.read',
+  /** Third-party credentials AND spend — the client's LLM account is billed at actuals. Treated like `admins.manage`: `super_admin` only. */
+  AI_MANAGE: 'ai.manage',
 } as const;
 
 export type PermissionKey = (typeof PERMISSIONS)[keyof typeof PERMISSIONS];
@@ -147,6 +151,8 @@ const DESCRIPTIONS: Record<PermissionKey, string> = {
   [PERMISSIONS.AUDIT_EXPORT]: 'Export audit log entries.',
   [PERMISSIONS.CONFIG_READ]: 'View app configuration values.',
   [PERMISSIONS.CONFIG_MANAGE]: 'Edit app configuration values.',
+  [PERMISSIONS.AI_READ]: 'View the configured AI providers, models and API-key health.',
+  [PERMISSIONS.AI_MANAGE]: 'Add or edit AI providers and API keys, and test a key against its provider.',
 };
 
 export const PERMISSION_DEFINITIONS: readonly PermissionDefinition[] = Object.values(PERMISSIONS).map((key) => ({
@@ -199,7 +205,7 @@ export const ROLE_DEFINITIONS: readonly RoleDefinition[] = [
 const ALL_PERMISSIONS = Object.values(PERMISSIONS);
 
 export const ROLE_PERMISSIONS: Record<RoleCode, readonly PermissionKey[]> = {
-  // All 45 — seeded explicitly (so `GET /admin/roles` shows the truth) AND
+  // All 47 — seeded explicitly (so `GET /admin/roles` shows the truth) AND
   // short-circuited in the resolution query (identity-access.repository.ts),
   // so a permission added between deploys can never lock the owner out
   // before the seed re-runs.
@@ -230,6 +236,10 @@ export const ROLE_PERMISSIONS: Record<RoleCode, readonly PermissionKey[]> = {
     PERMISSIONS.CONFIG_READ,
     PERMISSIONS.CONFIG_MANAGE,
     PERMISSIONS.AUDIT_READ,
+    // Read-only. Diagnosing "why is symptom search degraded" is day-to-day
+    // support work; `ai.manage` (spend + third-party credentials) is not, and
+    // stays super_admin-only.
+    PERMISSIONS.AI_READ,
   ],
 
   clinical_governance: [

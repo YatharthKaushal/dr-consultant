@@ -55,7 +55,7 @@ Folders appear as their module is built, in the order in `../docs/MODULES.md`.
       - rpc/ — transport abstraction, in-process dispatcher, TCP client factory
       - pagination/ — shared query and result helpers
       - types/ — shared primitives only, never domain types
-    - modules/ — identity, consent, patient, doctor, catalogue, availability, notification, search, document, booking, payment, presence, video, clinical, followup, clarification, carehub, feedback, governance, audit
+    - modules/ — identity, consent, patient, doctor, catalogue, availability, ai, notification, search, document, booking, payment, presence, video, clinical, followup, clarification, carehub, feedback, governance, audit
     - health/ — `health.controller.ts`, `health.service.ts`, `health.module.ts`
   - test/ — end-to-end tests
   - .env.example

@@ -29,6 +29,13 @@
       "when": 1788332900000,
       "tag": "0003_consultations_double_booking_guard",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1788340917187,
+      "tag": "0004_ai_agent_profiles_and_credentials",
+      "breakpoints": true
     }
   ]
 }
