@@ -42,6 +42,7 @@ export * from './doctors.schema';
 export * from './doctor-specialties.schema';
 export * from './doctor-documents.schema';
 export * from './doctor-availability.schema';
+export * from './doctor-scheduling-settings.schema';
 export * from './doctor-clinical-templates.schema';
 
 export * from './consultations.schema';
