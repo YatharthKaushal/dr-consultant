@@ -92,7 +92,7 @@ describe('DoctorVerificationService', () => {
         'doctor-1',
         expect.objectContaining({ verificationStatus: 'rejected', isListed: false, verifiedByAdminId: 'admin-1' }),
       );
-      expect(identity.revokeAllSessions).toHaveBeenCalledWith('doctor', 'doctor-1');
+      expect(identity.revokeAllSessions).toHaveBeenCalledWith('doctor', 'doctor-1', { actorType: 'admin', actorId: 'admin-1' });
       expect(audit.write).toHaveBeenCalledWith(
         expect.objectContaining({
           action: 'verify',
@@ -111,7 +111,7 @@ describe('DoctorVerificationService', () => {
 
       const [, update] = repo.updateVerification.mock.calls[0]!;
       expect(update).toEqual({ verificationStatus: 'suspended', isListed: false });
-      expect(identity.revokeAllSessions).toHaveBeenCalledWith('doctor', 'doctor-1');
+      expect(identity.revokeAllSessions).toHaveBeenCalledWith('doctor', 'doctor-1', { actorType: 'admin', actorId: 'admin-1' });
     });
   });
 

@@ -267,7 +267,7 @@ describe('IdentityService', () => {
   });
 
   describe('logoutAll', () => {
-    it('bumps tokenVersion and audits the reason', async () => {
+    it('bumps tokenVersion and audits the reason, self-attributed when no actor override is given', async () => {
       const { service, repo, audit } = createDeps();
       repo.bumpTokenVersion.mockResolvedValue(7);
 
@@ -275,7 +275,28 @@ describe('IdentityService', () => {
 
       expect(repo.bumpTokenVersion).toHaveBeenCalledWith('patient', 'patient-1');
       expect(audit.write).toHaveBeenCalledWith(
-        expect.objectContaining({ metadata: expect.objectContaining({ reason: 'logout_all', newTokenVersion: 7 }) }),
+        expect.objectContaining({
+          actorType: 'patient',
+          actorId: 'patient-1',
+          metadata: expect.objectContaining({ reason: 'logout_all', newTokenVersion: 7 }),
+        }),
+      );
+    });
+
+    it('attributes the audit entry to the given actor, not the affected account, when an override is passed (admin suspending a doctor/patient)', async () => {
+      const { service, repo, audit } = createDeps();
+      repo.bumpTokenVersion.mockResolvedValue(3);
+
+      await service.logoutAll('doctor', 'doctor-1', { actorType: 'admin', actorId: 'admin-1' });
+
+      expect(repo.bumpTokenVersion).toHaveBeenCalledWith('doctor', 'doctor-1');
+      expect(audit.write).toHaveBeenCalledWith(
+        expect.objectContaining({
+          actorType: 'admin',
+          actorId: 'admin-1',
+          entityId: 'doctor-1',
+          metadata: expect.objectContaining({ reason: 'logout_all', newTokenVersion: 3 }),
+        }),
       );
     });
   });

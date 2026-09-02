@@ -2,7 +2,7 @@ import { Injectable } from '@nestjs/common';
 import type { AccountType } from '../../schema/enums.schema';
 import type { PermissionKey } from '../../shared/auth/permission.catalog';
 import { IdentityAccessService } from './identity-access.service';
-import type { ContactIdentity, IdentityContract } from './identity.contract';
+import type { AuditActorOverride, ContactIdentity, IdentityContract } from './identity.contract';
 import { IdentityRepository, type AccountAuthState } from './identity.repository';
 import { IdentityService } from './identity.service';
 
@@ -22,8 +22,8 @@ export class IdentityFacade implements IdentityContract {
     return this.accessService.hasAllPermissions(adminId, [key as PermissionKey]);
   }
 
-  async revokeAllSessions(accountType: AccountType, id: string): Promise<void> {
-    await this.identityService.logoutAll(accountType, id);
+  async revokeAllSessions(accountType: AccountType, id: string, actor?: AuditActorOverride): Promise<void> {
+    await this.identityService.logoutAll(accountType, id, actor);
   }
 
   async getContactIdentity(accountType: AccountType, id: string): Promise<ContactIdentity | null> {

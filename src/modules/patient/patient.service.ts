@@ -101,7 +101,10 @@ export class PatientService {
     }
 
     if (REVOKING_STATUSES.has(status)) {
-      await this.identity.revokeAllSessions('patient', patientId);
+      // Attribute the session-revocation audit entry to the acting admin,
+      // not the patient being suspended/deleted — see
+      // `IdentityContract.revokeAllSessions`'s doc comment.
+      await this.identity.revokeAllSessions('patient', patientId, { actorType: 'admin', actorId: actingAdminId });
     }
 
     await this.audit.write({

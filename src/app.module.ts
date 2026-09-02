@@ -10,6 +10,7 @@ import { PatientModule } from './modules/patient/patient.module';
 import { AppConfigModule } from './shared/app-config/app-config.module';
 import { AuditModule } from './shared/audit/audit.module';
 import { AuthModule } from './shared/auth/auth.module';
+import { ErrorsModule } from './shared/errors/errors.module';
 
 @Module({
   imports: [
@@ -23,6 +24,9 @@ import { AuthModule } from './shared/auth/auth.module';
     }),
     DatabaseModule,
     EventsModule,
+    // Global response envelope (success wrap + error shape) — registered
+    // early, ahead of every feature module, so it governs their responses too.
+    ErrorsModule,
     AuditModule,
     AppConfigModule,
     // IdentityModule before AuthModule: AuthModule's APP_GUARDs resolve

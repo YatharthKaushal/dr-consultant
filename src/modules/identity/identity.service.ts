@@ -10,7 +10,7 @@ import {
 } from '@nestjs/common';
 import { DATABASE } from '../../config/db/database.module';
 import type { Database, DatabaseTransaction } from '../../config/db/database.config';
-import type { AccountType } from '../../schema/enums.schema';
+import type { AccountType, ActorType } from '../../schema/enums.schema';
 import type { OtpChallengeRow } from '../../schema/otp-challenges.schema';
 import { AppConfigService } from '../../shared/app-config/app-config.service';
 import { AuditService } from '../../shared/audit/audit.service';
@@ -240,12 +240,24 @@ export class IdentityService {
     return this.tokenService.mintTokenPair(payload.act, payload.sub, state.tokenVersion);
   }
 
-  /** No single-device logout by construction (no session table) — this bumps `tokenVersion`, revoking every token for the account at once. */
-  async logoutAll(accountType: AccountType, accountId: string): Promise<void> {
+  /**
+   * No single-device logout by construction (no session table) — this bumps
+   * `tokenVersion`, revoking every token for the account at once.
+   *
+   * `actor` attributes the resulting `audit_log` entry to whoever actually
+   * caused the revocation. Defaults to self-attribution
+   * (`actorType: accountType, actorId: accountId`) — what `POST /auth/
+   * logout-all` relies on, unchanged. `PatientService`/
+   * `DoctorVerificationService` pass the acting admin explicitly here when
+   * this runs as the side effect of a suspension, so the audit trail shows
+   * the admin, not the suspended account, as the actor (see
+   * `IdentityContract.revokeAllSessions`'s doc comment).
+   */
+  async logoutAll(accountType: AccountType, accountId: string, actor?: { actorType: ActorType; actorId: string }): Promise<void> {
     const newTokenVersion = await this.repo.bumpTokenVersion(accountType, accountId);
     await this.audit.write({
-      actorType: accountType,
-      actorId: accountId,
+      actorType: actor?.actorType ?? accountType,
+      actorId: actor?.actorId ?? accountId,
       action: 'update',
       entityType: IDENTITY_AUDIT_ENTITY_TYPES.SESSION,
       entityId: accountId,
@@ -256,7 +268,7 @@ export class IdentityService {
   async getMe(auth: AuthContext): Promise<MeResponse> {
     const summary = await this.repo.getAccountSummary(auth.accountType, auth.accountId);
     if (!summary) {
-      throw new NotFoundException({ message: 'Account not found.' });
+      throw new NotFoundException({ code: IDENTITY_ERROR_CODES.ACCOUNT_NOT_FOUND, message: 'Account not found.' });
     }
 
     const base: MeResponse = {

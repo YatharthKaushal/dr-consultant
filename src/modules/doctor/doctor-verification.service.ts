@@ -60,7 +60,10 @@ export class DoctorVerificationService {
     if (!updated) throw doctorNotFound();
 
     if (demoting) {
-      await this.identity.revokeAllSessions('doctor', doctorId);
+      // Attribute the session-revocation audit entry to the acting admin,
+      // not the doctor being suspended/rejected — see
+      // `IdentityContract.revokeAllSessions`'s doc comment.
+      await this.identity.revokeAllSessions('doctor', doctorId, { actorType: 'admin', actorId: actingAdminId });
     }
 
     await this.audit.write({

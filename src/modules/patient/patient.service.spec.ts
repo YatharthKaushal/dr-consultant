@@ -180,7 +180,7 @@ describe('PatientService', () => {
 
       await service.updateStatus('admin-1', 'patient-1', 'suspended');
 
-      expect(identity.revokeAllSessions).toHaveBeenCalledWith('patient', 'patient-1');
+      expect(identity.revokeAllSessions).toHaveBeenCalledWith('patient', 'patient-1', { actorType: 'admin', actorId: 'admin-1' });
     });
 
     it('revokes all sessions when deleting', async () => {
@@ -190,7 +190,7 @@ describe('PatientService', () => {
 
       await service.updateStatus('admin-1', 'patient-1', 'deleted');
 
-      expect(identity.revokeAllSessions).toHaveBeenCalledWith('patient', 'patient-1');
+      expect(identity.revokeAllSessions).toHaveBeenCalledWith('patient', 'patient-1', { actorType: 'admin', actorId: 'admin-1' });
     });
 
     it('does NOT revoke sessions when reactivating to active', async () => {
