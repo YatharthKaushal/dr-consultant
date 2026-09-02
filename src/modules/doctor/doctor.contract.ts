@@ -64,4 +64,21 @@ export interface DoctorContract {
    * the specialty a given past consultation was booked under.
    */
   getPrescribingEligibility(doctorId: string): Promise<boolean>;
+
+  /**
+   * ADDITIVE (M-07/availability): the doctor's slot-engine inputs —
+   * `consultationDurationMinutes`/`bufferMinutes` (deliberately excluded
+   * from `PublicDoctorProfile`, see its own doc comment) plus the same
+   * booking-eligibility gate `isVerifiedAndListed` reports, in one read, so
+   * `availability-slot.service.ts` doesn't need two round trips per slot
+   * lookup. `null` only if the doctor id doesn't exist.
+   */
+  getSchedulingParameters(doctorId: string): Promise<DoctorSchedulingParameters | null>;
+}
+
+/** See `DoctorContract#getSchedulingParameters`. */
+export interface DoctorSchedulingParameters {
+  consultationDurationMinutes: number;
+  bufferMinutes: number;
+  isVerifiedAndListed: boolean;
 }

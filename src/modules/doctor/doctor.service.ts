@@ -159,6 +159,23 @@ export class DoctorService {
     return doctor !== null && doctor.verificationStatus === 'verified' && doctor.isListed;
   }
 
+  /**
+   * ADDITIVE (M-07/availability) — see `doctor.contract.ts#DoctorContract
+   * .getSchedulingParameters`'s doc comment. No repository change needed:
+   * `DoctorRepository.findById` already returns every column this reads.
+   */
+  async getSchedulingParameters(
+    doctorId: string,
+  ): Promise<{ consultationDurationMinutes: number; bufferMinutes: number; isVerifiedAndListed: boolean } | null> {
+    const doctor = await this.repo.findById(doctorId);
+    if (!doctor) return null;
+    return {
+      consultationDurationMinutes: doctor.consultationDurationMinutes,
+      bufferMinutes: doctor.bufferMinutes,
+      isVerifiedAndListed: doctor.verificationStatus === 'verified' && doctor.isListed,
+    };
+  }
+
   /* ---------------------------------------------------------------------- */
   /* Admin CRUD (admin/doctors)                                              */
   /* ---------------------------------------------------------------------- */

@@ -45,6 +45,9 @@ export const PERMISSIONS = {
   APPOINTMENTS_READ: 'appointments.read',
   APPOINTMENTS_MANAGE: 'appointments.manage',
 
+  AVAILABILITY_READ: 'availability.read',
+  AVAILABILITY_MANAGE: 'availability.manage',
+
   PAYMENTS_READ: 'payments.read',
   PAYMENTS_REFUND: 'payments.refund',
   PAYMENTS_EXPORT: 'payments.export',
@@ -111,6 +114,8 @@ const DESCRIPTIONS: Record<PermissionKey, string> = {
     'Edit a specialty’s default prescription/advice templates.',
   [PERMISSIONS.APPOINTMENTS_READ]: 'View scheduled and instant consultations.',
   [PERMISSIONS.APPOINTMENTS_MANAGE]: 'Cancel, reschedule or mark a consultation no-show.',
+  [PERMISSIONS.AVAILABILITY_READ]: "View a doctor's schedule, blocked dates and bookable slots.",
+  [PERMISSIONS.AVAILABILITY_MANAGE]: "Edit a doctor's scheduling settings (min notice, booking horizon).",
   [PERMISSIONS.PAYMENTS_READ]: 'View transactions and payout status.',
   [PERMISSIONS.PAYMENTS_REFUND]: 'Initiate a refund.',
   [PERMISSIONS.PAYMENTS_EXPORT]: 'Export transactions/refunds as CSV.',
@@ -189,7 +194,7 @@ export const ROLE_DEFINITIONS: readonly RoleDefinition[] = [
 const ALL_PERMISSIONS = Object.values(PERMISSIONS);
 
 export const ROLE_PERMISSIONS: Record<RoleCode, readonly PermissionKey[]> = {
-  // All 41 — seeded explicitly (so `GET /admin/roles` shows the truth) AND
+  // All 43 — seeded explicitly (so `GET /admin/roles` shows the truth) AND
   // short-circuited in the resolution query (identity-access.repository.ts),
   // so a permission added between deploys can never lock the owner out
   // before the seed re-runs.
@@ -206,6 +211,8 @@ export const ROLE_PERMISSIONS: Record<RoleCode, readonly PermissionKey[]> = {
     PERMISSIONS.SPECIALTIES_READ,
     PERMISSIONS.APPOINTMENTS_READ,
     PERMISSIONS.APPOINTMENTS_MANAGE,
+    PERMISSIONS.AVAILABILITY_READ,
+    PERMISSIONS.AVAILABILITY_MANAGE,
     PERMISSIONS.PAYMENTS_READ,
     PERMISSIONS.GOVERNANCE_READ_QUEUES,
     PERMISSIONS.GOVERNANCE_READ_CLARIFICATIONS,
@@ -252,6 +259,7 @@ export const ROLE_PERMISSIONS: Record<RoleCode, readonly PermissionKey[]> = {
     PERMISSIONS.DOCTORS_READ,
     PERMISSIONS.APPOINTMENTS_READ,
     PERMISSIONS.APPOINTMENTS_MANAGE,
+    PERMISSIONS.AVAILABILITY_READ,
     PERMISSIONS.GOVERNANCE_READ_QUEUES,
     PERMISSIONS.GOVERNANCE_ACT_ALERTS,
     PERMISSIONS.CONTENT_READ,
