@@ -8,6 +8,7 @@ import { AiModule } from './modules/ai/ai.module';
 import { AvailabilityModule } from './modules/availability/availability.module';
 import { CatalogueModule } from './modules/catalogue/catalogue.module';
 import { DoctorModule } from './modules/doctor/doctor.module';
+import { DocumentModule } from './modules/document/document.module';
 import { IdentityModule } from './modules/identity/identity.module';
 import { McpModule } from './modules/mcp/mcp.module';
 import { PatientModule } from './modules/patient/patient.module';
@@ -55,6 +56,9 @@ import { ErrorsModule } from './shared/errors/errors.module';
     SearchToolModule,
     McpModule,
     StorageModule,
+    // M-10: documents and file storage. Depends only on M-01/M-02
+    // (`docs/MODULES.md`), so it needs no other feature module imported here.
+    DocumentModule,
     HealthModule,
   ],
 })
