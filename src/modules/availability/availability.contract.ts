@@ -24,6 +24,23 @@ export interface BusyInterval {
 export interface BusyIntervalProvider {
   /** Every busy interval for `doctorId` that could overlap `[fromUtc, toUtc)` — implementations may return extra intervals outside the range defensively; the caller always re-checks overlap itself. */
   getBusyIntervals(doctorId: string, fromUtc: Date, toUtc: Date): Promise<BusyInterval[]>;
+
+  /**
+   * OPTIONAL batch form, added for `getEarliestBookableSlots` (M-09 ranks a
+   * whole candidate set at once and cannot afford one round trip per
+   * doctor). Deliberately optional, not required: a future
+   * `BookingFacade`-backed implementation that has not written one yet must
+   * keep compiling, and `availability-slot.service.ts` falls back to looping
+   * `getBusyIntervals` when it is absent. Implement it — the fallback is a
+   * correctness guarantee, not a performance one.
+   */
+  getBusyIntervalsForMany?(doctorIds: readonly string[], fromUtc: Date, toUtc: Date): Promise<DoctorBusyIntervals[]>;
+}
+
+/** One doctor's busy intervals, as returned by the batch form above. */
+export interface DoctorBusyIntervals {
+  doctorId: string;
+  intervals: BusyInterval[];
 }
 
 /**
@@ -96,6 +113,43 @@ export interface AvailabilityContract {
 
   /** The doctor's weekly schedule as currently configured. Empty for a doctor with none set (or that doesn't exist). */
   getWeeklyRules(doctorId: string): Promise<WeeklyAvailabilityRule[]>;
+
+  /**
+   * ADDITIVE (M-09/search): the EARLIEST bookable slot for each of many
+   * doctors, in ONE pass. This is a ranking signal — FR-4.2/FR-4.4's "live
+   * availability", FR-5.4's "alongside availability" — not a booking read.
+   *
+   * Why it had to exist rather than looping `listBookableSlots`: ranking a
+   * thirty-doctor candidate set through the per-doctor method costs roughly
+   * four queries each (scheduling parameters, rules, settings, busy
+   * intervals), which is ~120 round trips to sort one page of search
+   * results. This batches every one of those four into a single statement,
+   * so the cost is four queries regardless of how many doctors are ranked.
+   *
+   * Returns one entry per REQUESTED doctor id, in the order given, with
+   * `earliestStartsAt: null` for a doctor who has nothing bookable in the
+   * window, is not verified-and-listed, or does not exist — the same
+   * "empty, never an error" contract `listBookableSlots` already has, so a
+   * search result set never collapses because of one bad id.
+   *
+   * An ARRAY, not the `Map` the shape suggests: `backend/README.md` §2
+   * requires facade methods to pass JSON-safe objects so a local call can
+   * become a network call untouched, and a `Map` does not survive
+   * serialisation. `Date` does appear here — that is already this contract's
+   * established currency (`BookableSlot`), not a new liberty.
+   */
+  getEarliestBookableSlots(
+    doctorIds: readonly string[],
+    fromUtc: Date,
+    toUtc: Date,
+  ): Promise<EarliestBookableSlot[]>;
+}
+
+/** See `AvailabilityContract#getEarliestBookableSlots`. */
+export interface EarliestBookableSlot {
+  doctorId: string;
+  /** `null` when this doctor has no bookable slot in the requested window. */
+  earliestStartsAt: Date | null;
 }
 
 export type { AvailabilityRuleType };

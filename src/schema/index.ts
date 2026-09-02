@@ -49,6 +49,7 @@ export * from './consultations.schema';
 export * from './consultation-participants.schema';
 export * from './instant-consultancy.schema';
 export * from './search-queries.schema';
+export * from './search-rate-limits.schema';
 
 export * from './report-requests.schema';
 export * from './clarification-cases.schema';

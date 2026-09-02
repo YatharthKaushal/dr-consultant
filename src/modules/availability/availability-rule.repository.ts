@@ -1,5 +1,5 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { and, eq, gte, lte, or } from 'drizzle-orm';
+import { and, eq, gte, inArray, lte, or } from 'drizzle-orm';
 import { DATABASE } from '../../config/db/database.module';
 import type { Database, DatabaseTransaction } from '../../config/db/database.config';
 import { doctorAvailabilityTable, type DoctorAvailabilityRow } from '../../schema/doctor-availability.schema';
@@ -62,6 +62,32 @@ export class AvailabilityRuleRepository {
       .where(
         and(
           eq(doctorAvailabilityTable.doctorId, doctorId),
+          or(
+            eq(doctorAvailabilityTable.ruleType, 'weekly'),
+            and(gte(doctorAvailabilityTable.specificDate, fromIsoDate), lte(doctorAvailabilityTable.specificDate, toIsoDate)),
+          ),
+        ),
+      );
+  }
+
+  /**
+   * ADDITIVE (M-09/search): `listForRange` for MANY doctors in one
+   * statement, backing `getEarliestBookableSlots`. Identical predicate with
+   * `doctor_id IN (...)`; the caller groups the rows by `doctorId` itself.
+   */
+  async listForRangeForMany(
+    doctorIds: readonly string[],
+    fromIsoDate: string,
+    toIsoDate: string,
+    executor: Executor = this.db,
+  ): Promise<DoctorAvailabilityRow[]> {
+    if (doctorIds.length === 0) return [];
+    return executor
+      .select()
+      .from(doctorAvailabilityTable)
+      .where(
+        and(
+          inArray(doctorAvailabilityTable.doctorId, [...doctorIds]),
           or(
             eq(doctorAvailabilityTable.ruleType, 'weekly'),
             and(gte(doctorAvailabilityTable.specificDate, fromIsoDate), lte(doctorAvailabilityTable.specificDate, toIsoDate)),

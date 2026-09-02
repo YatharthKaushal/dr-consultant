@@ -8,8 +8,14 @@ import { DoctorSpecialtyRepository } from './doctor-specialty.repository';
 import type { CreateDoctorDto, UpdateDoctorDto } from './doctor-admin.dto';
 import type { UpdateOwnDoctorProfileDto } from './doctor.dto';
 import { DOCTOR_AUDIT_ENTITY_TYPES, DOCTOR_ERROR_CODES } from './doctor.constants';
-import type { PublicDoctorProfile } from './doctor.contract';
+import type {
+  DoctorSchedulingParametersById,
+  ListedDoctorFilter,
+  ListedDoctorSummary,
+  PublicDoctorProfile,
+} from './doctor.contract';
 import {
+  toListedDoctorSummary,
   toPublicDoctorProfile,
   toPublicDoctorSpecialties,
   toSafeDoctorDocumentRow,
@@ -176,6 +182,75 @@ export class DoctorService {
       bufferMinutes: doctor.bufferMinutes,
       isVerifiedAndListed: doctor.verificationStatus === 'verified' && doctor.isListed,
     };
+  }
+
+  /**
+   * ADDITIVE (M-07/availability, forced by M-09) — see `doctor.contract.ts`.
+   * One `id IN (...)` read; doctors that do not exist are simply absent.
+   */
+  async getSchedulingParametersForMany(doctorIds: readonly string[]): Promise<DoctorSchedulingParametersById[]> {
+    if (doctorIds.length === 0) return [];
+    const doctors = await this.repo.listByIds(doctorIds);
+    return doctors.map((doctor) => ({
+      doctorId: doctor.id,
+      consultationDurationMinutes: doctor.consultationDurationMinutes,
+      bufferMinutes: doctor.bufferMinutes,
+      isVerifiedAndListed: doctor.verificationStatus === 'verified' && doctor.isListed,
+    }));
+  }
+
+  /**
+   * ADDITIVE (M-09/search) — see `DoctorContract.listListedDoctors`.
+   *
+   * Three reads, not N: the filtered doctor page, then every
+   * `doctor_specialties` row for that page in one `IN`, then each DISTINCT
+   * specialty id resolved through `CatalogueFacade` (the launch catalogue has
+   * five specialties, so this is a handful of calls for any page size, not
+   * one per doctor). Enrichment goes through the facade rather than a join
+   * because `specialties` is catalogue-owned — the same rule
+   * `doctor-specialty.repository.ts` had its join removed for.
+   *
+   * A specialty id that no longer resolves is dropped from that doctor's
+   * list rather than throwing. This differs from `enrichSpecialties`, which
+   * treats it as a data-integrity error, and the difference is deliberate:
+   * that path serves one doctor the caller explicitly asked for, where
+   * silence would hide a broken FK; this one serves a listing, where one
+   * stale association must not blank out an entire page of search results.
+   */
+  async listListedDoctors(filter: ListedDoctorFilter): Promise<ListedDoctorSummary[]> {
+    const doctors = await this.repo.listListedDoctors({
+      specialtyIds: filter.specialtyIds,
+      languages: filter.languages,
+      maxFeeInr: filter.maxFeeInr,
+      limit: filter.limit,
+      offset: filter.offset,
+    });
+    if (doctors.length === 0) return [];
+
+    const specialtyRows = await this.specialtyRepo.listByDoctorIds(doctors.map((doctor) => doctor.id));
+
+    const uniqueSpecialtyIds = [...new Set(specialtyRows.map((row) => row.specialtyId))];
+    const resolved = await Promise.all(uniqueSpecialtyIds.map(async (id) => this.catalogue.getSpecialtyById(id)));
+    const specialtyById = new Map(
+      resolved.filter((specialty): specialty is NonNullable<typeof specialty> => specialty !== null).map((specialty) => [specialty.id, specialty]),
+    );
+
+    const rowsByDoctor = new Map<string, DoctorSpecialtyRow[]>();
+    for (const row of specialtyRows) {
+      const existing = rowsByDoctor.get(row.doctorId);
+      if (existing) existing.push(row);
+      else rowsByDoctor.set(row.doctorId, [row]);
+    }
+
+    return doctors.map((doctor) =>
+      toListedDoctorSummary(
+        doctor,
+        (rowsByDoctor.get(doctor.id) ?? []).flatMap((row) => {
+          const specialty = specialtyById.get(row.specialtyId);
+          return specialty ? [{ id: specialty.id, code: specialty.code, name: specialty.name, isPrimary: row.isPrimary }] : [];
+        }),
+      ),
+    );
   }
 
   /* ---------------------------------------------------------------------- */

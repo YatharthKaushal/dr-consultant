@@ -74,6 +74,8 @@ export const PERMISSIONS = {
   CONTENT_MANAGE_FOLLOWUP_QUESTIONS: 'content.manage_followup_questions',
 
   SEARCH_MANAGE_MAPPING: 'search.manage_mapping',
+  /** Patients' own free-text symptom queries (FR-5.7's zero-result feedback loop) — split from `search.manage_mapping` because tuning keywords must not imply reading what people typed. */
+  SEARCH_READ_QUERIES: 'search.read_queries',
 
   FEEDBACK_READ: 'feedback.read',
   FEEDBACK_MANAGE_COMPLAINTS: 'feedback.manage_complaints',
@@ -143,6 +145,7 @@ const DESCRIPTIONS: Record<PermissionKey, string> = {
   [PERMISSIONS.CONTENT_MANAGE_NOTIFICATION_TEMPLATES]: 'Edit notification copy.',
   [PERMISSIONS.CONTENT_MANAGE_FOLLOWUP_QUESTIONS]: 'Edit follow-up pathway question sets and red-flag rules.',
   [PERMISSIONS.SEARCH_MANAGE_MAPPING]: 'Edit the symptom-to-specialty mapping, synonyms and crisis keywords.',
+  [PERMISSIONS.SEARCH_READ_QUERIES]: 'Read the symptom search query log, including queries that returned no doctors.',
   [PERMISSIONS.FEEDBACK_READ]: 'View patient feedback and complaints.',
   [PERMISSIONS.FEEDBACK_MANAGE_COMPLAINTS]: 'Work a complaint through to resolution.',
   [PERMISSIONS.COMPLIANCE_MANAGE_LEGAL_DOCUMENTS]: 'Publish a new version of a legal document.',
@@ -205,7 +208,7 @@ export const ROLE_DEFINITIONS: readonly RoleDefinition[] = [
 const ALL_PERMISSIONS = Object.values(PERMISSIONS);
 
 export const ROLE_PERMISSIONS: Record<RoleCode, readonly PermissionKey[]> = {
-  // All 47 — seeded explicitly (so `GET /admin/roles` shows the truth) AND
+  // All 48 — seeded explicitly (so `GET /admin/roles` shows the truth) AND
   // short-circuited in the resolution query (identity-access.repository.ts),
   // so a permission added between deploys can never lock the owner out
   // before the seed re-runs.
@@ -231,6 +234,7 @@ export const ROLE_PERMISSIONS: Record<RoleCode, readonly PermissionKey[]> = {
     PERMISSIONS.GOVERNANCE_READ_QUALITY,
     PERMISSIONS.GOVERNANCE_EXPORT,
     PERMISSIONS.CONTENT_READ,
+    PERMISSIONS.SEARCH_READ_QUERIES,
     PERMISSIONS.FEEDBACK_READ,
     PERMISSIONS.FEEDBACK_MANAGE_COMPLAINTS,
     PERMISSIONS.CONFIG_READ,
@@ -264,6 +268,7 @@ export const ROLE_PERMISSIONS: Record<RoleCode, readonly PermissionKey[]> = {
     PERMISSIONS.CONTENT_PUBLISH,
     PERMISSIONS.CONTENT_MANAGE_FOLLOWUP_QUESTIONS,
     PERMISSIONS.SEARCH_MANAGE_MAPPING,
+    PERMISSIONS.SEARCH_READ_QUERIES,
     PERMISSIONS.FEEDBACK_READ,
     PERMISSIONS.AUDIT_READ,
   ],
