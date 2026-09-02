@@ -207,6 +207,12 @@ export class ConcernService {
     return concern ? toPublicConcern(concern) : null;
   }
 
+  /** ADDITIVE (M-09/search) — see `CatalogueContract.getConcernsByIds`. */
+  async getPublicByIds(ids: readonly string[]): Promise<PublicConcern[]> {
+    const rows = await this.repo.listByIds(ids);
+    return rows.map(toPublicConcern);
+  }
+
   private definedGeneralAndCreateFields(dto: CreateConcernDto): Record<string, unknown> {
     const fields: Record<string, unknown> = { specialtyId: dto.specialtyId, code: dto.code, name: dto.name };
     if (dto.matchPhrases !== undefined) fields.matchPhrases = dto.matchPhrases;

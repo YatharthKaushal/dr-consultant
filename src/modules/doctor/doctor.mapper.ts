@@ -1,6 +1,6 @@
 import type { DoctorDocumentRow } from '../../schema/doctor-documents.schema';
 import type { DoctorRow } from '../../schema/doctors.schema';
-import type { PublicDoctorProfile, PublicDoctorSpecialty } from './doctor.contract';
+import type { ListedDoctorSummary, PublicDoctorProfile, PublicDoctorSpecialty } from './doctor.contract';
 
 /** A `doctor_specialties` row enriched with catalogue-owned `code`/`name` — assembled by the service layer via `CatalogueFacade`, never read directly off a join (see `doctor-specialty.repository.ts`). */
 export interface DoctorSpecialtyWithDetails {
@@ -41,6 +41,27 @@ export function toSafeDoctorDocumentRow(row: DoctorDocumentRow): SafeDoctorDocum
 
 export function toPublicDoctorSpecialties(specialties: DoctorSpecialtyWithDetails[]): PublicDoctorSpecialty[] {
   return specialties.map((s) => ({ id: s.specialtyId, code: s.code, name: s.name, isPrimary: s.isPrimary }));
+}
+
+/**
+ * ADDITIVE (M-09/search): the listing projection — `PublicDoctorProfile`
+ * minus `bio`. See `ListedDoctorSummary` in `doctor.contract.ts` for why
+ * that one field is the whole difference. Specialties arrive already
+ * enriched (and already filtered of any that no longer resolve), so this
+ * stays a pure field projection.
+ */
+export function toListedDoctorSummary(doctor: DoctorRow, specialties: PublicDoctorSpecialty[]): ListedDoctorSummary {
+  return {
+    id: doctor.id,
+    fullName: doctor.fullName,
+    languages: doctor.languages,
+    qualification: doctor.qualification,
+    registrationNumber: doctor.registrationNumber,
+    yearsOfExperience: doctor.yearsOfExperience,
+    consultationFeeInr: doctor.consultationFeeInr,
+    consultationDurationMinutes: doctor.consultationDurationMinutes,
+    specialties,
+  };
 }
 
 export function toPublicDoctorProfile(doctor: DoctorRow, specialties: DoctorSpecialtyWithDetails[]): PublicDoctorProfile {

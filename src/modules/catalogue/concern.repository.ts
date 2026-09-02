@@ -1,5 +1,5 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { and, eq } from 'drizzle-orm';
+import { and, eq, inArray } from 'drizzle-orm';
 import { DATABASE } from '../../config/db/database.module';
 import type { Database, DatabaseTransaction } from '../../config/db/database.config';
 import { concernsTable, type ConcernRow } from '../../schema/concerns.schema';
@@ -52,6 +52,20 @@ export class ConcernRepository {
       ? and(eq(concernsTable.isActive, true), eq(concernsTable.specialtyId, specialtyId))
       : eq(concernsTable.isActive, true);
     return executor.select().from(concernsTable).where(conditions).orderBy(concernsTable.name);
+  }
+
+  /**
+   * ADDITIVE (M-09/search): one round trip for a list of ids. NOT filtered by
+   * `isActive` — see `CatalogueContract.getConcernsByIds`. An empty `ids`
+   * short-circuits rather than emitting `in ()`, which Postgres rejects.
+   */
+  async listByIds(ids: readonly string[], executor: Executor = this.db): Promise<ConcernRow[]> {
+    if (ids.length === 0) return [];
+    return executor
+      .select()
+      .from(concernsTable)
+      .where(inArray(concernsTable.id, [...ids]))
+      .orderBy(concernsTable.id);
   }
 
   async create(

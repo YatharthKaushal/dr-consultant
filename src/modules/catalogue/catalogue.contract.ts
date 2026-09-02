@@ -53,4 +53,32 @@ export interface CatalogueContract {
 
   /** `null` only if the concern id doesn't exist. Not gated on `isActive` — same reasoning as `getSpecialtyById`. */
   getConcernById(id: string): Promise<PublicConcern | null>;
+
+  /**
+   * ADDITIVE (M-09/search): THE MAPPING CORPUS. Active concerns with their
+   * `matchPhrases`/`matchWeight`, optionally narrowed to one specialty —
+   * everything M-09's deterministic matcher scores a query against, and the
+   * live taxonomy its LLM system prompt is built from (FR-19.1: a specialty
+   * or concern added in the admin panel must change search behaviour with no
+   * code change and no release).
+   *
+   * `ConcernService.listActive` already existed and backed `GET /concerns`;
+   * it simply was not on the facade, so no other module could reach it
+   * without the deep import `backend/README.md` §2 forbids.
+   */
+  listActiveConcerns(specialtyId?: string): Promise<PublicConcern[]>;
+
+  /**
+   * ADDITIVE (M-09/search): resolves `search_queries.matched_concern_ids`
+   * (and any other stored id list) to display rows in ONE round trip instead
+   * of N `getConcernById` calls. Deliberately NOT gated on `isActive`, same
+   * reasoning as `getConcernById`: a logged historical match must still
+   * render after the concern behind it is retired — that table's ids are a
+   * deliberately FK-free historical record (`search-queries.schema.ts`).
+   *
+   * Unknown ids are omitted rather than returned as holes; the caller
+   * compares lengths if it cares. Order follows `id ASC`, not the order of
+   * `ids` — callers that need the caller's order re-map by id.
+   */
+  getConcernsByIds(ids: readonly string[]): Promise<PublicConcern[]>;
 }

@@ -15,6 +15,8 @@ export const AVAILABILITY_ERROR_CODES = {
   INVALID_RANGE: 'INVALID_RANGE',
   /** `[from, to)` spans more than `scheduling.max_slot_query_days`. */
   RANGE_TOO_LARGE: 'RANGE_TOO_LARGE',
+  /** More than `MAX_BATCH_DOCTOR_IDS` ids passed to `getEarliestBookableSlots`. */
+  TOO_MANY_DOCTOR_IDS: 'TOO_MANY_DOCTOR_IDS',
   RULE_NOT_FOUND: 'RULE_NOT_FOUND',
   /** Defensive re-check of the DTO's own `@Min`/`@Max` bounds — see `availability-settings.service.ts`. */
   SETTINGS_INVALID: 'SETTINGS_INVALID',
@@ -51,3 +53,12 @@ export const AVAILABILITY_CONFIG_FALLBACKS = {
  * `availability-slot.service.ts` or the engine.
  */
 export const BUSY_INTERVAL_PROVIDER = Symbol('BUSY_INTERVAL_PROVIDER');
+
+/**
+ * Ceiling on `getEarliestBookableSlots`' doctor-id list. Bounds the `IN`
+ * clauses and the per-doctor slot expansion behind one batch call, so a
+ * caller cannot turn a ranking read into an unbounded scan by passing every
+ * doctor on the platform. Comfortably above M-09's own candidate pool
+ * (`SEARCH_CANDIDATE_POOL_LIMIT`).
+ */
+export const MAX_BATCH_DOCTOR_IDS = 200;
