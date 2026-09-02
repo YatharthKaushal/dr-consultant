@@ -66,6 +66,154 @@ function createDeps() {
 }
 
 describe('DoctorService', () => {
+  describe('getOwnProfile', () => {
+    it('404s when the doctor does not exist', async () => {
+      const { service, repo } = createDeps();
+      repo.findById.mockResolvedValue(null);
+
+      await expect(service.getOwnProfile('missing')).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    it('assembles the profile with specialties and documents (stripping tokenVersion/storageKey)', async () => {
+      const { service, repo, specialtyRepo, documentRepo } = createDeps();
+      repo.findById.mockResolvedValue(baseDoctor());
+      specialtyRepo.listByDoctor.mockResolvedValue([
+        { id: 'ds-1', specialtyId: 'spec-1', code: 'psychiatry', name: 'Psychiatry', isPrimary: true },
+      ]);
+      documentRepo.listByDoctor.mockResolvedValue([
+        {
+          id: 'doc-1',
+          doctorId: 'doctor-1',
+          documentType: 'registration_certificate',
+          storageKey: 'secret/key.pdf',
+          fileName: 'x.pdf',
+          reviewStatus: 'pending',
+          verifiedByAdminId: null,
+          verifiedAt: null,
+          rejectionReason: null,
+          createdAt: NOW,
+        } as never,
+      ]);
+
+      const result = await service.getOwnProfile('doctor-1');
+
+      expect(result.specialties).toEqual([{ id: 'spec-1', code: 'psychiatry', name: 'Psychiatry', isPrimary: true }]);
+      expect(result.documents[0]).not.toHaveProperty('storageKey');
+      expect(result).not.toHaveProperty('tokenVersion');
+    });
+  });
+
+  describe('getPublicProfile (facade-backed read)', () => {
+    it('returns null when the doctor does not exist', async () => {
+      const { service, repo } = createDeps();
+      repo.findById.mockResolvedValue(null);
+
+      await expect(service.getPublicProfile('missing')).resolves.toBeNull();
+    });
+
+    it('returns the public profile shape when the doctor exists', async () => {
+      const { service, repo, specialtyRepo } = createDeps();
+      repo.findById.mockResolvedValue(baseDoctor({ fullName: 'Dr. Test' }));
+      specialtyRepo.listByDoctor.mockResolvedValue([]);
+
+      const result = await service.getPublicProfile('doctor-1');
+
+      expect(result?.fullName).toBe('Dr. Test');
+    });
+  });
+
+  describe('isVerifiedAndListed', () => {
+    it('is false when the doctor does not exist', async () => {
+      const { service, repo } = createDeps();
+      repo.findById.mockResolvedValue(null);
+
+      await expect(service.isVerifiedAndListed('missing')).resolves.toBe(false);
+    });
+
+    it('is false when verified but not listed', async () => {
+      const { service, repo } = createDeps();
+      repo.findById.mockResolvedValue(baseDoctor({ verificationStatus: 'verified', isListed: false }));
+
+      await expect(service.isVerifiedAndListed('doctor-1')).resolves.toBe(false);
+    });
+
+    it('is false when listed but not verified', async () => {
+      const { service, repo } = createDeps();
+      repo.findById.mockResolvedValue(baseDoctor({ verificationStatus: 'pending', isListed: true }));
+
+      await expect(service.isVerifiedAndListed('doctor-1')).resolves.toBe(false);
+    });
+
+    it('is true when both verified and listed', async () => {
+      const { service, repo } = createDeps();
+      repo.findById.mockResolvedValue(baseDoctor({ verificationStatus: 'verified', isListed: true }));
+
+      await expect(service.isVerifiedAndListed('doctor-1')).resolves.toBe(true);
+    });
+  });
+
+  describe('admin: adminList / adminGetDetail / requireDoctor', () => {
+    it('adminList strips tokenVersion/pushToken/deviceId/presence from every row', async () => {
+      const { service, repo } = createDeps();
+      repo.list.mockResolvedValue([baseDoctor({ tokenVersion: 5 })]);
+
+      const result = await service.adminList();
+
+      expect(result[0]).not.toHaveProperty('tokenVersion');
+      expect(result[0]).not.toHaveProperty('presence');
+    });
+
+    it('adminGetDetail 404s when the doctor does not exist', async () => {
+      const { service, repo } = createDeps();
+      repo.findById.mockResolvedValue(null);
+
+      await expect(service.adminGetDetail('missing')).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    it('adminGetDetail returns specialties and documents like getOwnProfile', async () => {
+      const { service, repo, specialtyRepo, documentRepo } = createDeps();
+      repo.findById.mockResolvedValue(baseDoctor());
+      specialtyRepo.listByDoctor.mockResolvedValue([]);
+      documentRepo.listByDoctor.mockResolvedValue([]);
+
+      const result = await service.adminGetDetail('doctor-1');
+
+      expect(result.specialties).toEqual([]);
+      expect(result.documents).toEqual([]);
+    });
+
+    it('requireDoctor 404s when the doctor does not exist', async () => {
+      const { service, repo } = createDeps();
+      repo.findById.mockResolvedValue(null);
+
+      await expect(service.requireDoctor('missing')).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    it('requireDoctor returns the raw row when the doctor exists', async () => {
+      const { service, repo } = createDeps();
+      repo.findById.mockResolvedValue(baseDoctor({ tokenVersion: 9 }));
+
+      const result = await service.requireDoctor('doctor-1');
+
+      expect(result.tokenVersion).toBe(9);
+    });
+  });
+
+  describe('adminCreate — success path', () => {
+    it('creates the doctor and audits the creation', async () => {
+      const { service, repo, audit } = createDeps();
+      repo.findByMobile.mockResolvedValue(null);
+      repo.create.mockResolvedValue(baseDoctor({ id: 'doctor-9', fullName: 'New Doc' }));
+
+      const result = await service.adminCreate('admin-1', { mobileNumber: '+919876543210', fullName: 'New Doc' });
+
+      expect(result.fullName).toBe('New Doc');
+      expect(audit.write).toHaveBeenCalledWith(
+        expect.objectContaining({ action: 'create', entityType: 'doctor', entityId: 'doctor-9' }),
+      );
+    });
+  });
+
   describe('updateOwnProfile — self-editable fields only', () => {
     it('writes only `bio` when only bio is provided', async () => {
       const { service, repo } = createDeps();
@@ -100,6 +248,14 @@ describe('DoctorService', () => {
       repo.updateOwnProfile.mockResolvedValue(null);
 
       await expect(service.updateOwnProfile('missing', { bio: 'x' })).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    it('404s on an empty patch too, when the doctor does not exist', async () => {
+      const { service, repo } = createDeps();
+      repo.findById.mockResolvedValue(null);
+
+      await expect(service.updateOwnProfile('missing', {})).rejects.toBeInstanceOf(NotFoundException);
+      expect(repo.updateOwnProfile).not.toHaveBeenCalled();
     });
   });
 
@@ -154,6 +310,15 @@ describe('DoctorService', () => {
   });
 
   describe('adminUpdateProfileFields', () => {
+    it('404s when the doctor does not exist', async () => {
+      const { service, repo } = createDeps();
+      repo.findById.mockResolvedValue(null);
+
+      await expect(
+        service.adminUpdateProfileFields('admin-1', 'missing', { fullName: 'X' }),
+      ).rejects.toBeInstanceOf(NotFoundException);
+    });
+
     it('skips the repository update and the audit write for an empty patch', async () => {
       const { service, repo, audit } = createDeps();
       repo.findById.mockResolvedValue(baseDoctor());
@@ -173,6 +338,38 @@ describe('DoctorService', () => {
         service.adminUpdateProfileFields('admin-1', 'doctor-1', { registrationNumber: 'NEW-1' }),
       ).rejects.toBeInstanceOf(ConflictException);
       expect(repo.updateProfileFields).not.toHaveBeenCalled();
+    });
+
+    it('allows re-submitting the SAME registration number the doctor already has (the clash check excludes self)', async () => {
+      const { service, repo } = createDeps();
+      repo.findById.mockResolvedValue(baseDoctor({ registrationNumber: 'REG-1' }));
+      repo.updateProfileFields.mockResolvedValue(baseDoctor({ registrationNumber: 'REG-1' }));
+
+      await service.adminUpdateProfileFields('admin-1', 'doctor-1', { registrationNumber: 'REG-1' });
+
+      expect(repo.findByRegistrationNumber).not.toHaveBeenCalled();
+      expect(repo.updateProfileFields).toHaveBeenCalled();
+    });
+
+    it('allows a registration number clash check to resolve to the SAME doctor id without conflict', async () => {
+      const { service, repo } = createDeps();
+      repo.findById.mockResolvedValue(baseDoctor({ id: 'doctor-1', registrationNumber: 'OLD-1' }));
+      repo.findByRegistrationNumber.mockResolvedValue(baseDoctor({ id: 'doctor-1', registrationNumber: 'NEW-1' }));
+      repo.updateProfileFields.mockResolvedValue(baseDoctor({ registrationNumber: 'NEW-1' }));
+
+      await service.adminUpdateProfileFields('admin-1', 'doctor-1', { registrationNumber: 'NEW-1' });
+
+      expect(repo.updateProfileFields).toHaveBeenCalled();
+    });
+
+    it('404s when the repository update returns null (doctor removed between the existence check and the write)', async () => {
+      const { service, repo } = createDeps();
+      repo.findById.mockResolvedValue(baseDoctor());
+      repo.updateProfileFields.mockResolvedValue(null);
+
+      await expect(
+        service.adminUpdateProfileFields('admin-1', 'doctor-1', { fullName: 'New Name' }),
+      ).rejects.toBeInstanceOf(NotFoundException);
     });
 
     it('audits an actual field change', async () => {

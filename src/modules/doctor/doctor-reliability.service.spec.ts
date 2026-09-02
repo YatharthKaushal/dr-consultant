@@ -1,3 +1,4 @@
+import { NotFoundException } from '@nestjs/common';
 import type { Database } from '../../config/db/database.config';
 import type { DoctorRow } from '../../schema/doctors.schema';
 import { DoctorReliabilityService } from './doctor-reliability.service';
@@ -73,6 +74,29 @@ describe('DoctorReliabilityService', () => {
     const { service, doctorRepo } = createDeps();
     doctorRepo.findById.mockResolvedValue(null);
 
-    await expect(service.getMetrics('missing')).rejects.toBeTruthy();
+    // Was previously asserted with a loose `.rejects.toBeTruthy()`, which
+    // would also pass for e.g. a raw string or a wrong exception type —
+    // tightened to confirm it's actually the 404 the caller expects.
+    await expect(service.getMetrics('missing')).rejects.toBeInstanceOf(NotFoundException);
+  });
+
+  it('never even queries the reliability tables when the doctor does not exist', async () => {
+    const { service, doctorRepo, select } = createDeps();
+    doctorRepo.findById.mockResolvedValue(null);
+
+    await expect(service.getMetrics('missing')).rejects.toBeInstanceOf(NotFoundException);
+    expect(select).not.toHaveBeenCalled();
+  });
+
+  it('treats a completely empty result set (no row at all) the same as an all-zero row — null, not NaN', async () => {
+    const { service, select } = createDeps();
+    select
+      .mockReturnValueOnce(selectChain([]))
+      .mockReturnValueOnce(selectChain([]))
+      .mockReturnValueOnce(selectChain([]));
+
+    const result = await service.getMetrics('doctor-1');
+
+    expect(result).toEqual({ acceptanceRate: null, noShowRate: null, caseSummaryCompletionRate: null });
   });
 });

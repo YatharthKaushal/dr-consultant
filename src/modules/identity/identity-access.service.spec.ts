@@ -254,5 +254,164 @@ describe('IdentityAccessService', () => {
         NotFoundException,
       );
     });
+
+    it('404s revokeRole when the role does not exist', async () => {
+      const { service, accessRepo } = createDeps();
+      accessRepo.findRoleById.mockResolvedValue(null as never);
+
+      await expect(service.revokeRole('admin-1', 'admin-2', 'missing-role')).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    it('404s revokePermission when the permission does not exist', async () => {
+      const { service, accessRepo } = createDeps();
+      accessRepo.findPermissionById.mockResolvedValue(null as never);
+
+      await expect(service.revokePermission('admin-1', 'admin-2', 'missing-permission')).rejects.toBeInstanceOf(
+        NotFoundException,
+      );
+    });
+  });
+
+  describe('DOES audit real-change paths for every RBAC/ABAC mutation', () => {
+    it('DOES audit revokeRole when the role was actually held and removed (non-super_admin)', async () => {
+      const { service, accessRepo, audit } = createDeps();
+      accessRepo.findRoleById.mockResolvedValue({ id: 'role-1', code: 'operations', name: 'Operations' } as never);
+      accessRepo.revokeRole.mockResolvedValue(true);
+
+      await service.revokeRole('admin-1', 'admin-2', 'role-1');
+
+      expect(audit.write).toHaveBeenCalledWith(
+        expect.objectContaining({ action: 'delete', entityType: 'admin_role', entityId: 'admin-2' }),
+        expect.anything(),
+      );
+    });
+
+    it('DOES audit grantPermission when the grant was newly created, and includes the reason in metadata', async () => {
+      const { service, accessRepo, audit } = createDeps();
+      accessRepo.findPermissionById.mockResolvedValue({ id: 'perm-1', key: 'doctors.verify' } as never);
+      accessRepo.grantPermission.mockResolvedValue(true);
+
+      await service.grantPermission('admin-1', 'admin-2', 'perm-1', 'coverage during leave');
+
+      expect(accessRepo.grantPermission).toHaveBeenCalledWith('admin-2', 'perm-1', 'admin-1', 'coverage during leave', expect.anything());
+      expect(audit.write).toHaveBeenCalledWith(
+        expect.objectContaining({
+          action: 'create',
+          entityType: 'admin_permission_grant',
+          entityId: 'admin-2',
+          metadata: expect.objectContaining({ permissionKey: 'doctors.verify', reason: 'coverage during leave' }),
+        }),
+        expect.anything(),
+      );
+    });
+
+    it('DOES audit revokePermission when the grant was actually held and removed', async () => {
+      const { service, accessRepo, audit } = createDeps();
+      accessRepo.findPermissionById.mockResolvedValue({ id: 'perm-1', key: 'doctors.verify' } as never);
+      accessRepo.revokePermissionGrant.mockResolvedValue(true);
+
+      await service.revokePermission('admin-1', 'admin-2', 'perm-1');
+
+      expect(audit.write).toHaveBeenCalledWith(
+        expect.objectContaining({ action: 'delete', entityType: 'admin_permission_grant', entityId: 'admin-2' }),
+        expect.anything(),
+      );
+    });
+
+    it('does not audit assignRole no-op call and does not require a role lock for a non-super_admin role', async () => {
+      const { service, accessRepo, audit } = createDeps();
+      accessRepo.findRoleById.mockResolvedValue({ id: 'role-1', code: 'operations', name: 'Operations' } as never);
+      accessRepo.assignRole.mockResolvedValue(false);
+
+      await service.assignRole('admin-1', 'admin-2', 'role-1');
+
+      expect(audit.write).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('getAdminAccess', () => {
+    it('404s when the admin does not exist', async () => {
+      const { service, identityRepo } = createDeps();
+      identityRepo.findAdminById.mockResolvedValue(null as never);
+
+      await expect(service.getAdminAccess('missing')).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    it('returns the admin (without tokenVersion), roles, and grants', async () => {
+      const { service, identityRepo, accessRepo } = createDeps();
+      identityRepo.findAdminById.mockResolvedValue({ id: 'admin-2', status: 'active', tokenVersion: 3 } as never);
+      accessRepo.getAdminRoles.mockResolvedValue([{ roleId: 'role-1', code: 'operations', name: 'Operations' }] as never);
+      accessRepo.getAdminPermissionGrants.mockResolvedValue([{ permissionId: 'perm-1', key: 'doctors.verify' }] as never);
+
+      const result = await service.getAdminAccess('admin-2');
+
+      expect(result.admin).not.toHaveProperty('tokenVersion');
+      expect(result.roles).toHaveLength(1);
+      expect(result.grants).toHaveLength(1);
+    });
+  });
+
+  describe('catalog and read passthroughs', () => {
+    it('listEffectivePermissions delegates to the access repository', async () => {
+      const { service, accessRepo } = createDeps();
+      (accessRepo.listEffectivePermissions as jest.Mock) = jest.fn().mockResolvedValue(['doctors.verify']);
+
+      await expect(service.listEffectivePermissions('admin-1')).resolves.toEqual(['doctors.verify']);
+    });
+
+    it('hasAllPermissions delegates to the access repository', async () => {
+      const { service, accessRepo } = createDeps();
+      (accessRepo.hasAllPermissions as jest.Mock) = jest.fn().mockResolvedValue(true);
+
+      await expect(service.hasAllPermissions('admin-1', ['doctors.verify' as never])).resolves.toBe(true);
+    });
+
+    it('listRoles delegates to the access repository', async () => {
+      const { service, accessRepo } = createDeps();
+      accessRepo.listRoles.mockResolvedValue([{ id: 'role-1', code: 'operations', name: 'Operations' }] as never);
+
+      await expect(service.listRoles()).resolves.toHaveLength(1);
+    });
+
+    it('listPermissions delegates to the access repository', async () => {
+      const { service, accessRepo } = createDeps();
+      accessRepo.listPermissions.mockResolvedValue([{ id: 'perm-1', key: 'doctors.verify' }] as never);
+
+      await expect(service.listPermissions()).resolves.toHaveLength(1);
+    });
+
+    it('listAdminRoleCodes maps role rows down to just their codes', async () => {
+      const { service, accessRepo } = createDeps();
+      accessRepo.getAdminRoles.mockResolvedValue([
+        { roleId: 'role-1', code: 'operations', name: 'Operations' },
+        { roleId: 'role-2', code: 'support', name: 'Support' },
+      ] as never);
+
+      await expect(service.listAdminRoleCodes('admin-1')).resolves.toEqual(['operations', 'support']);
+    });
+
+    it('listAdmins strips tokenVersion from every row', async () => {
+      const { service, identityRepo } = createDeps();
+      identityRepo.listAdmins.mockResolvedValue([{ id: 'admin-1', status: 'active', tokenVersion: 4 }] as never);
+
+      const result = await service.listAdmins();
+
+      expect(result[0]).not.toHaveProperty('tokenVersion');
+    });
+  });
+
+  describe('createAdmin — success path', () => {
+    it('creates the admin and audits the creation', async () => {
+      const { service, identityRepo, audit } = createDeps();
+      identityRepo.findAdminByMobile.mockResolvedValue(null as never);
+      identityRepo.createAdmin.mockResolvedValue({ id: 'admin-3', status: 'active', tokenVersion: 0, fullName: 'New Admin' } as never);
+
+      const result = await service.createAdmin('admin-1', { mobileNumber: '+919876543210', fullName: 'New Admin' });
+
+      expect(result).not.toHaveProperty('tokenVersion');
+      expect(audit.write).toHaveBeenCalledWith(
+        expect.objectContaining({ action: 'create', entityType: 'admin', entityId: 'admin-3' }),
+      );
+    });
   });
 });
