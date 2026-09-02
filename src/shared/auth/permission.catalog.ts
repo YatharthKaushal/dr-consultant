@@ -199,7 +199,7 @@ export const ROLE_DEFINITIONS: readonly RoleDefinition[] = [
 const ALL_PERMISSIONS = Object.values(PERMISSIONS);
 
 export const ROLE_PERMISSIONS: Record<RoleCode, readonly PermissionKey[]> = {
-  // All 43 — seeded explicitly (so `GET /admin/roles` shows the truth) AND
+  // All 45 — seeded explicitly (so `GET /admin/roles` shows the truth) AND
   // short-circuited in the resolution query (identity-access.repository.ts),
   // so a permission added between deploys can never lock the owner out
   // before the seed re-runs.
