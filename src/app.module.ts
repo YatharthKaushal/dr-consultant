@@ -8,7 +8,9 @@ import { AvailabilityModule } from './modules/availability/availability.module';
 import { CatalogueModule } from './modules/catalogue/catalogue.module';
 import { DoctorModule } from './modules/doctor/doctor.module';
 import { IdentityModule } from './modules/identity/identity.module';
+import { McpModule } from './modules/mcp/mcp.module';
 import { PatientModule } from './modules/patient/patient.module';
+import { SearchToolModule } from './modules/search/tools/search-tool.module';
 import { AppConfigModule } from './shared/app-config/app-config.module';
 import { AuditModule } from './shared/audit/audit.module';
 import { AuthModule } from './shared/auth/auth.module';
@@ -41,6 +43,12 @@ import { ErrorsModule } from './shared/errors/errors.module';
     DoctorModule,
     CatalogueModule,
     AvailabilityModule,
+    // The provider-agnostic tool layer, and the MCP transport that exposes
+    // it. `McpModule` imports `SearchToolModule` itself; listing it here too
+    // keeps the tool registry available to future in-process consumers (our
+    // own LangChain agent) without them having to reach through MCP.
+    SearchToolModule,
+    McpModule,
     HealthModule,
   ],
 })

@@ -86,6 +86,10 @@ export const PERMISSIONS = {
 
   CONFIG_READ: 'config.read',
   CONFIG_MANAGE: 'config.manage',
+
+  MCP_READ: 'mcp.read',
+  /** Grants an external machine access to our catalogue, fee and doctor data — `super_admin` only. */
+  MCP_MANAGE: 'mcp.manage',
 } as const;
 
 export type PermissionKey = (typeof PERMISSIONS)[keyof typeof PERMISSIONS];
@@ -147,6 +151,8 @@ const DESCRIPTIONS: Record<PermissionKey, string> = {
   [PERMISSIONS.AUDIT_EXPORT]: 'Export audit log entries.',
   [PERMISSIONS.CONFIG_READ]: 'View app configuration values.',
   [PERMISSIONS.CONFIG_MANAGE]: 'Edit app configuration values.',
+  [PERMISSIONS.MCP_READ]: 'View external MCP client integrations and their tool scopes.',
+  [PERMISSIONS.MCP_MANAGE]: 'Create, rescope, deactivate or delete an external MCP client integration.',
 };
 
 export const PERMISSION_DEFINITIONS: readonly PermissionDefinition[] = Object.values(PERMISSIONS).map((key) => ({
@@ -199,7 +205,7 @@ export const ROLE_DEFINITIONS: readonly RoleDefinition[] = [
 const ALL_PERMISSIONS = Object.values(PERMISSIONS);
 
 export const ROLE_PERMISSIONS: Record<RoleCode, readonly PermissionKey[]> = {
-  // All 45 — seeded explicitly (so `GET /admin/roles` shows the truth) AND
+  // All 47 — seeded explicitly (so `GET /admin/roles` shows the truth) AND
   // short-circuited in the resolution query (identity-access.repository.ts),
   // so a permission added between deploys can never lock the owner out
   // before the seed re-runs.
@@ -230,6 +236,7 @@ export const ROLE_PERMISSIONS: Record<RoleCode, readonly PermissionKey[]> = {
     PERMISSIONS.CONFIG_READ,
     PERMISSIONS.CONFIG_MANAGE,
     PERMISSIONS.AUDIT_READ,
+    PERMISSIONS.MCP_READ,
   ],
 
   clinical_governance: [
