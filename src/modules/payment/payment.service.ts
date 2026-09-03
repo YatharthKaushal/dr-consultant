@@ -14,11 +14,9 @@ import {
 import type { CreatedOrder, PaymentBreakdown } from './payment.contract';
 import { toBreakdown, toBreakdownFromQuote } from './payment.mapper';
 import {
-  calculateBill,
   capturedTotalPaise,
   gatewayAmountToPaise,
   paiseToGatewayAmount,
-  paiseToRupees,
   rupeesToPaise,
 } from './payment-money.util';
 import { PricingFacade } from '../pricing/pricing.facade';
@@ -44,6 +42,16 @@ export class PaymentService {
   constructor(
     @Inject(DATABASE) private readonly db: Database,
     private readonly payments: PaymentRepository,
+    /**
+     * *** RETAINED THOUGH THIS SERVICE NO LONGER READS A RATE. ***
+     *
+     * Pricing owns the catalogue now, so nothing here consults it. It stays in
+     * the constructor deliberately: removing it would change this class's DI
+     * signature, and `payment.service.spec.ts` plus any parallel worktree
+     * constructing it by hand would break for a reason that has nothing to do
+     * with the change being made. It is one unused reference against a
+     * cross-worktree compile break.
+     */
     private readonly config: PaymentConfigService,
     private readonly gateway: RazorpayClient,
     private readonly audit: AuditService,
@@ -201,6 +209,14 @@ export class PaymentService {
         priceQuoteId: quote.quoteId,
       });
     } catch (error) {
+      // *** THE QUOTE IS ALREADY PINNED AT THIS POINT, SO IT MUST BE RELEASED. ***
+      // The stale-draft sweep only covers DRAFTS — a pinned quote is deliberately
+      // left alone there, because it may have a live gateway order behind it and
+      // releasing its coupon mid-payment would let the same code be spent twice.
+      // Nothing else will ever release this one, so a leaked reservation would
+      // keep a per-user coupon burnt forever on a checkout that never happened.
+      await this.releaseQuote(quote.quoteId, input.consultationId, 'payment_row_insert_failed');
+
       // Two concurrent checkouts for one consultation both passed the SELECT
       // above; the database settled it. Reported as the same conflict the
       // sequential check throws, per `postgres-error.util.ts`'s stated purpose.
@@ -217,7 +233,9 @@ export class PaymentService {
     // own `{ code, message }` bodies by `RazorpayClient`; the `payments` row
     // stays behind as `created` with no order id, which is exactly the state
     // `listStale`/`reconcileWithGateway` are built to resolve.
-    const order = await this.gateway.createOrder({
+    let order: { id: string };
+    try {
+      order = await this.gateway.createOrder({
       // *** THE QUOTE'S TOTAL, NOT A RECOMPUTED ONE. ***
       amount: paiseToGatewayAmount(totalPayablePaise),
       currency: PAYMENT_DEFAULT_CURRENCY,
@@ -228,7 +246,17 @@ export class PaymentService {
       // limit.
       receipt: payment.id,
       notes: { consultationId: input.consultationId, paymentId: payment.id },
-    });
+      });
+    } catch (error) {
+      // No order exists, so no money can move against this quote — release the
+      // reservation rather than leaving a coupon burnt. The `payments` row stays
+      // behind as `created` with no order id, which is exactly the state
+      // `listStale`/`reconcileWithGateway` are built to resolve, and its
+      // `price_quote_id` still points at the (now expired) quote so the bill is
+      // still explicable.
+      await this.releaseQuote(quote.quoteId, input.consultationId, 'gateway_order_creation_failed');
+      throw error;
+    }
 
     await this.payments.setGatewayOrderId(payment.id, order.id);
 
@@ -255,6 +283,31 @@ export class PaymentService {
       gatewayKeyId: this.gateway.getPublishableKeyId(),
       breakdown: summary,
     };
+  }
+
+  /**
+   * Takes a pinned quote out of play and releases its discount reservation.
+   *
+   * Best-effort by construction: every caller is already failing and about to
+   * throw the real error. Losing that exception to a bookkeeping failure would
+   * be strictly worse than leaking one reservation, which is visible and
+   * recoverable — the same reasoning `refund.service.ts#recordGatewayFailure`
+   * gives for swallowing its own recording errors.
+   */
+  private async releaseQuote(
+    quoteId: string | null | undefined,
+    consultationId: string,
+    reason: string,
+  ): Promise<void> {
+    if (quoteId == null) return;
+    try {
+      await this.pricing.abandon({ quoteId, consultationId, reason });
+    } catch (releaseError) {
+      const message = releaseError instanceof Error ? releaseError.message : String(releaseError);
+      this.logger.error(
+        `Quote ${quoteId} could not be released after ${reason}; its discount reservation may be held until it lapses. ${message}`,
+      );
+    }
   }
 
   /** Current status, for booking to gate on. */

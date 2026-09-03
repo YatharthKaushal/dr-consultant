@@ -110,7 +110,10 @@ describe('PaymentWebhookService', () => {
       markFailedIfNotProcessed: jest.fn().mockResolvedValue(1),
     } as unknown as jest.Mocked<RefundRepository>;
 
-    refundService = { recomputePaymentRefundStatus: jest.fn().mockResolvedValue(undefined) } as unknown as jest.Mocked<RefundService>;
+    refundService = {
+      recomputePaymentRefundStatus: jest.fn().mockResolvedValue(undefined),
+      allocateCreditNote: jest.fn().mockResolvedValue(undefined),
+    } as unknown as jest.Mocked<RefundService>;
     audit = { write: jest.fn().mockResolvedValue(undefined) } as unknown as jest.Mocked<AuditService>;
     emitter = { emit: jest.fn().mockReturnValue(true) } as unknown as jest.Mocked<EventEmitter2>;
 
