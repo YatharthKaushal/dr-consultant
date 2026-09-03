@@ -404,10 +404,19 @@ describe('BookingService.cancel', () => {
 
     expect(h.payments.createRefund).toHaveBeenCalledWith({
       paymentId: PAYMENT_ID,
+      // *** THE FEE-BASED AMOUNT IS NOW THE LEGACY FALLBACK. ***
+      // It still governs a payment with no quote, which has no per-component
+      // breakdown to apportion a tax reversal against.
       amount: '750.00',
       reason: expect.stringContaining('100%'),
       initiatedByAdminId: null,
       isAutomatic: true,
+      // *** AND THE PERCENTAGE IS THE NEW BASE. ***
+      // M-12 prefers this whenever the payment was priced by the pricing engine,
+      // computing it against the CAPTURED TOTAL rather than the consultation
+      // fee — so a 100% tier on a 618.00 bill returns 618.00, not the 500.00
+      // fee. THIS IS A COMMERCIAL CHANGE AND IT NEEDS THE CLIENT'S SIGN-OFF.
+      refundPct: 100,
     });
   });
 

@@ -43,6 +43,7 @@ export class UnavailableBookingPaymentProvider implements BookingPaymentPort {
     reason: string;
     initiatedByAdminId: string | null;
     isAutomatic: boolean;
+    refundPct?: number;
   }): Promise<{ refundId: string; status: string }> {
     throw this.unavailable();
   }
