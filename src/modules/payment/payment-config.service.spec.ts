@@ -2,6 +2,7 @@ import type { AppConfigService } from '../../shared/app-config/app-config.servic
 import type { AuditService } from '../../shared/audit/audit.service';
 import type { PaymentConfigRepository } from './payment-config.repository';
 import { PaymentConfigService } from './payment-config.service';
+import { calculateBill } from './payment-money.util';
 
 const ADMIN_ID = 'a0000000-0000-4000-8000-000000000001';
 
@@ -259,6 +260,67 @@ describe('PaymentConfigService', () => {
     it('accepts exactly two decimal places', async () => {
       await expect(service.update(ADMIN_ID, { gstRate: 18.25 })).resolves.toBeDefined();
       expect(repo.upsert).toHaveBeenCalledWith('payments.gst_rate', 18.25);
+    });
+
+    /**
+     * *** REGRESSION: THE DECIMAL-PLACE CHECK MUST NOT DO FLOAT ARITHMETIC. ***
+     *
+     * The check was `Math.round(value * 100) !== value * 100`, which forms a
+     * product in IEEE-754 and then compares it to its own rounding. For 1,146
+     * of the 10,001 two-decimal rates in [0, 100] that product is not the
+     * integer it mathematically is:
+     *
+     *     8.21  * 100 === 821.0000000000001
+     *     16.08 * 100 === 1607.9999999999998
+     *     2.2   * 100 === 220.00000000000003
+     *     0.07  * 100 === 7.000000000000001
+     *
+     * so each was REFUSED with "must have at most 2 decimal places" — a message
+     * asserting something false about a number that has exactly two. The DTO's
+     * `@IsNumber({ maxDecimalPlaces: 2 })` reads `toString()` rather than a
+     * product and accepts all four, so the request passed HTTP validation and
+     * was then rejected by the service.
+     *
+     * *** THE VALUES HERE ARE NOT INTERCHANGEABLE. *** The original test used
+     * 18.25, and 18.5/20/18.3/7.77/12.1 behave the same way: each is a sum of
+     * powers of two (or lands on an exact product anyway), round-trips cleanly,
+     * and passes the BROKEN check. A regression test built from those values
+     * cannot fail. Every rate below was verified to be one the old check
+     * actually rejected.
+     */
+    it.each([[8.21], [16.08], [2.2], [0.07]])(
+      'accepts the legal two-decimal rate %s, which float multiplication misjudges',
+      async (rate) => {
+        await expect(service.update(ADMIN_ID, { gstRate: rate })).resolves.toBeDefined();
+        expect(repo.upsert).toHaveBeenCalledWith('payments.gst_rate', rate);
+      },
+    );
+
+    /**
+     * And the rate must survive into the arithmetic exactly. Expected values
+     * below are derived BY HAND in integer paise, not by running the code:
+     *
+     *   fee 500.00 = 50000p; convenience 8.21% = 821bp
+     *     50000 * 821 = 41_050_000; +5000 half; /10000 = 4105p  = 41.05
+     *   subtotal = 50000 + 4105 = 54105p = 541.05
+     *   GST 18% = 1800bp
+     *     54105 * 1800 = 97_389_000; +5000; /10000 = 9739p = 97.39
+     *     (541.05 x 0.18 = 97.389, half-up -> 97.39)
+     *   total = 54105 + 9739 = 63844p = 638.44
+     */
+    it('bills a float-hostile rate exactly, in integer paise', async () => {
+      await service.update(ADMIN_ID, { convenienceFeePct: 8.21, gstRate: 18 });
+
+      const rates = await service.getRatesForBilling();
+      expect(rates).toEqual({ convenienceFeePct: '8.21', gstPct: '18.00' });
+
+      const bill = calculateBill('500.00', rates.convenienceFeePct, rates.gstPct);
+      expect(bill.convenienceFeePaise).toBe(4105n);
+      expect(bill.subtotalPaise).toBe(54_105n);
+      expect(bill.gstPaise).toBe(9739n);
+      expect(bill.totalPayablePaise).toBe(63_844n);
+      // The components must sum to the total exactly — there is no stored total.
+      expect(bill.consultationFeePaise + bill.convenienceFeePaise + bill.gstPaise).toBe(bill.totalPayablePaise);
     });
 
     it.each([[0], [100], [18], [20]])('accepts the boundary/typical value %s', async (value) => {

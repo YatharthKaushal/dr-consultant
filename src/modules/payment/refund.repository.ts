@@ -154,6 +154,37 @@ export class RefundRepository {
     return result.length;
   }
 
+  /**
+   * *** RECORDS A FAILURE WITHOUT RELEASING THE RESERVATION. ***
+   *
+   * For the case where the gateway's outcome is UNKNOWN — a timeout, a reset
+   * socket, a 5xx — and the refund may well be settling at Razorpay right now.
+   *
+   * `markFailedIfNotProcessed` would set `status = 'failed'`, and `failed` is
+   * excluded from `listCommittedAmounts`, so the amount would go straight back
+   * into the refundable balance and a second refund could be raised for money
+   * that has already left. This writes the reason and NOTHING else: the row
+   * stays `pending`, keeps counting against the invariant, and shows up in the
+   * `status, created_at` index that `refunds.schema.ts` calls "the worker
+   * queue: rows recorded but not yet sent to the gateway" — which is precisely
+   * the queue a human or a reconciliation sweep should be working.
+   *
+   * Guarded on `status = 'pending'` so it cannot overwrite a row that a webhook
+   * has meanwhile settled or failed.
+   */
+  async recordFailureReasonKeepingPending(
+    id: string,
+    failureReason: string | null,
+    executor: Executor = this.db,
+  ): Promise<number> {
+    const result = await executor
+      .update(refundsTable)
+      .set({ failureReason, updatedAt: new Date() })
+      .where(and(eq(refundsTable.id, id), eq(refundsTable.status, 'pending')))
+      .returning({ id: refundsTable.id });
+    return result.length;
+  }
+
   /** The admin refunds list and the CSV export feed. */
   async list(
     filter: { paymentId?: string; status?: RefundStatus; createdFrom?: Date; createdTo?: Date; limit: number; offset: number },

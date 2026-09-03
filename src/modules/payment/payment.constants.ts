@@ -154,6 +154,17 @@ export const RAZORPAY_SIGNATURE_HEADER = 'x-razorpay-signature';
 export const RAZORPAY_EVENT_ID_HEADER = 'x-razorpay-event-id';
 
 /**
+ * The webhook's full request path, INCLUDING `main.ts`'s `api` global prefix.
+ *
+ * Exported because `main.ts` needs it: Fastify's JSON body parser rejects a
+ * malformed body with a 400 before any controller runs, which would make an
+ * authentic-but-unparseable delivery unrecordable and would have Razorpay
+ * retry it forever. `main.ts` exempts THIS PATH ONLY from that behaviour, and
+ * a literal there would silently stop matching the day the route moves.
+ */
+export const PAYMENT_WEBHOOK_PATH = '/api/payments/webhook';
+
+/**
  * The webhook events this module handles. Anything else that arrives is still
  * signature-verified and still durably recorded in `payment_events` — it is
  * simply marked processed with no state change, rather than being dropped or

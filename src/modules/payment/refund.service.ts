@@ -19,6 +19,7 @@ import {
   rupeesToPaise,
   sumRupees,
 } from './payment-money.util';
+import { isIndeterminateGatewayOutcome } from './razorpay-error.classifier';
 import { RefundRepository } from './refund.repository';
 import { RazorpayClient } from './razorpay.client';
 
@@ -339,26 +340,66 @@ export class RefundService {
   }
 
   /**
-   * Marks a refund failed after the gateway refused it, and audits the
-   * failure.
+   * Records what happened after the gateway call did not return a refund id,
+   * and audits it.
    *
-   * Best-effort by construction: this runs in a `catch`, and the caller is
-   * about to re-throw the real error. If recording the failure ALSO fails,
-   * losing the original exception would be strictly worse than losing the
-   * status update — the row already exists as evidence either way, and the
-   * sweep will find it.
+   * *** THE BRANCH HERE IS "DID THE GATEWAY ACT?", NOT "DID THE CALL FAIL". ***
+   *
+   * Both outcomes leave the row behind as evidence, which is the ordering
+   * `refunds.schema.ts` mandates. What differs is whether the amount goes back
+   * into the refundable balance:
+   *
+   *   DEFINITIVE REFUSAL — the gateway answered "no" (a 400 saying the payment
+   *     is already fully refunded, a 401 on our key, a 429). No refund exists
+   *     at Razorpay, so `failed` is correct and the amount is released.
+   *
+   *   INDETERMINATE — a timeout, a reset socket, a 5xx. `razorpay.client.ts`
+   *     says it plainly: "on a timeout we do not know whether the gateway
+   *     acted", and it does not retry for exactly that reason. Marking such a
+   *     row `failed` would drop it out of `listCommittedAmounts` and hand its
+   *     amount back as refundable — so an admin could raise a second refund for
+   *     money that is, at that moment, already on its way to the patient. The
+   *     row therefore STAYS `pending`, keeps its reservation, and carries the
+   *     reason for whoever works the queue.
+   *
+   * This is the one place the module can convert a network blip into a double
+   * refund, so it errs towards holding money back. A stuck `pending` row is
+   * visible, queryable and reversible; a duplicate payout is none of those.
+   *
+   * Best-effort by construction: this runs in a `catch` and the caller is about
+   * to re-throw the real error. If recording ALSO fails, losing the original
+   * exception would be strictly worse than losing the status update — the row
+   * exists as evidence either way.
    */
   private async recordGatewayFailure(refund: RefundRow, error: unknown): Promise<void> {
     const detail = extractDetail(error);
+    const outcomeUnknown = isIndeterminateGatewayOutcome(error);
+
     try {
-      await this.refunds.markFailedIfNotProcessed(refund.id, detail);
+      if (outcomeUnknown) {
+        // *** DO NOT RELEASE THE RESERVATION. *** The refund may exist.
+        await this.refunds.recordFailureReasonKeepingPending(refund.id, detail);
+        this.logger.error(
+          `Refund ${refund.id}: the gateway's outcome is UNKNOWN (${detail}). Left pending and still counted against the capture — it must be reconciled against Razorpay before any further refund on payment ${refund.paymentId}.`,
+        );
+      } else {
+        await this.refunds.markFailedIfNotProcessed(refund.id, detail);
+      }
+
       await this.audit.write({
         actorType: refund.initiatedByAdminId === null ? 'system' : 'admin',
         actorId: refund.initiatedByAdminId,
         action: 'update',
         entityType: PAYMENT_AUDIT_ENTITY_TYPES.REFUND,
         entityId: refund.id,
-        metadata: { paymentId: refund.paymentId, outcome: 'gateway_rejected', detail },
+        metadata: {
+          paymentId: refund.paymentId,
+          outcome: outcomeUnknown ? 'gateway_outcome_unknown' : 'gateway_rejected',
+          // True = the amount is still held against the capture, because the
+          // refund may have been accepted where we could not see it.
+          reservationHeld: outcomeUnknown,
+          detail,
+        },
       });
     } catch (recordingError) {
       const message = recordingError instanceof Error ? recordingError.message : String(recordingError);

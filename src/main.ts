@@ -5,6 +5,8 @@ import { FastifyAdapter, NestFastifyApplication } from '@nestjs/platform-fastify
 import { AppModule } from './app.module';
 import { getEnv } from './config/env/env.validation';
 import { DOCUMENT_UPLOAD_HARD_CEILING_BYTES } from './modules/document/document.constants';
+import { registerWebhookSafeJsonParser } from './modules/payment/payment-webhook.body-parser';
+import { PAYMENT_WEBHOOK_PATH } from './modules/payment/payment.constants';
 
 async function bootstrap(): Promise<void> {
   // Validate the environment before anything else is constructed. On a missing
@@ -76,6 +78,25 @@ async function bootstrap(): Promise<void> {
 
   // Required for DatabaseModule.onApplicationShutdown to drain the pool.
   app.enableShutdownHooks();
+
+  // *** M-12: the Razorpay webhook must survive a body that is not valid JSON.
+  //
+  // Fastify's stock JSON parser answers 400 before any controller runs, which
+  // would make an authentic-but-unparseable delivery unrecordable AND have
+  // Razorpay retry it forever. Only the webhook path is exempted; every other
+  // route keeps Fastify's exact previous behaviour. The rule and its reasoning
+  // live in the payment module, next to the code that depends on them.
+  //
+  // *** ORDERING IS LOAD-BEARING. *** This must run AFTER `app.init()` and
+  // BEFORE `app.listen()`. Nest registers its own `application/json` parser
+  // (the one `{ rawBody: true }` configures) during `init()`, so replacing it
+  // any earlier means `removeContentTypeParser` finds nothing to remove and
+  // Nest then throws "Content type parser 'application/json' already present"
+  // on top of ours. Fastify seals its parsers at `ready()`, which `listen()`
+  // triggers, so it cannot go any later. `init()` is idempotent and `listen()`
+  // calls it again harmlessly.
+  await app.init();
+  registerWebhookSafeJsonParser(app.getHttpAdapter().getInstance(), PAYMENT_WEBHOOK_PATH);
 
   await app.listen(env.PORT, '0.0.0.0');
 

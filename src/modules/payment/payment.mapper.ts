@@ -125,11 +125,37 @@ export interface PaymentAdminView {
   updatedAt: Date;
 }
 
+/**
+ * The refund statuses that count against what was captured.
+ *
+ * *** MUST MATCH `RefundRepository.listCommittedAmounts` EXACTLY. *** A
+ * `pending` row (recorded, not yet sent) and a `processing` row (the gateway
+ * accepted it, settlement pending) are both money already committed, and
+ * `RefundService` refuses a refund that would push the COMMITTED total past the
+ * capture — not the settled total.
+ */
+const COMMITTED_REFUND_STATUSES: ReadonlySet<string> = new Set(['pending', 'processing', 'processed']);
+
 export function toPaymentAdminView(payment: PaymentRow, refunds: readonly RefundRow[]): PaymentAdminView {
   const breakdown = toBreakdown(payment);
   const settledPaise = sumRupees(refunds.filter((refund) => refund.status === 'processed').map((refund) => refund.amount));
+  // *** `refundableAmount` COUNTS IN-FLIGHT REFUNDS; `refundedAmount` DOES NOT. ***
+  // The two answer different questions and the difference is not cosmetic.
+  // "How much has been refunded" is settled money only. "How much can still be
+  // refunded" is what `RefundService.createRefund` will actually allow, and it
+  // subtracts `pending` and `processing` rows too.
+  //
+  // Computing this from settled refunds alone made the admin list advertise a
+  // ceiling the service would then refuse: with a 708.00 capture and a 708.00
+  // refund still in flight, the row claimed 708.00 was refundable while
+  // `GET .../refundable` — which calls `getRefundableAmount` and does count
+  // committed rows — correctly said 0.00. Two screens, two answers, and the
+  // optimistic one was the screen an admin types an amount into.
+  const committedPaise = sumRupees(
+    refunds.filter((refund) => COMMITTED_REFUND_STATUSES.has(refund.status)).map((refund) => refund.amount),
+  );
   const capturedPaise = payment.paidAt === null ? 0n : rupeesToPaise(breakdown.totalPayable);
-  const refundablePaise = capturedPaise > settledPaise ? capturedPaise - settledPaise : 0n;
+  const refundablePaise = capturedPaise > committedPaise ? capturedPaise - committedPaise : 0n;
 
   return {
     id: payment.id,

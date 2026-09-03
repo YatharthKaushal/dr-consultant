@@ -563,6 +563,74 @@ export function responseForFailure(kind: RazorpayFailureKind): { status: HttpSta
   return FAILURE_RESPONSES[kind];
 }
 
+/* -------------------------------------------------------------------------- */
+/* DID THE GATEWAY ACT? — the question that decides whether money is reserved  */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * *** KINDS WHERE WE DO NOT KNOW WHETHER RAZORPAY ACTED. ***
+ *
+ * This is not the same question as "did the call fail". A refund call can fail
+ * in two very different ways:
+ *
+ *   DEFINITIVE — the gateway answered, and its answer was "no". A 400 saying
+ *     the payment is already fully refunded, a 401 rejecting our key, a 429
+ *     refusing to even look. In every one of these Razorpay processed the
+ *     request far enough to refuse it, so NO REFUND EXISTS and the amount the
+ *     `refunds` row reserved can safely be released.
+ *
+ *   INDETERMINATE — we never got an answer we can act on. A socket that reset,
+ *     our own 20-second timeout, or a 5xx from inside Razorpay. The request may
+ *     have been accepted and the refund may be settling RIGHT NOW; we simply
+ *     cannot see it. `razorpay.client.ts` is explicit that this distinction is
+ *     the whole reason `RazorpayApiError.transport` exists: "on a timeout we do
+ *     not know whether the gateway acted".
+ *
+ * Releasing a reservation in the indeterminate case is how a double refund
+ * happens: the amount goes back into the refundable balance, a second refund is
+ * raised for it, and both eventually settle. So `unknown` is in this set too —
+ * a kind we have no branch for is by definition one whose outcome we cannot
+ * assert, and the safe reading of "I don't know" is "assume it may have
+ * happened".
+ *
+ * The cost of being wrong in this direction is a `pending` refund row that
+ * holds its amount until a human or a reconciliation sweep resolves it. The
+ * cost of being wrong in the other direction is money leaving twice.
+ */
+const INDETERMINATE_OUTCOME_KINDS: ReadonlySet<RazorpayFailureKind> = new Set([
+  'network_or_timeout',
+  'gateway_unavailable',
+  'unknown',
+]);
+
+/**
+ * Marks the classified kind onto the thrown exception.
+ *
+ * A SYMBOL, and set on the exception INSTANCE rather than in its body, for one
+ * reason: `HttpExceptionFilter` serialises `exception.getResponse()` and
+ * spreads every extra property of THAT object into the client's error body. A
+ * `kind` field in the body would therefore travel straight to a patient and
+ * advertise the gateway's internal classification — exactly what
+ * `FAILURE_RESPONSES` exists to prevent. An instance property is never read by
+ * the filter and cannot leak.
+ */
+const FAILURE_KIND = Symbol('razorpayFailureKind');
+
+/**
+ * True when the gateway's action is UNKNOWN, so a caller holding a reservation
+ * must keep holding it.
+ *
+ * Returns `false` for anything it does not recognise — a non-`HttpException`,
+ * an error from before the gateway was ever reached (a malformed amount, say),
+ * or an exception from another layer. Those never got as far as Razorpay, so
+ * treating them as definitive is correct rather than merely convenient.
+ */
+export function isIndeterminateGatewayOutcome(error: unknown): boolean {
+  if (typeof error !== 'object' || error === null) return false;
+  const kind = (error as Record<symbol, unknown>)[FAILURE_KIND];
+  return typeof kind === 'string' && INDETERMINATE_OUTCOME_KINDS.has(kind as RazorpayFailureKind);
+}
+
 /**
  * Turns a classified failure into the `HttpException` a caller sees.
  *
@@ -583,7 +651,17 @@ export function toHttpException(failure: RazorpayFailure): HttpException {
     body.retryAfterSeconds = Math.max(1, Math.round(failure.retryAfterMs / 1_000));
   }
 
-  return new HttpException(body, status);
+  const exception = new HttpException(body, status);
+  // Non-enumerable and symbol-keyed, so it survives `instanceof` and `throw`
+  // but is invisible to `JSON.stringify`, to object spreads, and to
+  // `HttpExceptionFilter` — which reads the BODY, never the instance.
+  Object.defineProperty(exception, FAILURE_KIND, {
+    value: failure.kind,
+    enumerable: false,
+    writable: false,
+    configurable: false,
+  });
+  return exception;
 }
 
 /** Convenience for the common `catch` shape: classify, then throw our own exception. Returns `never` so callers can `throw classifyAndThrow(...)` or just call it. */
