@@ -4,9 +4,11 @@ import type { PaymentConfigService } from './payment-config.service';
 import type { PaymentRepository } from './payment.repository';
 import { PaymentService } from './payment.service';
 import type { PricingFacade } from '../pricing/pricing.facade';
+import type { PriceQuoteView } from '../pricing/pricing.contract';
 import type { RazorpayClient } from './razorpay.client';
 
 const PAYMENT_ID = 'e1f7a8d0-0000-4000-8000-000000000001';
+const QUOTE_ID = 'q0000000-0000-4000-8000-000000000001';
 const CONSULTATION_ID = 'c0000000-0000-4000-8000-000000000001';
 
 function paymentRow(overrides: Record<string, unknown> = {}) {
@@ -79,39 +81,162 @@ describe('PaymentService', () => {
       hasCatalogue: jest.fn().mockResolvedValue(false),
     } as unknown as jest.Mocked<PricingFacade>;
 
+    pricing.preview.mockResolvedValue(quoteView());
+    pricing.createQuote.mockResolvedValue(quoteView());
+    pricing.pin.mockResolvedValue(quoteView());
+    pricing.materialiseAndPin.mockResolvedValue(quoteView());
+
     service = new PaymentService({} as Database, payments, config, gateway, audit, pricing);
   });
+
+  /**
+   * FR-7.3's bill as the pricing engine returns it: 500 + 100 + 108 = 708,
+   * intra-state, both components taxable at 18%.
+   *
+   * A fixture rather than a call into the real engine, because this spec is
+   * about what `PaymentService` DOES WITH a price — the arithmetic itself is
+   * proved in `pricing.engine.spec.ts`, where it is testable as arithmetic.
+   */
+  function quoteView(overrides: Partial<PriceQuoteView> = {}): PriceQuoteView {
+    return {
+      quoteId: QUOTE_ID,
+      status: 'draft',
+      currency: 'INR',
+      components: [
+        {
+          code: 'doctor_fee',
+          label: 'Doctor consultation fee',
+          position: 1,
+          hsnSac: null,
+          grossAmount: '500.00',
+          discountAmount: '0.00',
+          discountBearer: null,
+          taxableValue: '500.00',
+          taxTreatment: 'taxable',
+          taxMode: 'exclusive',
+          taxRatePct: '18.00',
+          cgstAmount: '45.00',
+          sgstAmount: '45.00',
+          igstAmount: '0.00',
+          lineTotal: '590.00',
+          basis: 'pass_through',
+          basisPct: null,
+          basisCodes: null,
+        },
+        {
+          code: 'convenience_fee',
+          label: 'Convenience fee',
+          position: 2,
+          hsnSac: null,
+          grossAmount: '100.00',
+          discountAmount: '0.00',
+          discountBearer: null,
+          taxableValue: '100.00',
+          taxTreatment: 'taxable',
+          taxMode: 'exclusive',
+          taxRatePct: '18.00',
+          cgstAmount: '9.00',
+          sgstAmount: '9.00',
+          igstAmount: '0.00',
+          lineTotal: '118.00',
+          basis: 'percent_of',
+          basisPct: '20.00',
+          basisCodes: ['doctor_fee'],
+        },
+      ],
+      grossTotal: '600.00',
+      discountTotal: '0.00',
+      taxableTotal: '600.00',
+      cgstTotal: '54.00',
+      sgstTotal: '54.00',
+      igstTotal: '0.00',
+      totalPayable: '708.00',
+      placeOfSupply: { stateCode: '27', stateName: 'Maharashtra', pincode: null, kind: 'intra_state' },
+      supplier: { stateCode: '27', gstin: null, legalName: 'Test Org' },
+      discount: null,
+      doctorPayout: '500.00',
+      platformDeduction: '0.00',
+      expiresAt: new Date('2026-01-01T00:15:00Z'),
+      fullyDiscounted: false,
+      ...overrides,
+    };
+  }
 
   /* ================================================================== */
   /* quote                                                               */
   /* ================================================================== */
 
   describe('quote', () => {
-    /** FR-7.3, through the service rather than through the arithmetic directly. */
+    /**
+     * FR-7.3's five numbers, carried through the service.
+     *
+     * *** THE PRICE NOW COMES FROM THE PRICING ENGINE, NOT FROM
+     * `calculateBill`. *** The service reads no rates of its own; the engine
+     * owns the catalogue, and this asserts the legacy `PaymentBreakdown` shape
+     * is still populated faithfully from it.
+     */
     it('reproduces the FR-7.3 worked example exactly', async () => {
-      expect(await service.quote('500.00')).toEqual({
-        consultationFee: '500.00',
-        convenienceFeePct: '20.00',
-        convenienceFee: '100.00',
-        gstPct: '18.00',
-        gstAmount: '108.00',
-        totalPayable: '708.00',
-        currency: 'INR',
+      const breakdown = await service.quote('500.00');
+
+      expect(breakdown.consultationFee).toBe('500.00');
+      // The DERIVATION rate (20%), not the tax rate (18%) — conflating the two
+      // would misreport the fee on every legacy screen that reads this column.
+      expect(breakdown.convenienceFeePct).toBe('20.00');
+      expect(breakdown.convenienceFee).toBe('100.00');
+      expect(breakdown.gstPct).toBe('18.00');
+      expect(breakdown.gstAmount).toBe('108.00');
+      expect(breakdown.totalPayable).toBe('708.00');
+      expect(breakdown.currency).toBe('INR');
+    });
+
+    /** The additive fields, populated on every response even though the type marks them optional. */
+    it('carries the subtotal, place of supply and tax split the legacy shape could not express', async () => {
+      const breakdown = await service.quote('500.00');
+
+      expect(breakdown.subtotal).toBe('600.00');
+      expect(breakdown.placeOfSupply).toEqual({
+        stateCode: '27',
+        stateName: 'Maharashtra',
+        pincode: null,
+        kind: 'intra_state',
       });
+      expect(breakdown.taxSplit).toEqual({ cgst: '54.00', sgst: '54.00', igst: '0.00' });
     });
 
     it('persists NOTHING — booking shows this before checkout', async () => {
       await service.quote('500.00');
+      expect(pricing.preview).toHaveBeenCalled();
+      expect(pricing.createQuote).not.toHaveBeenCalled();
       expect(payments.insert).not.toHaveBeenCalled();
       expect(gateway.createOrder).not.toHaveBeenCalled();
       expect(audit.write).not.toHaveBeenCalled();
     });
 
-    it('uses today’s rates, which is why they are snapshotted at order time instead', async () => {
-      config.getRatesForBilling.mockResolvedValue({ convenienceFeePct: '10.00', gstPct: '5.00' });
-      const quote = await service.quote('500.00');
-      // 500 + 50 = 550, +5% = 27.50 -> 577.50.
-      expect(quote.totalPayable).toBe('577.50');
+    /**
+     * `materialise` is what turns a preview into a `draft` a caller can pin.
+     * Without it nothing is written, which is why the flag exists rather than
+     * every quote persisting.
+     */
+    it('persists a draft quote only when asked to materialise', async () => {
+      const breakdown = await service.quote('500.00', { materialise: true });
+      expect(pricing.createQuote).toHaveBeenCalled();
+      expect(pricing.preview).not.toHaveBeenCalled();
+      expect(breakdown.quoteId).toBe(QUOTE_ID);
+    });
+
+    /**
+     * *** THE OPTIONAL SECOND ARGUMENT IS WHAT KEEPS THE CONTRACT ADDITIVE. ***
+     * Booking and M-13 mirror this signature blind and call it with one
+     * argument; that must keep working, and the place of supply must still
+     * reach the engine when it is supplied.
+     */
+    it('accepts the place of supply and a discount code without breaking one-argument callers', async () => {
+      await service.quote('500.00');
+      await service.quote('500.00', { placeOfSupplyStateCode: '29', discountCode: 'WELCOME20' });
+
+      expect(pricing.preview).toHaveBeenLastCalledWith(
+        expect.objectContaining({ placeOfSupplyStateCode: '29', discountCode: 'WELCOME20' }),
+      );
     });
   });
 

@@ -400,7 +400,7 @@ export class PaymentWebhookService {
    * re-deriving a different number from the legacy columns.
    */
   private async resolveQuoteTotal(payment: PaymentRow): Promise<string | null> {
-    if (payment.priceQuoteId === null) return null;
+    if (payment.priceQuoteId == null) return null;
     const totals = await this.pricing.getQuoteTotals([payment.priceQuoteId]);
     return totals[payment.priceQuoteId] ?? null;
   }
@@ -423,7 +423,7 @@ export class PaymentWebhookService {
    */
   private async finaliseInvoice(payment: PaymentRow): Promise<void> {
     try {
-      if (payment.priceQuoteId !== null) {
+      if (payment.priceQuoteId != null) {
         await this.pricing.markConsumed({
           quoteId: payment.priceQuoteId,
           consultationId: payment.consultationId,

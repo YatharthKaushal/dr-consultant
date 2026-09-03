@@ -44,8 +44,18 @@ export interface PricedPaymentColumns {
   convenienceFee: string;
   gstPct: string;
   gstAmount: string;
-  /** Null = a LEGACY row, priced by `calculateBill` before the pricing engine existed. */
-  priceQuoteId: string | null;
+  /**
+   * Null = a LEGACY row, priced by `calculateBill` before the pricing engine
+   * existed.
+   *
+   * Optional, and NULLISH IS TREATED AS ABSENT — `undefined` and `null` both
+   * mean "no quote". A real `PaymentRow` always carries the column, but partial
+   * rows and test fixtures legitimately omit it, and a strict `!== null` check
+   * would read `undefined` as "this payment IS quoted" and then throw because no
+   * total could be found. Distinguishing the two here would be a distinction
+   * with no meaning and one failure mode.
+   */
+  priceQuoteId?: string | null;
 }
 
 /**
@@ -103,8 +113,8 @@ export function capturedTotalPaise(
   payment: PricedPaymentColumns,
   quoteTotalPayable: string | null,
 ): bigint {
-  if (payment.priceQuoteId !== null) {
-    if (quoteTotalPayable === null) {
+  if (payment.priceQuoteId != null) {
+    if (quoteTotalPayable == null) {
       // *** NEVER FALL BACK TO `calculateBill` HERE. ***
       // A quoted payment whose quote is missing is a broken invariant
       // (`payments.price_quote_id` is a foreign key, so this should be

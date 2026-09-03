@@ -416,7 +416,7 @@ export class PaymentService {
    * quietly re-deriving a different number from the legacy columns.
    */
   private async resolveQuoteTotal(payment: PaymentRow): Promise<string | null> {
-    if (payment.priceQuoteId === null) return null;
+    if (payment.priceQuoteId == null) return null;
     const totals = await this.pricing.getQuoteTotals([payment.priceQuoteId]);
     return totals[payment.priceQuoteId] ?? null;
   }
