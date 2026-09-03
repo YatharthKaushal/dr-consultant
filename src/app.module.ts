@@ -12,6 +12,7 @@ import { DoctorModule } from './modules/doctor/doctor.module';
 import { DocumentModule } from './modules/document/document.module';
 import { IdentityModule } from './modules/identity/identity.module';
 import { McpModule } from './modules/mcp/mcp.module';
+import { NotificationModule } from './modules/notification/notification.module';
 import { PatientModule } from './modules/patient/patient.module';
 import { PaymentModule } from './modules/payment/payment.module';
 import { SearchModule } from './modules/search/search.module';
@@ -58,6 +59,11 @@ import { ErrorsModule } from './shared/errors/errors.module';
     SearchToolModule,
     McpModule,
     StorageModule,
+    // M-08: notifications. Depends on M-01/M-02 only (`docs/MODULES.md`), so
+    // it imports no feature module — and every later module that raises a
+    // notification (M-11, M-12, M-13, M-16) imports NotificationModule and
+    // injects `NotificationFacade`, never the other way round.
+    NotificationModule,
     // M-10: documents and file storage. Depends only on M-01/M-02
     // (`docs/MODULES.md`), so it needs no other feature module imported here.
     DocumentModule,
