@@ -180,6 +180,20 @@ export interface PaymentContract {
   }): Promise<CreatedOrder>;
   /** Current status, for booking to gate on. */
   getByConsultationId(consultationId: string): Promise<{ paymentId: string; status: string; paidAt: Date | null } | null>;
+  /**
+   * The handles a patient needs to OPEN checkout on a payment that already
+   * exists — `null` when there is nothing to pay.
+   *
+   * Additive, and it exists because FR-10.2 orders the instant flow
+   * request -> accept -> pay: the order is minted on the DOCTOR's accept, so
+   * the patient never sees `createOrderForConsultation`'s return value and
+   * would otherwise have no way to reach the gateway at all.
+   *
+   * Neither handle is secret — `gatewayKeyId` is Razorpay's publishable key.
+   * Ownership is NOT checked here, exactly as it is not in
+   * `getByConsultationId`; the caller authorises.
+   */
+  getCheckoutHandles(consultationId: string): Promise<CreatedOrder | null>;
   /** Ask the gateway what actually happened — for the reconciled hold sweep. Never trusts local state. */
   reconcileWithGateway(paymentId: string): Promise<{ status: string; changed: boolean }>;
   /** Booking calls this on an in-policy cancellation. `initiatedByAdminId: null` = automatic. */

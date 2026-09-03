@@ -319,6 +319,46 @@ export class PaymentService {
     return { paymentId: row.id, status: row.status, paidAt: row.paidAt };
   }
 
+  /**
+   * *** THE CHECKOUT HANDLES, FOR A PAYMENT THAT ALREADY EXISTS. ***
+   *
+   * `createOrderForConsultation` returns these once, to whoever created the
+   * order. That is sufficient for a SCHEDULED booking, where the patient makes
+   * the request and gets the handles back in the same response.
+   *
+   * It is NOT sufficient for an instant consult. FR-10.2 orders that flow
+   * request -> accept -> pay, so the order is minted on the DOCTOR's accept, in
+   * a request the patient is not part of. Without this method the patient has
+   * no way to reach checkout at all: `getByConsultationId` deliberately returns
+   * only `{paymentId, status, paidAt}`, and the accepted-notification carries a
+   * deep link, which cannot be the only path when push has no credentials
+   * configured and may never be delivered.
+   *
+   * Returns `null` rather than throwing when there is nothing to pay — no
+   * payment, no order yet, or already captured — so a status poll can call it
+   * unconditionally. AUTHORISATION IS THE CALLER'S: this takes a consultation
+   * id and checks no ownership, exactly as `getByConsultationId` does not.
+   *
+   * Neither handle is a secret. `gatewayKeyId` is Razorpay's PUBLISHABLE key —
+   * it is designed to ship inside a client bundle — and `gatewayOrderId` is
+   * useless without a signed payment. The key secret and the webhook secret
+   * stay in the environment and appear on no response.
+   */
+  async getCheckoutHandles(consultationId: string): Promise<CreatedOrder | null> {
+    const row = await this.payments.findByConsultationId(consultationId);
+    if (!row || row.gatewayOrderId === null) return null;
+    // Nothing left to pay. Handing back a live order for a captured payment
+    // invites a second charge against it.
+    if (row.status === 'paid' || row.status === 'refunded' || row.status === 'partially_refunded') return null;
+
+    return {
+      paymentId: row.id,
+      gatewayOrderId: row.gatewayOrderId,
+      gatewayKeyId: this.gateway.getPublishableKeyId(),
+      breakdown: toBreakdown(row, await this.resolveQuoteTotal(row)),
+    };
+  }
+
   async getById(paymentId: string): Promise<PaymentRow> {
     const row = await this.payments.findById(paymentId);
     if (!row) {
