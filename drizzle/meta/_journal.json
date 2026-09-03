@@ -50,6 +50,13 @@
       "when": 1788360600780,
       "tag": "0006_booking_payments_foundation",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1788459424674,
+      "tag": "0007_pricing_and_promotions",
+      "breakpoints": true
     }
   ]
 }

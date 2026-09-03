@@ -58,6 +58,36 @@ export const refundsTable = pgTable(
     gatewayRefundId: varchar('gateway_refund_id', { length: 120 }).unique(),
     /** Gateway's own reason, on `status = failed`. Never shown verbatim to a patient. */
     failureReason: varchar('failure_reason', { length: 200 }),
+
+    /**
+     * *** HOW MUCH OF `amount` WAS TAX, REVERSED PROPORTIONALLY. ***
+     *
+     * `amount = taxable_value + cgst + sgst + igst`. The per-component
+     * apportionment behind these totals is in `refund_components`.
+     *
+     * Summary columns rather than a join for the common read, because there are
+     * exactly three heads and a credit note prints all three. Defaulted to zero
+     * so this is a non-destructive add: rows written before the pricing engine
+     * existed keep a positive `amount` with zero heads, which is exactly what
+     * they were — a refund whose tax reversal was never reported. THE BALANCING
+     * CHECK LIVES ON `refund_components`, NOT HERE, precisely because those
+     * legacy rows would fail it, and back-filling a reversal that never happened
+     * would be worse than leaving them at zero.
+     */
+    taxableValue: numeric('taxable_value', { precision: 10, scale: 2 }).notNull().default('0.00'),
+    cgstAmount: numeric('cgst_amount', { precision: 10, scale: 2 }).notNull().default('0.00'),
+    sgstAmount: numeric('sgst_amount', { precision: 10, scale: 2 }).notNull().default('0.00'),
+    igstAmount: numeric('igst_amount', { precision: 10, scale: 2 }).notNull().default('0.00'),
+
+    /**
+     * s.34 CGST serial, from `pricing_document_sequences`. Allocated when the
+     * refund reaches `processed` — a refund the gateway rejects must not burn a
+     * number, because a gap in a statutory series is its own compliance
+     * question.
+     */
+    creditNoteNumber: varchar('credit_note_number', { length: 40 }).unique(),
+    creditNoteIssuedAt: timestamp('credit_note_issued_at', { withTimezone: true, mode: 'date' }),
+
     createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'date' }).notNull().defaultNow(),
   },

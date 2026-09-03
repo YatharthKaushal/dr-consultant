@@ -2,6 +2,7 @@ import { index, numeric, pgTable, timestamp, uuid, varchar } from 'drizzle-orm/p
 import { adminsTable } from './admins.schema';
 import { consultationsTable } from './consultations.schema';
 import { paymentStatusEnum } from './enums.schema';
+import { priceQuotesTable } from './price-quotes.schema';
 
 /**
  * Becomes `paid` ONLY on a webhook whose HMAC signature verifies, never on a
@@ -72,6 +73,29 @@ export const paymentsTable = pgTable(
     refundedAt: timestamp('refunded_at', { withTimezone: true, mode: 'date' }),
     /** NULL until the transfer is made — this IS the payout status. Payouts are manual this release. */
     payoutPaidAt: timestamp('payout_paid_at', { withTimezone: true, mode: 'date' }),
+
+    /**
+     * *** THE PRICE THIS PAYMENT WAS CREATED FOR. ***
+     *
+     * NULLABLE, AND THE NULLABILITY IS THE LEGACY BRANCH. A row with a quote is
+     * priced by the pricing engine and its authoritative total is
+     * `price_quotes.total_payable`. A row WITHOUT one predates the engine and is
+     * priced by `calculateBill` from the five columns above.
+     *
+     * That distinction must be honoured rather than tidied away. The engine
+     * computes `sum(round(component x rate))` where `calculateBill` computes
+     * `round(subtotal x rate)`, and round-then-sum is not sum-then-round — they
+     * differ by a paise at some fees. Re-pricing a historical row with the
+     * engine would make the webhook's capture check and `reconcileWithGateway`'s
+     * amount check start REJECTING real captures.
+     */
+    priceQuoteId: uuid('price_quote_id')
+      .unique()
+      .references(() => priceQuotesTable.id),
+    /** Serial from `pricing_document_sequences`, allocated at capture. Null until then. */
+    invoiceNumber: varchar('invoice_number', { length: 40 }).unique(),
+    invoiceIssuedAt: timestamp('invoice_issued_at', { withTimezone: true, mode: 'date' }),
+
     createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'date' }).notNull().defaultNow(),
   },
