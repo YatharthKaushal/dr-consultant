@@ -3,6 +3,8 @@ import { PriceQuoteRepository } from './price-quote.repository';
 import { PricingAdminController } from './pricing-admin.controller';
 import { PricingConfigRepository } from './pricing-config.repository';
 import { PricingConfigService } from './pricing-config.service';
+import { PromotionFacade } from '../promotion/promotion.facade';
+import { PromotionModule } from '../promotion/promotion.module';
 import { DISCOUNT_PORT } from './pricing-discount.contract';
 import { PricingDocumentRepository } from './pricing-document.repository';
 import { PricingFacade } from './pricing.facade';
@@ -38,6 +40,10 @@ import { UnavailableDiscountProvider } from './unavailable-discount.provider';
  * `backend/README.md` §2 forbids.
  */
 @Module({
+  // Promotions is the only feature module pricing imports, and only so that
+  // `DISCOUNT_PORT` can bind to the real `PromotionFacade`. The direction is
+  // one-way: promotion imports NO feature module, so this closes no cycle.
+  imports: [PromotionModule],
   controllers: [PricingAdminController],
   providers: [
     // Data access.
@@ -54,7 +60,7 @@ import { UnavailableDiscountProvider } from './unavailable-discount.provider';
     // discount reservations. See the service's header.
     PricingQuoteSweepService,
     // *** THE ONE LINE THE PROMOTIONS HANDOVER CHANGES. ***
-    { provide: DISCOUNT_PORT, useClass: UnavailableDiscountProvider },
+    { provide: DISCOUNT_PORT, useExisting: PromotionFacade },
     // Public surface.
     PricingFacade,
   ],

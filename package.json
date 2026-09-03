@@ -24,7 +24,9 @@
     "db:seed:storage": "ts-node -r tsconfig-paths/register src/modules/storage/storage.seed.ts",
     "db:seed:payments": "ts-node -r tsconfig-paths/register src/modules/payment/payment.seed.ts",
     "db:seed:notifications": "ts-node -r tsconfig-paths/register src/modules/notification/notification.seed.ts",
-    "db:seed:instant": "ts-node -r tsconfig-paths/register src/modules/instant/instant.seed.ts"
+    "db:seed:instant": "ts-node -r tsconfig-paths/register src/modules/instant/instant.seed.ts",
+    "db:seed:pricing": "ts-node -r tsconfig-paths/register src/modules/pricing/pricing.seed.ts",
+    "db:seed:promotions": "ts-node -r tsconfig-paths/register src/modules/promotion/promotion.seed.ts"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1124.0",

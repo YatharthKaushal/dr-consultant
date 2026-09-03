@@ -14,6 +14,7 @@ import { PromotionService } from './promotion.service';
 import { PromotionSweepService } from './promotion-sweep.service';
 import { ReferralRepository } from './referral.repository';
 import { ReferralService } from './referral.service';
+import { PromotionConsultationLookupProvider } from './consultation-lookup.provider';
 import { UnavailablePromotionBookingLookupProvider } from './unavailable-promotion-booking-lookup.provider';
 
 /**
@@ -73,7 +74,7 @@ import { UnavailablePromotionBookingLookupProvider } from './unavailable-promoti
     ReferralRepository,
     AffiliateRepository,
     // The null object. Rebound by the coordinator to a BookingFacade adapter.
-    { provide: PROMOTION_BOOKING_LOOKUP_PORT, useClass: UnavailablePromotionBookingLookupProvider },
+    { provide: PROMOTION_BOOKING_LOOKUP_PORT, useClass: PromotionConsultationLookupProvider },
     PromotionConfigService,
     PromotionAdminService,
     AffiliateService,
