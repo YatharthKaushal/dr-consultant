@@ -168,7 +168,7 @@ export class RefundService {
     // fee. See `CreateRefundInput.refundPct` and `pricing-refund.service.ts` —
     // this is a COMMERCIAL change and it needs the client's sign-off.
     const requestedAmount =
-      input.refundPct !== undefined && preRead.priceQuoteId !== null
+      input.refundPct !== undefined && preRead.priceQuoteId != null
         ? await this.pricing.refundAmountForPct({ quoteId: preRead.priceQuoteId, pct: input.refundPct })
         : input.amount;
 
@@ -396,7 +396,7 @@ export class RefundService {
    * `backend/README.md` §2 forbids.
    */
   private async resolveQuoteTotal(payment: PaymentRow): Promise<string | null> {
-    if (payment.priceQuoteId === null) return null;
+    if (payment.priceQuoteId == null) return null;
     const totals = await this.pricing.getQuoteTotals([payment.priceQuoteId]);
     return totals[payment.priceQuoteId] ?? null;
   }
@@ -415,7 +415,7 @@ export class RefundService {
    * `refunds`.
    */
   private async recordTaxReversal(refundId: string, payment: PaymentRow, amountPaise: bigint): Promise<void> {
-    if (payment.priceQuoteId === null) return;
+    if (payment.priceQuoteId == null) return;
 
     try {
       // What has already gone back per component, so the weights are each line's

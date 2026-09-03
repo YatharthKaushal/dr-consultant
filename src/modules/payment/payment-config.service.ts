@@ -1,6 +1,7 @@
-import { BadRequestException, Injectable } from '@nestjs/common';
+import { BadRequestException, ConflictException, Injectable } from '@nestjs/common';
 import { AppConfigService } from '../../shared/app-config/app-config.service';
 import { AuditService } from '../../shared/audit/audit.service';
+import { PricingFacade } from '../pricing/pricing.facade';
 import { PaymentConfigRepository } from './payment-config.repository';
 import {
   PAYMENT_AUDIT_ENTITY_TYPES,
@@ -65,6 +66,8 @@ export class PaymentConfigService {
     private readonly repo: PaymentConfigRepository,
     private readonly appConfig: AppConfigService,
     private readonly audit: AuditService,
+    /** Only to ask whether a pricing catalogue exists — see `update`. */
+    private readonly pricing: PricingFacade,
   ) {}
 
   /** Both `payments.*` values, resolved. One query for the set, not one per key. */
@@ -103,6 +106,31 @@ export class PaymentConfigService {
    * `search-config.service.ts` and `doctor.service.ts` use.
    */
   async update(actingAdminId: string, update: PaymentConfigUpdate): Promise<ResolvedPaymentConfig> {
+    // *** THIS SCREEN HAS BEEN SUPERSEDED. REFUSE RATHER THAN NO-OP. ***
+    //
+    // Once a pricing catalogue exists, `payments.convenience_fee_pct` and
+    // `payments.gst_rate` price NOTHING: every quote comes from
+    // `pricing.components`, where the fee percentage and the tax treatment live
+    // per component. Accepting a write here would store a number, audit it,
+    // invalidate a cache, return 200 — and change not one rupee on any bill.
+    //
+    // An admin correcting a GST rate and watching every subsequent bill ignore
+    // them is a guaranteed support incident, and a slow one to diagnose because
+    // every individual step appears to have worked. Refusing loudly, with the
+    // name of the screen that does work, is the only honest behaviour.
+    //
+    // *** THE READ PATH IS DELIBERATELY UNTOUCHED. *** `getResolved` and
+    // `getRatesForBilling` still serve these keys, because LEGACY `payments`
+    // rows — the ones with no `price_quote_id` — are still re-derived through
+    // `calculateBill` from exactly these rates.
+    if (await this.pricing.hasCatalogue()) {
+      throw new ConflictException({
+        code: PAYMENT_ERROR_CODES.CONFIG_SUPERSEDED,
+        message:
+          'The convenience fee and GST rate are now set per component on the pricing screen (Admin > Pricing). These legacy keys no longer affect any bill and are kept only to re-derive payments taken before the pricing engine existed.',
+      });
+    }
+
     const changes = this.toKeyedChanges(update);
     if (changes.length === 0) {
       return this.getResolved();

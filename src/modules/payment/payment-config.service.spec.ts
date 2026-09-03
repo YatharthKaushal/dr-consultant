@@ -2,6 +2,7 @@ import type { AppConfigService } from '../../shared/app-config/app-config.servic
 import type { AuditService } from '../../shared/audit/audit.service';
 import type { PaymentConfigRepository } from './payment-config.repository';
 import { PaymentConfigService } from './payment-config.service';
+import type { PricingFacade } from '../pricing/pricing.facade';
 import { calculateBill } from './payment-money.util';
 
 const ADMIN_ID = 'a0000000-0000-4000-8000-000000000001';
@@ -10,6 +11,7 @@ describe('PaymentConfigService', () => {
   let repo: jest.Mocked<PaymentConfigRepository>;
   let appConfig: jest.Mocked<AppConfigService>;
   let audit: jest.Mocked<AuditService>;
+  let pricing: jest.Mocked<PricingFacade>;
   let service: PaymentConfigService;
   let stored: Map<string, unknown>;
 
@@ -32,7 +34,11 @@ describe('PaymentConfigService', () => {
     appConfig = { invalidate: jest.fn() } as unknown as jest.Mocked<AppConfigService>;
     audit = { write: jest.fn().mockResolvedValue(undefined) } as unknown as jest.Mocked<AuditService>;
 
-    service = new PaymentConfigService(repo, appConfig, audit);
+    // No pricing catalogue configured, so the legacy write path is still live
+    // and every existing expectation below holds unchanged. The supersession
+    // branch is exercised separately.
+    pricing = { hasCatalogue: jest.fn().mockResolvedValue(false) } as unknown as jest.Mocked<PricingFacade>;
+    service = new PaymentConfigService(repo, appConfig, audit, pricing);
   });
 
   /* ------------------------------------------------------------------ */
