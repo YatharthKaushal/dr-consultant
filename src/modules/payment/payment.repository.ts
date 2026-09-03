@@ -47,6 +47,13 @@ export class PaymentRepository {
       convenienceFee: string;
       gstPct: string;
       gstAmount: string;
+      /**
+       * *** THE PRICE THIS PAYMENT WAS CREATED FOR. ***
+       * Present on every row the pricing engine priced; null only on a legacy
+       * row. `capturedTotalPaise` branches on it, so writing it is what makes a
+       * payment's authoritative total readable rather than re-derivable.
+       */
+      priceQuoteId?: string | null;
     },
     executor: Executor = this.db,
   ): Promise<PaymentRow> {
@@ -194,6 +201,30 @@ export class PaymentRepository {
       .update(paymentsTable)
       .set({ payoutPaidAt: paidAt, updatedAt: new Date() })
       .where(and(eq(paymentsTable.id, id), isNull(paymentsTable.payoutPaidAt)))
+      .returning({ id: paymentsTable.id });
+    return result.length;
+  }
+
+  /**
+   * Attaches the s.31 invoice serial at capture.
+   *
+   * Guarded on `invoice_number IS NULL` so a replayed capture cannot allocate a
+   * second number for one payment — the same write-once discipline
+   * `attachGatewayRefundId` uses, and what
+   * `pricing-document-sequences.schema.ts` means by "Idempotent on replay
+   * because the target column is UNIQUE and the write is conditioned on it
+   * still being null."
+   */
+  async attachInvoiceNumberIfAbsent(
+    id: string,
+    invoiceNumber: string,
+    issuedAt: Date,
+    executor: Executor = this.db,
+  ): Promise<number> {
+    const result = await executor
+      .update(paymentsTable)
+      .set({ invoiceNumber, invoiceIssuedAt: issuedAt, updatedAt: new Date() })
+      .where(and(eq(paymentsTable.id, id), isNull(paymentsTable.invoiceNumber)))
       .returning({ id: paymentsTable.id });
     return result.length;
   }

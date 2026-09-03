@@ -20,15 +20,67 @@
  * `payment-money.util.ts`.
  */
 
-/** FR-7.2's bill: "the patient bill shows every component separately: doctor consultation fee, convenience fee, subtotal before GST, GST, and final payable." */
+/**
+ * FR-7.2's bill: "the patient bill shows every component separately: doctor
+ * consultation fee, convenience fee, subtotal before GST, GST, and final
+ * payable."
+ *
+ * *** EVERY FIELD ADDED BELOW THE ORIGINAL SEVEN IS OPTIONAL, AND THAT IS
+ * LOAD-BEARING RATHER THAN TENTATIVE. *** They are POPULATED ON EVERY RESPONSE
+ * at runtime. They are declared optional purely so that booking's and M-13's
+ * blind mirrors of this interface — written in parallel worktrees that cannot
+ * see this file — keep compiling: a structural type with extra optional members
+ * is still assignable to one without them.
+ *
+ * Read them as required-in-practice. A consumer that has been updated may rely
+ * on them; one that has not simply ignores them.
+ */
 export interface PaymentBreakdown {
   consultationFee: string;      // decimal string, rupees
   convenienceFeePct: string;
   convenienceFee: string;
   gstPct: string;
   gstAmount: string;
-  totalPayable: string;         // the sum; there is deliberately no stored total column
+  /**
+   * *** THE AUTHORITATIVE AMOUNT. ***
+   *
+   * Formerly documented as "the sum; there is deliberately no stored total
+   * column". That is now true only of LEGACY rows. A payment priced by the
+   * engine carries a `price_quote_id`, and its total is
+   * `price_quotes.total_payable` — an immutable stored column, because once a
+   * bill can carry a discount or a tax-inclusive component the three legacy
+   * columns become a lossy summary and re-summing them computes a DIFFERENT
+   * number. See `payment-money.util.ts#capturedTotalPaise`.
+   */
+  totalPayable: string;
   currency: string;
+
+  /** FR-7.2's "subtotal before GST" — the sum of every component's TAXABLE VALUE, not of their nets. */
+  subtotal?: string;
+  /** `price_quotes.id`. Present on every engine-priced bill; absent only on a legacy re-derivation. */
+  quoteId?: string | null;
+  /** The recipient's state, which decides CGST+SGST versus IGST. `pincode` is recorded only and never authoritative. */
+  placeOfSupply?: { stateCode: string; stateName: string | null; pincode: string | null; kind: string };
+  /**
+   * The tax, split by head.
+   *
+   * CGST and SGST are a SPLIT of one computed figure, never two independent
+   * roundings — `2 x round(v x 9%)` is not `round(v x 18%)`, and splitting the
+   * rate would make an identical catalogue price cost a different total in a
+   * different state. The invoice prints "CGST 9% / SGST 9%" as LABELS while
+   * these amounts sum to the tax actually charged.
+   */
+  taxSplit?: { cgst: string; sgst: string; igst: string };
+  /** What a discount code actually did, applied or refused. Null when none was offered. */
+  discount?: {
+    applied: boolean;
+    code: string;
+    amount: string;
+    /** The part of the promised discount no line could bear. The checkout must show the CAPPED figure. */
+    cappedAmount: string;
+    reason: string | null;
+    message: string | null;
+  } | null;
 }
 
 export interface CreatedOrder {
@@ -82,10 +134,50 @@ export interface PaymentCapturedEvent {
 }
 
 export interface PaymentContract {
-  /** Quote a bill WITHOUT persisting anything — booking shows this before checkout. */
-  quote(consultationFeeInr: string): Promise<PaymentBreakdown>;
-  /** Creates the payments row and the Razorpay order. Caller supplies an existing consultationId. */
-  createOrderForConsultation(input: { consultationId: string; consultationFeeInr: string }): Promise<CreatedOrder>;
+  /**
+   * Quote a bill — booking shows this before checkout.
+   *
+   * *** `options` IS OPTIONAL, WHICH IS WHAT KEEPS THIS ADDITIVE. ***
+   * `(fee: string, opts?: O) => R` IS assignable to a blind mirror declaring
+   * `(fee: string) => R`, so booking and M-13 compile untouched.
+   *
+   * Persists nothing unless `materialise: true`, which writes a `draft` quote
+   * and returns its id in `breakdown.quoteId` — hand that to
+   * `createOrderForConsultation` to guarantee the price shown is the price
+   * charged.
+   */
+  quote(
+    consultationFeeInr: string,
+    options?: {
+      placeOfSupplyStateCode?: string;
+      placeOfSupplyPincode?: string;
+      discountCode?: string | null;
+      patientId?: string | null;
+      doctorId?: string | null;
+      materialise?: boolean;
+    },
+  ): Promise<PaymentBreakdown>;
+
+  /**
+   * Creates the payments row and the Razorpay order. Caller supplies an existing
+   * consultationId.
+   *
+   * `consultationFeeInr` IS KEPT REQUIRED so M-13's blind mirror compiles
+   * unchanged. Everything added is optional.
+   *
+   * *** OMITTING `quoteId` IS SUPPORTED, NOT DEGRADED. *** The quote is
+   * materialised and pinned inline from the fee plus the org's own registered
+   * state — which is also the legally conservative place of supply, since it
+   * yields CGST+SGST and never a wrongly-claimed IGST. No call site can produce
+   * an unpriced payment.
+   */
+  createOrderForConsultation(input: {
+    consultationId: string;
+    consultationFeeInr: string;
+    quoteId?: string;
+    placeOfSupplyStateCode?: string;
+    placeOfSupplyPincode?: string;
+  }): Promise<CreatedOrder>;
   /** Current status, for booking to gate on. */
   getByConsultationId(consultationId: string): Promise<{ paymentId: string; status: string; paidAt: Date | null } | null>;
   /** Ask the gateway what actually happened — for the reconciled hold sweep. Never trusts local state. */

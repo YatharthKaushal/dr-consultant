@@ -8,17 +8,21 @@ import {
 } from '@nestjs/common';
 import { DATABASE } from '../../config/db/database.module';
 import type { Database } from '../../config/db/database.config';
+import type { PaymentRow } from '../../schema/payments.schema';
 import type { RefundRow } from '../../schema/refunds.schema';
 import { AuditService } from '../../shared/audit/audit.service';
 import { PaymentRepository } from './payment.repository';
 import { PAYMENT_AUDIT_ENTITY_TYPES, PAYMENT_ERROR_CODES } from './payment.constants';
 import {
+  capturedTotalPaise,
   MoneyFormatError,
   paiseToGatewayAmount,
   paiseToRupees,
   rupeesToPaise,
   sumRupees,
 } from './payment-money.util';
+import { PricingFacade } from '../pricing/pricing.facade';
+import { RefundComponentRepository } from '../pricing/refund-component.repository';
 import { isIndeterminateGatewayOutcome } from './razorpay-error.classifier';
 import { RefundRepository } from './refund.repository';
 import { RazorpayClient } from './razorpay.client';
@@ -30,6 +34,22 @@ export interface CreateRefundInput {
   /** `null` = automatic, raised by the cancellation policy with no human involved. */
   initiatedByAdminId: string | null;
   isAutomatic: boolean;
+  /**
+   * *** OPTIONAL, AND IT REDEFINES THE REFUND BASE. ***
+   *
+   * When present, `amount` is IGNORED and the refund is computed as this
+   * percentage of the CAPTURED TOTAL. `booking-policy.engine.ts`'s `refundPct`
+   * has always meant "percent of the consultation FEE" — a 100% refund returned
+   * 500.00 of a 708.00 bill — and this is what changes it.
+   *
+   * THIS IS A COMMERCIAL CHANGE, NOT A BUG FIX. See
+   * `pricing-refund.service.ts`'s header: it needs the client's sign-off, and
+   * the seeded 100% tier now pays 618.00 instead of 500.00.
+   *
+   * Optional so that every existing call site — booking's included — keeps
+   * compiling and keeps its current behaviour until it opts in.
+   */
+  refundPct?: number;
 }
 
 /**
@@ -114,6 +134,10 @@ export class RefundService {
     private readonly refunds: RefundRepository,
     private readonly gateway: RazorpayClient,
     private readonly audit: AuditService,
+    /** Apportions the tax reversal and allocates the s.34 credit-note serial. */
+    private readonly pricing: PricingFacade,
+    /** `refund_components` — owned by pricing, written here because this module owns the `refunds` row it hangs off. */
+    private readonly refundComponents: RefundComponentRepository,
   ) {}
 
   /**
@@ -125,7 +149,30 @@ export class RefundService {
    * means money actually moved (`enums.schema.ts`).
    */
   async createRefund(input: CreateRefundInput): Promise<{ refundId: string; status: string }> {
-    const amountPaise = this.parseAmount(input.amount);
+    // *** EVERY CROSS-MODULE READ HAPPENS BEFORE THE LOCK IS TAKEN. ***
+    // Reading `modules/pricing` inside the transaction would be the cross-module
+    // transaction `backend/README.md` §2 forbids, and it would hold a row lock
+    // across another module's queries. It is safe outside the lock because a
+    // quote's money is IMMUTABLE by construction.
+    const preRead = await this.payments.findById(input.paymentId);
+    if (!preRead) {
+      throw new NotFoundException({
+        code: PAYMENT_ERROR_CODES.PAYMENT_NOT_FOUND,
+        message: 'Payment not found.',
+      });
+    }
+    const quoteTotalPayable = await this.resolveQuoteTotal(preRead);
+
+    // *** THE REFUND BASE. ***
+    // A percentage means percent of the CAPTURED TOTAL, not of the consultation
+    // fee. See `CreateRefundInput.refundPct` and `pricing-refund.service.ts` —
+    // this is a COMMERCIAL change and it needs the client's sign-off.
+    const requestedAmount =
+      input.refundPct !== undefined && preRead.priceQuoteId !== null
+        ? await this.pricing.refundAmountForPct({ quoteId: preRead.priceQuoteId, pct: input.refundPct })
+        : input.amount;
+
+    const amountPaise = this.parseAmount(requestedAmount);
 
     /* ---- PHASE 1: reserve, under the payment's row lock ---------------- */
     const reserved = await this.db.transaction(async (tx) => {
@@ -146,7 +193,7 @@ export class RefundService {
         });
       }
 
-      const capturedPaise = this.capturedPaise(payment);
+      const capturedPaise = capturedTotalPaise(payment, quoteTotalPayable);
       // Read UNDER THE LOCK. This is the value a concurrent caller must not be
       // able to read stale.
       const committedPaise = sumRupees(await this.refunds.listCommittedAmounts(input.paymentId, tx));
@@ -200,6 +247,21 @@ export class RefundService {
       return { refund, gatewayPaymentId: payment.gatewayPaymentId, paymentId: payment.id };
     });
 
+    /* ---- PHASE 1b: the tax reversal, recorded ------------------------- */
+    //
+    // *** WRITTEN BEFORE THE GATEWAY IS CALLED, LIKE THE ROW ITSELF. ***
+    // `refunds.schema.ts` mandates that ordering so a crash mid-call leaves
+    // evidence rather than a silent gap; the apportionment is part of that
+    // evidence. Under s.34 CGST a refund needs a credit note with a proportional
+    // tax reversal, and "we gave 618.00 back" cannot support one.
+    //
+    // Best-effort ONLY in the sense that a failure here must not block money
+    // going back to a patient: the `refunds` row and its amount are already
+    // committed and correct. A missing apportionment is a reporting gap a human
+    // can close; a refund blocked on a bookkeeping write is a patient without
+    // their money.
+    await this.recordTaxReversal(reserved.refund.id, preRead, amountPaise);
+
     /* ---- PHASE 2: the gateway call, OUTSIDE the lock ------------------- */
     let gatewayRefundId: string;
     let gatewayStatus: string | undefined;
@@ -236,6 +298,11 @@ export class RefundService {
     }
 
     if (settled) {
+      // *** THE CREDIT-NOTE SERIAL IS TAKEN ONLY AT `processed`. ***
+      // Never at intent: a refund the gateway rejects must not burn a number,
+      // because a gap in a statutory series is its own compliance question
+      // (`pricing-document-sequences.schema.ts`).
+      await this.allocateCreditNote(reserved.refund.id);
       await this.recomputePaymentRefundStatus(reserved.paymentId);
     }
 
@@ -263,7 +330,7 @@ export class RefundService {
     const settledPaise = sumRupees(await this.refunds.listProcessedAmounts(paymentId));
     if (settledPaise === 0n) return;
 
-    const capturedPaise = this.capturedPaise(payment);
+    const capturedPaise = await this.capturedPaise(payment);
     const next = settledPaise >= capturedPaise ? 'refunded' : 'partially_refunded';
 
     if (payment.status === next) return;
@@ -293,7 +360,7 @@ export class RefundService {
   async getRefundableAmount(paymentId: string): Promise<string> {
     const payment = await this.payments.findById(paymentId);
     if (!payment || payment.paidAt === null) return '0.00';
-    const capturedPaise = this.capturedPaise(payment);
+    const capturedPaise = await this.capturedPaise(payment);
     const committedPaise = sumRupees(await this.refunds.listCommittedAmounts(paymentId));
     return paiseToRupees(capturedPaise > committedPaise ? capturedPaise - committedPaise : 0n);
   }
@@ -301,20 +368,119 @@ export class RefundService {
   /* ---------------------------------------------------------------------- */
 
   /**
-   * What was actually captured, recomputed from the payment's own stored
-   * components rather than from a total column — there is no total column, by
-   * design (`payment-money.util.ts`).
+   * What was actually captured.
+   *
+   * *** ONE DERIVATION, SHARED WITH THE OTHER THREE CALL SITES. ***
+   *
+   * This used to sum the three stored columns while
+   * `payment.service.ts#expectedTotalPaise` recomputed the same figure via
+   * `calculateBill`. Four derivations of one number, one of them different, and
+   * they agreed only because every row happened to be written from
+   * `calculateBill`'s own output. A discount ends that — and since this figure
+   * is what the refund invariant is measured against, a divergence here would
+   * let a payment be over- or under-refunded. See
+   * `payment-money.util.ts#capturedTotalPaise`.
    */
-  private capturedPaise(payment: {
-    consultationFee: string;
-    convenienceFee: string;
-    gstAmount: string;
-  }): bigint {
-    return (
-      rupeesToPaise(payment.consultationFee) +
-      rupeesToPaise(payment.convenienceFee) +
-      rupeesToPaise(payment.gstAmount)
-    );
+  private async capturedPaise(payment: PaymentRow): Promise<bigint> {
+    return capturedTotalPaise(payment, await this.resolveQuoteTotal(payment));
+  }
+
+  /**
+   * `price_quotes.total_payable` for a quoted payment, or `null` for a legacy one.
+   *
+   * Read OUTSIDE the payment's row lock, which is safe because a quote's money is
+   * IMMUTABLE by construction — `price-quotes.schema.ts` rests its whole case for
+   * storing a total on that, and `price-quote.repository.ts` has no method that
+   * updates an amount. It must be read outside the lock anyway: crossing a module
+   * boundary inside a transaction is the cross-module transaction
+   * `backend/README.md` §2 forbids.
+   */
+  private async resolveQuoteTotal(payment: PaymentRow): Promise<string | null> {
+    if (payment.priceQuoteId === null) return null;
+    const totals = await this.pricing.getQuoteTotals([payment.priceQuoteId]);
+    return totals[payment.priceQuoteId] ?? null;
+  }
+
+  /**
+   * Splits the refund across the original quote's components and backs the tax
+   * out of each share at that line's SNAPSHOTTED rate.
+   *
+   * Writes `refund_components` and the head columns on `refunds`.
+   *
+   * *** A LEGACY PAYMENT GETS NO REVERSAL, AND THAT IS CORRECT. *** A row with
+   * no `price_quote_id` has no per-component tax to apportion, and
+   * `refunds.schema.ts` is explicit that back-filling "a tax reversal that was
+   * never actually reported would be worse than leaving those rows at zero" —
+   * which is why the balancing CHECK lives on `refund_components` and not on
+   * `refunds`.
+   */
+  private async recordTaxReversal(refundId: string, payment: PaymentRow, amountPaise: bigint): Promise<void> {
+    if (payment.priceQuoteId === null) return;
+
+    try {
+      // What has already gone back per component, so the weights are each line's
+      // REMAINING capacity and a second partial cannot over-refund one line.
+      const priorRefunds = await this.refunds.listByPaymentId(payment.id);
+      const priorIds = priorRefunds
+        .filter((row) => row.id !== refundId && row.status !== 'failed')
+        .map((row) => row.id);
+      const alreadyByCode = await this.refundComponents.sumByCodeForRefunds(priorIds);
+
+      const apportionment = await this.pricing.apportionRefund({
+        quoteId: payment.priceQuoteId,
+        requestedAmount: paiseToRupees(amountPaise),
+        alreadyRefundedByCode: Object.fromEntries(
+          [...alreadyByCode].map(([code, amounts]) => [code, paiseToRupees(sumRupees(amounts))]),
+        ),
+      });
+
+      await this.refundComponents.insertMany(
+        apportionment.components.map((component) => ({
+          refundId,
+          code: component.code,
+          taxableValue: component.taxableValue,
+          taxRatePct: component.taxRatePct,
+          cgstAmount: component.cgstAmount,
+          sgstAmount: component.sgstAmount,
+          igstAmount: component.igstAmount,
+          amount: component.amount,
+        })),
+      );
+
+      await this.refunds.setTaxBreakdown(refundId, {
+        taxableValue: apportionment.taxableValue,
+        cgstAmount: apportionment.cgstAmount,
+        sgstAmount: apportionment.sgstAmount,
+        igstAmount: apportionment.igstAmount,
+      });
+    } catch (error) {
+      this.logger.error(
+        `Refund ${refundId}: the tax reversal could not be recorded, so it has no credit-note breakdown: ${extractDetail(error)}`,
+      );
+    }
+  }
+
+  /**
+   * Takes the s.34 credit-note serial for a refund that has actually settled.
+   *
+   * Guarded on `credit_note_number IS NULL`, so a replayed `refund.processed`
+   * webhook cannot take a second number for one refund.
+   */
+  async allocateCreditNote(refundId: string): Promise<void> {
+    try {
+      const refund = await this.refunds.findById(refundId);
+      if (!refund || refund.creditNoteNumber !== null) return;
+
+      const note = await this.pricing.allocateCreditNoteNumber();
+      const rows = await this.refunds.attachCreditNoteIfAbsent(refundId, note.number, note.issuedAt);
+      if (rows === 0) {
+        this.logger.warn(
+          `Refund ${refundId} already carried a credit-note number; serial ${note.number} was allocated and not used.`,
+        );
+      }
+    } catch (error) {
+      this.logger.error(`Refund ${refundId} settled but its credit-note number could not be allocated: ${extractDetail(error)}`);
+    }
   }
 
   private parseAmount(amount: string): bigint {

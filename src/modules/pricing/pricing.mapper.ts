@@ -39,6 +39,9 @@ export function toComponentView(component: PricedComponent): PricedComponentView
     sgstAmount: paiseToRupees(component.sgstPaise),
     igstAmount: paiseToRupees(component.igstPaise),
     lineTotal: paiseToRupees(component.lineTotalPaise),
+    basis: component.basis,
+    basisPct: component.basisPct,
+    basisCodes: component.basisCodes,
   };
 }
 
@@ -60,6 +63,9 @@ export function toComponentViewFromRow(row: PriceQuoteComponentRow): PricedCompo
     sgstAmount: row.sgstAmount,
     igstAmount: row.igstAmount,
     lineTotal: row.lineTotal,
+    basis: row.basis,
+    basisPct: row.basisPct,
+    basisCodes: row.basisCodes,
   };
 }
 

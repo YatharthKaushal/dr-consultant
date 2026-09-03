@@ -48,6 +48,18 @@ export interface PricedComponentView {
   sgstAmount: string;
   igstAmount: string;
   lineTotal: string;
+  /** How the gross was derived: `pass_through` (given) or `percent_of` (a rate on earlier lines). */
+  basis: string;
+  /**
+   * The RATE this line was derived at — FR-7.3's "convenience fee is 20 percent".
+   * Null for a pass-through line.
+   *
+   * Distinct from `taxRatePct`, and conflating the two is an easy and expensive
+   * mistake: this is 20.00 for the convenience fee while its TAX rate is 18.00.
+   */
+  basisPct: string | null;
+  /** The component codes `basisPct` was applied to. Reproduces the derivation without re-reading config. */
+  basisCodes: string[] | null;
 }
 
 /** What actually happened to a discount code, applied or not. Null when none was offered. */
