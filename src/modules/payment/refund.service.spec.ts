@@ -1,6 +1,7 @@
 import type { Database } from '../../config/db/database.config';
 import type { AuditService } from '../../shared/audit/audit.service';
 import type { PaymentRepository } from './payment.repository';
+import { toHttpException } from './razorpay-error.classifier';
 import type { RazorpayClient } from './razorpay.client';
 import { RefundRepository } from './refund.repository';
 import { RefundService } from './refund.service';
@@ -80,6 +81,7 @@ describe('RefundService', () => {
       listProcessedAmounts: jest.fn(async () => [...processedAmounts]),
       attachGatewayRefundId: jest.fn().mockResolvedValue(1),
       markFailedIfNotProcessed: jest.fn().mockResolvedValue(1),
+      recordFailureReasonKeepingPending: jest.fn().mockResolvedValue(1),
       findById: jest.fn(async (id: string) => ({ id, status: 'processing' })),
       listByPaymentId: jest.fn().mockResolvedValue([]),
     } as unknown as jest.Mocked<RefundRepository>;
@@ -160,6 +162,104 @@ describe('RefundService', () => {
       // Losing the original exception would be strictly worse than losing the
       // status update — the row already exists as evidence either way.
       await expect(service.createRefund(refundInput('100.00'))).rejects.toThrow('the real problem');
+    });
+
+    /* ---------------------------------------------------------------- */
+    /* WHEN WE DO NOT KNOW WHETHER THE GATEWAY ACTED                     */
+    /* ---------------------------------------------------------------- */
+
+    /**
+     * *** REGRESSION: A TIMED-OUT REFUND MUST NOT RELEASE ITS RESERVATION. ***
+     *
+     * `recordGatewayFailure` used to call `markFailedIfNotProcessed` for EVERY
+     * error, including a timeout. `failed` rows are excluded from
+     * `listCommittedAmounts`, so the amount went straight back into the
+     * refundable balance — while Razorpay may well have accepted the refund and
+     * be settling it. An admin could then raise a second refund for the same
+     * money and both would land.
+     *
+     * That contradicted the module's own documented guarantees:
+     * `razorpay.client.ts` says a timed-out refund is "a row with no
+     * `gateway_refund_id` that a human or a reconciliation sweep can resolve —
+     * not a lost refund, and NOT A DOUBLE ONE", and `refund.service.ts` says a
+     * process dying mid-call "leaves a `pending` row".
+     */
+    it('leaves a timed-out refund PENDING so its amount stays reserved', async () => {
+      // The real shape: what `RazorpayClient` throws when the socket never
+      // answered, built by the classifier rather than hand-rolled.
+      gateway.createRefund.mockRejectedValueOnce(
+        toHttpException({ kind: 'network_or_timeout', detail: 'fetch failed' }),
+      );
+
+      await expect(service.createRefund(refundInput('100.00'))).rejects.toMatchObject({
+        status: 504,
+        response: { code: 'PAYMENT_GATEWAY_TIMEOUT' },
+      });
+
+      // *** The row must NOT be marked failed. ***
+      expect(refunds.markFailedIfNotProcessed).not.toHaveBeenCalled();
+      expect(refunds.recordFailureReasonKeepingPending).toHaveBeenCalledWith(
+        expect.any(String),
+        'PAYMENT_GATEWAY_TIMEOUT',
+      );
+    });
+
+    /** A 5xx is the same problem: Razorpay may have created the refund before falling over. */
+    it('leaves a refund PENDING when the gateway answered 5xx', async () => {
+      gateway.createRefund.mockRejectedValueOnce(
+        toHttpException({ kind: 'gateway_unavailable', detail: 'SERVER_ERROR' }),
+      );
+
+      await expect(service.createRefund(refundInput('100.00'))).rejects.toBeDefined();
+      expect(refunds.markFailedIfNotProcessed).not.toHaveBeenCalled();
+      expect(refunds.recordFailureReasonKeepingPending).toHaveBeenCalled();
+    });
+
+    /**
+     * The other direction must still work: a DEFINITIVE refusal means no refund
+     * exists at the gateway, so the amount is genuinely free again. Holding a
+     * reservation for every failure would strand money that never moved.
+     */
+    it('still marks a DEFINITIVELY refused refund failed, releasing the amount', async () => {
+      gateway.createRefund.mockRejectedValueOnce(
+        toHttpException({ kind: 'refund_not_permitted', detail: 'fully refunded' }),
+      );
+
+      await expect(service.createRefund(refundInput('100.00'))).rejects.toMatchObject({
+        status: 409,
+        response: { code: 'PAYMENT_REFUND_NOT_PERMITTED' },
+      });
+
+      expect(refunds.markFailedIfNotProcessed).toHaveBeenCalled();
+      expect(refunds.recordFailureReasonKeepingPending).not.toHaveBeenCalled();
+    });
+
+    /** The audit trail must say which of the two happened — a reconciler needs to know whether the money is still held. */
+    it('audits an unknown outcome distinctly from a rejection', async () => {
+      gateway.createRefund.mockRejectedValueOnce(
+        toHttpException({ kind: 'network_or_timeout', detail: 'fetch failed' }),
+      );
+      await expect(service.createRefund(refundInput('100.00'))).rejects.toBeDefined();
+
+      expect(audit.write).toHaveBeenCalledWith(
+        expect.objectContaining({
+          metadata: expect.objectContaining({ outcome: 'gateway_outcome_unknown', reservationHeld: true }),
+        }),
+      );
+    });
+
+    /**
+     * The classification must never travel to the client. `HttpExceptionFilter`
+     * spreads every extra property of the BODY into the response, so a `kind`
+     * field there would advertise the gateway's internals to a patient.
+     */
+    it('does not put the failure kind in the HTTP body', () => {
+      const exception = toHttpException({ kind: 'network_or_timeout', detail: 'fetch failed' });
+      expect(exception.getResponse()).toEqual({
+        code: 'PAYMENT_GATEWAY_TIMEOUT',
+        message: expect.any(String) as never,
+      });
+      expect(JSON.stringify(exception.getResponse())).not.toContain('network_or_timeout');
     });
   });
 

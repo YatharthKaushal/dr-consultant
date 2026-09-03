@@ -174,7 +174,22 @@ export class PaymentConfigService {
     // `numeric(5,2)` holds two decimal places. A rate of 18.005 would be
     // silently rounded by Postgres on the way into `payments.gst_pct`, so the
     // bill would not match the configured rate — refused here instead.
-    if (Math.round(value * 100) !== value * 100) {
+    //
+    // *** DO NOT WRITE THIS AS `Math.round(value * 100) !== value * 100`. ***
+    // That is float arithmetic on a rate, which is the exact class of error
+    // `payment-money.util.ts` exists to prevent, and it does not merely round
+    // badly — it REJECTS legal input. `8.21 * 100` is 821.0000000000001 and
+    // `16.08 * 100` is 1607.9999999999998 in IEEE-754, so both fail an equality
+    // test against their own rounding. 1,146 of the 10,001 two-decimal rates in
+    // [0, 100] are refused that way, while the DTO's `@IsNumber({
+    // maxDecimalPlaces: 2 })` (which reads `toString()`, not a product) accepts
+    // them — so the request passes validation and is then rejected by the
+    // service with a message asserting something false about the number.
+    //
+    // `toFixed(2)` renders the decimal directly and never forms the product, so
+    // a value with at most two decimal places round-trips to itself exactly and
+    // one with more (18.005 -> "18.01" -> 18.01) does not.
+    if (Number(value.toFixed(2)) !== value) {
       throw this.invalid(`${label} must have at most 2 decimal places.`);
     }
   }
