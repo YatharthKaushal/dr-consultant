@@ -286,6 +286,54 @@ describe('Pricing — the quote lifecycle against a REAL database (integration)'
   });
 
   /* ================================================================== */
+  /* The sweep's own SQL                                                 */
+  /* ================================================================== */
+
+  describe('the stale-draft sweep’s queries', () => {
+    /**
+     * *** THE SWEEP RUNS EVERY 60 SECONDS FOREVER, SO ITS SQL MUST ACTUALLY
+     * RUN. *** `pricing-quote-sweep.service.spec.ts` mocks the repository, which
+     * proves the orchestration and nothing about the statements. A malformed
+     * query here would throw on every tick in production and be visible only as
+     * a log line.
+     */
+    it('bulk-expires stale drafts that hold no reservation', async () => {
+      const id = await draft();
+      await db
+        .update(priceQuotesTable)
+        .set({ expiresAt: new Date(Date.now() - 60_000) })
+        .where(eq(priceQuotesTable.id, id));
+
+      const expired = await quotes.expireStaleDraftsWithoutReservations(new Date(), 100);
+      expect(expired).toBeGreaterThanOrEqual(1);
+
+      const [row] = await db.select().from(priceQuotesTable).where(eq(priceQuotesTable.id, id));
+      expect(row.status).toBe('expired');
+    });
+
+    /** A LIVE draft is never touched — the price is still good. */
+    it('leaves a draft that has not expired alone', async () => {
+      const id = await draft();
+      await quotes.expireStaleDraftsWithoutReservations(new Date(), 100);
+
+      const [row] = await db.select().from(priceQuotesTable).where(eq(priceQuotesTable.id, id));
+      expect(row.status).toBe('draft');
+    });
+
+    /** The candidate query runs and excludes drafts with no consultation, which hold no reservation. */
+    it('finds no reservation-holding candidates among consultation-less drafts', async () => {
+      const id = await draft();
+      await db
+        .update(priceQuotesTable)
+        .set({ expiresAt: new Date(Date.now() - 60_000) })
+        .where(eq(priceQuotesTable.id, id));
+
+      const candidates = await quotes.findStaleDraftsHoldingReservations(new Date(), 100);
+      expect(candidates.map((c) => c.id)).not.toContain(id);
+    });
+  });
+
+  /* ================================================================== */
   /* Refund apportionment, over stored rows                              */
   /* ================================================================== */
 
