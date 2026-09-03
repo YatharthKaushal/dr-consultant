@@ -369,6 +369,28 @@ export class InstantService {
     const booking = await this.bookings.getBooking(attempt.consultationId);
     if (!booking) throw instantConsultNotFound();
 
+    // *** CHECKED BEFORE ANY MONEY IS TOUCHED, NOT AFTER. ***
+    //
+    // A patient can cancel while an offer is outstanding — M-11's `POST
+    // /bookings/:id/cancel` accepts `awaiting_doctor` (`CANCELLABLE_STATUSES`)
+    // and this module deliberately has no cancel path of its own, so that
+    // window is real and ordinary rather than exotic.
+    //
+    // Step (d) below would refuse the transition anyway, but by then step (b)
+    // has already minted a gateway order — a `payments` row against a
+    // consultation nobody is going to hold, which is a money-shaped mess to
+    // unpick and one the patient never asked for. So the status is re-read
+    // here, before the first irreversible call, and the doctor is handed
+    // straight back.
+    if (booking.status !== 'awaiting_doctor') {
+      await this.rollbackAccept(attempt, `consultation_status_${booking.status}`);
+      throw new ConflictException({
+        code: INSTANT_ERROR_CODES.INVALID_STATE_TRANSITION,
+        message: 'This request is no longer waiting for a doctor.',
+        currentStatus: booking.status,
+      });
+    }
+
     // (a) The fee the order is priced at. Read from the doctor's own profile
     // — there is no payment row yet to read it back from, which is the whole
     // difference from a cancellation refund (see `booking.repository.ts#
