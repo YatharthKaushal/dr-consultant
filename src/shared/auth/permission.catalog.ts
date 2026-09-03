@@ -138,7 +138,8 @@ const DESCRIPTIONS: Record<PermissionKey, string> = {
   [PERMISSIONS.PAYMENTS_READ]: 'View transactions and payout status.',
   [PERMISSIONS.PAYMENTS_REFUND]: 'Initiate a refund.',
   [PERMISSIONS.PAYMENTS_EXPORT]: 'Export transactions/refunds as CSV.',
-  [PERMISSIONS.PAYMENTS_MANAGE_CONFIG]: 'Set the convenience fee percentage and GST rate.',
+  [PERMISSIONS.PAYMENTS_MANAGE_CONFIG]:
+    'Set what a patient is charged: the bill’s components, each one’s GST treatment and rate, the organisation’s GST registration, and how long a quoted price stands.',
   [PERMISSIONS.CLINICAL_READ_RECORDS]: 'Read a consultation’s clinical notes and prescription.',
   [PERMISSIONS.GOVERNANCE_READ_QUEUES]:
     'View the pending case-summary, high-risk-alert and follow-up-alert worklists.',

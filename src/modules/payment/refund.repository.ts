@@ -185,6 +185,49 @@ export class RefundRepository {
     return result.length;
   }
 
+  /**
+   * Writes the tax reversal totals onto the refund.
+   *
+   * `amount = taxable_value + cgst + sgst + igst` for a refund the pricing engine
+   * apportioned. The per-component detail is in `refund_components`, which
+   * carries the balancing CHECK — `refunds` deliberately does not, because rows
+   * written before the engine existed have a positive `amount` and zero heads,
+   * and "back-filling a tax reversal that was never actually reported would be
+   * worse than leaving those rows at zero" (`refunds.schema.ts`).
+   */
+  async setTaxBreakdown(
+    id: string,
+    values: { taxableValue: string; cgstAmount: string; sgstAmount: string; igstAmount: string },
+    executor: Executor = this.db,
+  ): Promise<void> {
+    await executor
+      .update(refundsTable)
+      .set({ ...values, updatedAt: new Date() })
+      .where(eq(refundsTable.id, id));
+  }
+
+  /**
+   * Attaches the s.34 credit-note serial once a refund has actually settled.
+   *
+   * Guarded on `credit_note_number IS NULL` so it can only ever be set once — a
+   * replayed `refund.processed` webhook finds it present and no-ops, the same
+   * write-once discipline `attachGatewayRefundId` uses. A refund the gateway
+   * rejects never reaches this method at all, so it never burns a number.
+   */
+  async attachCreditNoteIfAbsent(
+    id: string,
+    creditNoteNumber: string,
+    issuedAt: Date,
+    executor: Executor = this.db,
+  ): Promise<number> {
+    const result = await executor
+      .update(refundsTable)
+      .set({ creditNoteNumber, creditNoteIssuedAt: issuedAt, updatedAt: new Date() })
+      .where(and(eq(refundsTable.id, id), isNull(refundsTable.creditNoteNumber)))
+      .returning({ id: refundsTable.id });
+    return result.length;
+  }
+
   /** The admin refunds list and the CSV export feed. */
   async list(
     filter: { paymentId?: string; status?: RefundStatus; createdFrom?: Date; createdTo?: Date; limit: number; offset: number },

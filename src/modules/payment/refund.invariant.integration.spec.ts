@@ -59,6 +59,16 @@ import { refundsTable } from '../../schema/refunds.schema';
 import { specialtiesTable } from '../../schema/specialties.schema';
 import { AuditService } from '../../shared/audit/audit.service';
 import { PaymentRepository } from './payment.repository';
+import { PriceQuoteRepository } from '../pricing/price-quote.repository';
+import { PricingConfigRepository } from '../pricing/pricing-config.repository';
+import { PricingConfigService } from '../pricing/pricing-config.service';
+import { PricingDocumentRepository } from '../pricing/pricing-document.repository';
+import { PricingFacade } from '../pricing/pricing.facade';
+import { PricingRefundService } from '../pricing/pricing-refund.service';
+import { PricingService } from '../pricing/pricing.service';
+import { RefundComponentRepository } from '../pricing/refund-component.repository';
+import { UnavailableDiscountProvider } from '../pricing/unavailable-discount.provider';
+import { AppConfigService } from '../../shared/app-config/app-config.service';
 import { RefundRepository } from './refund.repository';
 import { RefundService } from './refund.service';
 import type { RazorpayClient } from './razorpay.client';
@@ -170,10 +180,36 @@ async function teardown(db: Database, fixtures: Fixtures): Promise<void> {
   await db.delete(specialtiesTable).where(eq(specialtiesTable.id, fixtures.specialtyId));
 }
 
+/**
+ * Real pricing services over the real database, with the DISCOUNT PORT NULL
+ * OBJECT bound — the same binding `pricing.module.ts` uses until promotions
+ * merges. Nothing here reaches a network.
+ */
+function buildPricingFacade(db: Database): PricingFacade {
+  const quotes = new PriceQuoteRepository(db);
+  const documents = new PricingDocumentRepository(db);
+  const config = new PricingConfigService(
+    db,
+    new PricingConfigRepository(db),
+    new AppConfigService(db),
+    new AuditService(db),
+  );
+  const pricing = new PricingService(
+    db,
+    quotes,
+    documents,
+    config,
+    new UnavailableDiscountProvider(),
+    new AuditService(db),
+  );
+  return new PricingFacade(pricing, new PricingRefundService(quotes));
+}
+
 describe('RefundService — the refund invariant under REAL concurrency (integration)', () => {
   let db: Database;
   let fixtures: Fixtures;
   let service: RefundService;
+  let pricingFacade: PricingFacade;
   /** Every amount, in paise, the stub gateway was asked to refund. */
   let gatewayCalls: number[];
   /** Set to make the stub gateway settle immediately instead of returning `pending`. */
@@ -206,7 +242,21 @@ describe('RefundService — the refund invariant under REAL concurrency (integra
       },
     } as unknown as RazorpayClient;
 
-    service = new RefundService(db, payments, refunds, gateway, new AuditService(db));
+    // REAL pricing wiring too — the fixtures here are LEGACY payments
+    // (`price_quote_id` is null), so `capturedTotalPaise` takes the
+    // `calculateBill` branch and none of these are consulted. Building them for
+    // real rather than mocking keeps this spec honest about what it is
+    // exercising: the concurrency control, against real rows.
+    pricingFacade = buildPricingFacade(db);
+    service = new RefundService(
+      db,
+      payments,
+      refunds,
+      gateway,
+      new AuditService(db),
+      pricingFacade,
+      new RefundComponentRepository(db),
+    );
   });
 
   afterAll(async () => {
@@ -523,6 +573,8 @@ describe('RefundService — the refund invariant under REAL concurrency (integra
       new RefundRepository(db),
       failingGateway,
       new AuditService(db),
+      pricingFacade,
+      new RefundComponentRepository(db),
     );
 
     await expect(

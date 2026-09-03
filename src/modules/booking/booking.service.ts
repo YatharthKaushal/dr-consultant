@@ -504,6 +504,22 @@ export class BookingService {
     }
 
     const consultationFee = await this.resolveConsultationFee(booking);
+    // *** THE FEE-BASED AMOUNT IS NOW THE LEGACY FALLBACK, NOT THE ANSWER. ***
+    //
+    // `refundPct` is sent alongside it, and M-12 prefers the percentage whenever
+    // the payment was priced by the pricing engine — computing it against the
+    // CAPTURED TOTAL rather than the consultation fee. A 100% tier on a 618.00
+    // bill therefore returns 618.00, where it previously returned the 500.00 fee
+    // and the patient never got the convenience fee or the GST back.
+    //
+    // *** THIS IS A COMMERCIAL CHANGE AND IT NEEDS THE CLIENT'S SIGN-OFF. ***
+    // It changes what the published cancellation policy pays out and the
+    // platform's revenue on every in-policy cancellation.
+    //
+    // The amount below still governs a LEGACY payment (no quote), which has no
+    // per-component breakdown to apportion a tax reversal against. Sending both
+    // is what keeps historical rows on their original base instead of silently
+    // re-basing them.
     const amount = refundAmountFor(consultationFee, decision.refundPct);
 
     try {
@@ -513,6 +529,7 @@ export class BookingService {
         reason: `Cancellation within policy (${decision.refundPct}%).`,
         initiatedByAdminId: null,
         isAutomatic: true,
+        refundPct: decision.refundPct,
       });
       await this.audit.write({
         actorType: 'system',
