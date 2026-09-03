@@ -44,6 +44,11 @@ export class PaymentFacade implements PaymentContract {
     return this.payments.getByConsultationId(consultationId);
   }
 
+  /** The handles a patient needs to OPEN checkout on an existing unpaid payment — `null` when there is nothing to pay. See `PaymentContract`. */
+  async getCheckoutHandles(consultationId: string): Promise<CreatedOrder | null> {
+    return this.payments.getCheckoutHandles(consultationId);
+  }
+
   async reconcileWithGateway(paymentId: string): Promise<{ status: string; changed: boolean }> {
     return this.payments.reconcileWithGateway(paymentId);
   }

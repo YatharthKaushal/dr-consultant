@@ -35,21 +35,37 @@ export interface InstantConsultStatusView {
   /** When the offer currently outstanding closes, or `null` when none is. */
   offerExpiresAt: Date | null;
   /**
-   * The payment, once a doctor has accepted and an order exists.
+   * The payment, once a doctor has accepted and an order exists — INCLUDING the
+   * gateway checkout handles.
    *
-   * *** THE GATEWAY CHECKOUT HANDLES ARE NOT HERE, AND THAT IS A KNOWN GAP. ***
-   * `gatewayOrderId`/`gatewayKeyId` are minted inside `accept`, which is a
-   * DOCTOR request, and M-12's public surface has no read for them:
-   * `PaymentContract.getByConsultationId` returns `{paymentId, status,
-   * paidAt}` and nothing else, and that signature is fixed. They are put on
-   * the patient's `instant_accepted` notification as `deepLinkData` (which is
-   * exactly what that field is for), so the push path is complete; a patient
-   * who polls instead needs M-12 to expose a checkout-handles read for an
-   * order it created out of band. Caching them here was rejected: it would be
-   * in-process state that a second instance silently gets wrong, for a fact
-   * the payment module already holds durably.
+   * *** THIS IS THE PATIENT'S ONLY RELIABLE ROUTE TO CHECKOUT. *** FR-10.2
+   * orders the instant flow request -> accept -> pay, so the order is minted
+   * inside `accept`, which is a DOCTOR request the patient is not part of. The
+   * patient therefore never sees `createOrderForConsultation`'s return value.
+   *
+   * This gap was originally left to the `instant_accepted` push notification's
+   * deep link. That is not sufficient, for two compounding reasons: the
+   * notification only ever carried `paymentId`, not the handles; and push has
+   * no credentials configured, so nothing has ever actually been delivered. A
+   * flow whose only path to payment is an undelivered notification is a flow
+   * with no path to payment. `PaymentContract.getCheckoutHandles` was added —
+   * additively, so no blind mirror broke — and the status poll now carries the
+   * handles directly.
+   *
+   * `handles` is `null` whenever there is nothing to pay: no order yet, or the
+   * payment is already captured. Neither value is secret — `gatewayKeyId` is
+   * Razorpay's PUBLISHABLE key, designed to ship in a client bundle, and an
+   * order id is useless without a signed payment. Caching them on this module
+   * was rejected: in-process state a second instance silently gets wrong, for a
+   * fact the payment module already holds durably.
    */
-  payment: { paymentId: string; status: string } | null;
+  payment:
+    | {
+        paymentId: string;
+        status: string;
+        handles: { gatewayOrderId: string; gatewayKeyId: string } | null;
+      }
+    | null;
 }
 
 /** The result of one routing pass. */
@@ -476,10 +492,16 @@ export class InstantService {
         secondsToPay: paymentWindowSeconds,
       },
       consultationId: attempt.consultationId,
-      // The checkout handles a patient needs to open the gateway. See
-      // `InstantConsultStatusView.payment` for why this is the only place
-      // they can currently travel.
-      deepLinkData: { consultationId: attempt.consultationId, paymentId: payment?.paymentId ?? null },
+      // The checkout handles, so a delivered push can deep-link straight into
+      // the gateway. NO LONGER THE ONLY PATH — the status poll carries them too
+      // (see `InstantConsultStatusView.payment`), which matters because push
+      // has no credentials configured and may never arrive.
+      deepLinkData: {
+        consultationId: attempt.consultationId,
+        paymentId: payment?.paymentId ?? null,
+        gatewayOrderId: payment?.handles?.gatewayOrderId ?? null,
+        gatewayKeyId: payment?.handles?.gatewayKeyId ?? null,
+      },
     });
 
     return toInstantRequestView(attempt);
@@ -895,11 +917,37 @@ export class InstantService {
     }
   }
 
-  /** M-12's view of the consultation's payment, or `null`. Never lets a payment-module failure break a status poll. */
-  private async readPayment(consultationId: string): Promise<{ paymentId: string; status: string } | null> {
+  /**
+   * M-12's view of the consultation's payment, plus the checkout handles the
+   * patient needs to open the gateway. `null` on any failure — a payment-module
+   * problem must never break a status poll, because the poll is also how the
+   * patient learns their request was DECLINED.
+   *
+   * The handles are fetched separately and degrade on their own: a patient who
+   * can see `status` but not `handles` is told to retry, which is strictly
+   * better than a poll that 500s.
+   */
+  private async readPayment(
+    consultationId: string,
+  ): Promise<{ paymentId: string; status: string; handles: { gatewayOrderId: string; gatewayKeyId: string } | null } | null> {
     try {
       const payment = await this.payments.getByConsultationId(consultationId);
-      return payment ? { paymentId: payment.paymentId, status: payment.status } : null;
+      if (!payment) return null;
+
+      let handles: { gatewayOrderId: string; gatewayKeyId: string } | null = null;
+      try {
+        const checkout = await this.payments.getCheckoutHandles(consultationId);
+        if (checkout) {
+          handles = { gatewayOrderId: checkout.gatewayOrderId, gatewayKeyId: checkout.gatewayKeyId };
+        }
+      } catch (error) {
+        this.logger.warn(
+          `Could not read checkout handles for consultation ${consultationId}; the patient will see the ` +
+            `payment but cannot open checkout from this poll. ${describeError(error)}`,
+        );
+      }
+
+      return { paymentId: payment.paymentId, status: payment.status, handles };
     } catch (error) {
       this.logger.warn(`Could not read the payment for consultation ${consultationId}: ${describeError(error)}`);
       return null;

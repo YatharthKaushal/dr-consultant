@@ -147,6 +147,12 @@ function buildHarness(overrides: Partial<Harness> = {}) {
       breakdown: { totalPayable: '885.00' },
     })),
     getByConsultationId: jest.fn(async () => ({ paymentId: PAYMENT_ID, status: 'created', paidAt: null })),
+    getCheckoutHandles: jest.fn(async () => ({
+      paymentId: PAYMENT_ID,
+      gatewayOrderId: 'order_test_1',
+      gatewayKeyId: 'rzp_test_key',
+      breakdown: { totalPayable: '885.00' },
+    })),
   };
 
   const presence: Record<string, Fn> = {
@@ -525,7 +531,14 @@ describe('InstantService', () => {
       const h = buildHarness();
       await h.service.accept(ATTEMPT_ID, DOCTOR_ID);
 
-      expect(Object.keys(h.payments).sort()).toEqual(['createOrderForConsultation', 'getByConsultationId']);
+      // Three entries, and only ONE of them writes. `getCheckoutHandles` is a
+      // read added so a polling patient can reach checkout at all; it mints
+      // nothing and captures nothing.
+      expect(Object.keys(h.payments).sort()).toEqual([
+        'createOrderForConsultation',
+        'getByConsultationId',
+        'getCheckoutHandles',
+      ]);
       // No status is driven past `pending_payment` here — `confirmPayment` is
       // reached through M-12's `payment.captured` -> BookingPaymentListener.
       const targets = h.bookings.transitionInstantConsultation.mock.calls.map((call: unknown[]) => (call[0] as { to: string }).to);
@@ -954,6 +967,44 @@ describe('InstantService', () => {
       h.payments.getByConsultationId.mockRejectedValue(new Error('payment module is down'));
 
       await expect(h.service.getStatus(CONSULTATION_ID, PATIENT_ID)).resolves.toMatchObject({ payment: null });
+    });
+
+    /**
+     * *** THE GAP THIS CLOSED. *** The order is minted on the DOCTOR's accept,
+     * so the patient never sees `createOrderForConsultation`'s return value.
+     * Before this, the handles travelled only on a push notification — which
+     * carried just `paymentId`, and which has no credentials configured and so
+     * has never been delivered. A flow whose only route to payment is an
+     * undelivered notification has no route to payment.
+     */
+    it('carries the checkout handles, so a POLLING patient can open the gateway', async () => {
+      const h = buildHarness();
+      h.repo.listAttemptsByConsultation.mockResolvedValue([makeAttempt({ outcome: 'accepted' })]);
+      h.bookings.getBooking.mockResolvedValue(makeBooking({ status: 'pending_payment', doctorId: DOCTOR_ID }));
+
+      const view = await h.service.getStatus(CONSULTATION_ID, PATIENT_ID);
+
+      expect(view.payment?.handles).toEqual({ gatewayOrderId: 'order_test_1', gatewayKeyId: 'rzp_test_key' });
+    });
+
+    /** Degrades on its own: a poll is also how the patient learns they were DECLINED. */
+    it('still reports the payment when only the handles read fails', async () => {
+      const h = buildHarness();
+      h.payments.getCheckoutHandles.mockRejectedValue(new Error('gateway config missing'));
+
+      const view = await h.service.getStatus(CONSULTATION_ID, PATIENT_ID);
+
+      expect(view.payment).toMatchObject({ paymentId: PAYMENT_ID, status: 'created', handles: null });
+    });
+
+    /** Nothing left to pay -> no handles, so a captured payment cannot be charged twice. */
+    it('reports null handles once there is nothing left to pay', async () => {
+      const h = buildHarness();
+      h.payments.getCheckoutHandles.mockResolvedValue(null);
+
+      const view = await h.service.getStatus(CONSULTATION_ID, PATIENT_ID);
+
+      expect(view.payment?.handles).toBeNull();
     });
   });
 

@@ -378,6 +378,63 @@ describe('PaymentService', () => {
   });
 
   /* ================================================================== */
+  /* getCheckoutHandles — the instant flow's only route to the gateway   */
+  /* ================================================================== */
+
+  describe('getCheckoutHandles', () => {
+    /**
+     * FR-10.2 mints the order on the DOCTOR's accept, so the patient never sees
+     * `createOrderForConsultation`'s return value. Without this read they have
+     * no way to open checkout at all.
+     */
+    it('hands back the order id and the PUBLISHABLE key for an unpaid order', async () => {
+      payments.findByConsultationId.mockResolvedValue(
+        paymentRow({ status: 'created', gatewayOrderId: 'order_abc' }),
+      );
+
+      const handles = await service.getCheckoutHandles(CONSULTATION_ID);
+
+      expect(handles?.paymentId).toBe(PAYMENT_ID);
+      expect(handles?.gatewayOrderId).toBe('order_abc');
+      expect(handles?.gatewayKeyId).toBeTruthy();
+      expect(handles?.breakdown.totalPayable).toBe('708.00');
+    });
+
+    it('returns null when no order has been minted yet', async () => {
+      payments.findByConsultationId.mockResolvedValue(paymentRow({ gatewayOrderId: null }));
+      expect(await service.getCheckoutHandles(CONSULTATION_ID)).toBeNull();
+    });
+
+    it('returns null when there is no payment at all', async () => {
+      payments.findByConsultationId.mockResolvedValue(null);
+      expect(await service.getCheckoutHandles(CONSULTATION_ID)).toBeNull();
+    });
+
+    /** Handing a live order back for a captured payment invites a second charge against it. */
+    it.each(['paid', 'refunded', 'partially_refunded'])(
+      'refuses to hand back handles for a %s payment',
+      async (status) => {
+        payments.findByConsultationId.mockResolvedValue(
+          paymentRow({ status, gatewayOrderId: 'order_abc', paidAt: new Date() }),
+        );
+        expect(await service.getCheckoutHandles(CONSULTATION_ID)).toBeNull();
+      },
+    );
+
+    /** The key SECRET and the webhook secret must never appear on a patient-facing response. */
+    it('exposes no secret alongside the publishable key', async () => {
+      payments.findByConsultationId.mockResolvedValue(
+        paymentRow({ status: 'created', gatewayOrderId: 'order_abc' }),
+      );
+
+      const serialised = JSON.stringify(await service.getCheckoutHandles(CONSULTATION_ID));
+
+      expect(serialised).not.toMatch(/secret/i);
+      expect(serialised).not.toContain(process.env.RAZORPAY_KEY_SECRET ?? '__no_secret_set__');
+    });
+  });
+
+  /* ================================================================== */
   /* reconcileWithGateway                                                */
   /* ================================================================== */
 
