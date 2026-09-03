@@ -1,4 +1,5 @@
 import { Injectable } from '@nestjs/common';
+import type { ConsultationStatus } from '../../schema/enums.schema';
 import type { BookingContract, BookingView, BusyInterval, ConsultationSummary, DoctorBusyIntervals } from './booking.contract';
 import { toBookingView, toConsultationSummary } from './booking.mapper';
 import { BookingRepository } from './booking.repository';
@@ -120,5 +121,26 @@ export class BookingFacade implements BookingContract {
   async assignDoctor(consultationId: string, doctorId: string): Promise<BookingView> {
     const row = await this.service.assignDoctor(consultationId, doctorId, { party: 'system', accountId: null });
     return toBookingView(row);
+  }
+
+  /** See `BookingContract#transitionInstantConsultation` — the rule/write split that keeps M-13 out of `consultations`. */
+  async transitionInstantConsultation(input: {
+    consultationId: string;
+    to: 'awaiting_doctor' | 'pending_payment' | 'expired';
+    from: readonly ConsultationStatus[];
+    holdExpiresAt?: Date | null;
+    reason?: string;
+  }): Promise<{ changed: boolean; booking: BookingView | null; refusal?: 'not_found' | 'not_instant' | 'illegal_transition' }> {
+    const result = await this.service.transitionInstantConsultation(input);
+    return {
+      changed: result.changed,
+      booking: result.booking ? toBookingView(result.booking) : null,
+      ...(result.refusal ? { refusal: result.refusal } : {}),
+    };
+  }
+
+  /** See `BookingContract#listExpiredInstantHolds`. */
+  async listExpiredInstantHolds(now: Date, limit: number) {
+    return this.service.listExpiredInstantHolds(now, limit);
   }
 }

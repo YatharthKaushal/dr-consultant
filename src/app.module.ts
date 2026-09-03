@@ -11,6 +11,7 @@ import { CatalogueModule } from './modules/catalogue/catalogue.module';
 import { DoctorModule } from './modules/doctor/doctor.module';
 import { DocumentModule } from './modules/document/document.module';
 import { IdentityModule } from './modules/identity/identity.module';
+import { InstantModule } from './modules/instant/instant.module';
 import { McpModule } from './modules/mcp/mcp.module';
 import { NotificationModule } from './modules/notification/notification.module';
 import { PatientModule } from './modules/patient/patient.module';
@@ -79,6 +80,11 @@ import { ErrorsModule } from './shared/errors/errors.module';
     // readability, not correctness, since Nest resolves the provider graph
     // regardless.
     BookingModule,
+    // M-13: presence and instant consult. After BookingModule and DoctorModule
+    // because it consumes both facades (and PaymentFacade) — ordering is for
+    // readability, not correctness, since Nest resolves the provider graph
+    // regardless.
+    InstantModule,
     HealthModule,
   ],
 })
