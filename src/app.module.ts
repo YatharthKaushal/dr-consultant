@@ -17,6 +17,7 @@ import { NotificationModule } from './modules/notification/notification.module';
 import { PatientModule } from './modules/patient/patient.module';
 import { PaymentModule } from './modules/payment/payment.module';
 import { PricingModule } from './modules/pricing/pricing.module';
+import { PromotionModule } from './modules/promotion/promotion.module';
 import { SearchModule } from './modules/search/search.module';
 import { SearchToolModule } from './modules/search/tools/search-tool.module';
 import { StorageModule } from './modules/storage/storage.module';
@@ -94,6 +95,18 @@ import { ErrorsModule } from './shared/errors/errors.module';
     // readability, not correctness, since Nest resolves the provider graph
     // regardless.
     InstantModule,
+    // Promotions — coupons, vouchers, refer-and-earn and doctor affiliate
+    // commission. Imports NO feature module: it reads booking's consultation
+    // statuses through `PROMOTION_BOOKING_LOOKUP_PORT`, because BOOKING ->
+    // PRICING -> PROMOTION means a direct import back into booking would close
+    // a cycle. `PromotionFacade` is what `modules/pricing` binds at its
+    // `DISCOUNT_PORT`.
+    //
+    // *** AFFILIATES SHIP SWITCHED OFF *** (`promotion.affiliate_enabled`
+    // defaults to `false`, every partner defaults to `paused`). See
+    // `affiliate-partners.schema.ts` for the NMC 2023 reasoning — enabling it is
+    // the client's legal advisor's call, not a developer's.
+    PromotionModule,
     HealthModule,
   ],
 })
