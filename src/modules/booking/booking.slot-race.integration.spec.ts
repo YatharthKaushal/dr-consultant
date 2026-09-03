@@ -124,9 +124,30 @@ describe('Slot race — the partial unique index is the authority (integration)'
     repo = new BookingRepository(db);
   });
 
+  /**
+   * `disconnectDatabase()` is in a `finally`, and that is not tidiness.
+   *
+   * Written as two sequential statements, a throwing `teardown` — a deadlock, a
+   * row deleted from under it, an FK to something another process created —
+   * skips the disconnect entirely, so the `pg` pool stays open, the Jest worker
+   * cannot exit, and Jest force-kills it: "A worker process has failed to exit
+   * gracefully and has been force exited." Observed on a full-suite run here.
+   * That matters more than a warning line, because this suite runs against a
+   * SHARED development database, so teardown failing is a realistic
+   * concurrent-run outcome rather than a hypothetical — and a force-killed
+   * worker is exactly the kind of thing that turns a green suite into a
+   * one-off, unreproducible red.
+   *
+   * The pool must drain whatever happens to the fixtures; a teardown failure
+   * should surface as this suite's own error, not as a leaked handle that
+   * poisons the run.
+   */
   afterAll(async () => {
-    if (db && fixtures) await teardown(db, fixtures);
-    await disconnectDatabase();
+    try {
+      if (db && fixtures) await teardown(db, fixtures);
+    } finally {
+      await disconnectDatabase();
+    }
   });
 
   /** Reads straight from Postgres, bypassing the repository — assertions must not trust the code under test. */
@@ -368,6 +389,67 @@ describe('Slot race — the partial unique index is the authority (integration)'
     // And the freed old slot really can be re-booked by someone else.
     const rebooked = await db.transaction(async (tx) => repo.insert(bookingValues(fixtures.patientBId, oldSlot), tx));
     expect(rebooked.id).toBeDefined();
+  });
+
+  /**
+   * `hasOccupyingOverlap` backs the reschedule slot gate, and it is the only
+   * hand-written SQL in this repository that does interval arithmetic
+   * (`scheduled_start_at + duration_minutes * interval '1 minute'`). A filter
+   * that silently matches nothing would let a reschedule double-book; one that
+   * silently matches everything would make reschedule impossible. Neither
+   * failure is visible to a mocked test, so it is proved here against the real
+   * database — including the exclusion, which is the whole point of the method.
+   */
+  describe('hasOccupyingOverlap — the reschedule slot gate, against real SQL', () => {
+    const BASE = new Date('2027-08-01T09:00:00.000Z');
+    const thirtyMinutesAfter = (d: Date, m: number) => new Date(d.getTime() + m * 60_000);
+    let occupantId: string;
+
+    beforeAll(async () => {
+      // One 30-minute occupying consultation at 09:00, i.e. [09:00, 09:30).
+      const row = await db.transaction(async (tx) =>
+        repo.insert({ ...bookingValues(fixtures.patientAId, BASE, 'scheduled'), holdExpiresAt: null }, tx),
+      );
+      occupantId = row.id;
+    });
+
+    it('reports an EXACT hit', async () => {
+      expect(await repo.hasOccupyingOverlap(fixtures.doctorId, BASE, thirtyMinutesAfter(BASE, 30), null)).toBe(true);
+    });
+
+    it('reports a PARTIAL overlap that starts inside the existing consultation', async () => {
+      const start = thirtyMinutesAfter(BASE, 15); // 09:15 — inside [09:00, 09:30)
+      expect(await repo.hasOccupyingOverlap(fixtures.doctorId, start, thirtyMinutesAfter(start, 30), null)).toBe(true);
+    });
+
+    it('reports a PARTIAL overlap that ENDS inside it — proves the SQL end-time arithmetic, not just the start comparison', async () => {
+      const start = thirtyMinutesAfter(BASE, -15); // 08:45–09:15
+      expect(await repo.hasOccupyingOverlap(fixtures.doctorId, start, thirtyMinutesAfter(start, 30), null)).toBe(true);
+    });
+
+    it('does NOT report an abutting window — the interval is half-open', async () => {
+      const start = thirtyMinutesAfter(BASE, 30); // 09:30, exactly where the other ends
+      expect(await repo.hasOccupyingOverlap(fixtures.doctorId, start, thirtyMinutesAfter(start, 30), null)).toBe(false);
+      const before = thirtyMinutesAfter(BASE, -30); // 08:30–09:00
+      expect(await repo.hasOccupyingOverlap(fixtures.doctorId, before, BASE, null)).toBe(false);
+    });
+
+    it('EXCLUDES the named consultation — this is what lets a booking be moved onto its own slot', async () => {
+      expect(await repo.hasOccupyingOverlap(fixtures.doctorId, BASE, thirtyMinutesAfter(BASE, 30), occupantId)).toBe(false);
+      const overlapping = thirtyMinutesAfter(BASE, 15);
+      expect(
+        await repo.hasOccupyingOverlap(fixtures.doctorId, overlapping, thirtyMinutesAfter(overlapping, 30), occupantId),
+      ).toBe(false);
+    });
+
+    it('ignores a consultation whose status frees the slot, and another doctor entirely', async () => {
+      await repo.updateStatusIfIn(occupantId, ['scheduled'], { status: 'cancelled', cancelledAt: new Date() });
+      expect(await repo.hasOccupyingOverlap(fixtures.doctorId, BASE, thirtyMinutesAfter(BASE, 30), null)).toBe(false);
+
+      await repo.updateStatusIfIn(occupantId, ['cancelled'], { status: 'scheduled', cancelledAt: null });
+      expect(await repo.hasOccupyingOverlap(fixtures.doctorId, BASE, thirtyMinutesAfter(BASE, 30), null)).toBe(true);
+      expect(await repo.hasOccupyingOverlap(fixtures.patientBId, BASE, thirtyMinutesAfter(BASE, 30), null)).toBe(false);
+    });
   });
 
   it('a live hold is NOT a sweep candidate', async () => {

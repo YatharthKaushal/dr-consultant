@@ -94,6 +94,8 @@ function buildHarness(overrides: Partial<Harness> = {}) {
     listForAdmin: jest.fn(async () => []),
     listAdminResolutionQueue: jest.fn(async () => []),
     isSlotOccupied: jest.fn(async () => false),
+    hasOccupyingOverlap: jest.fn(async () => false),
+    findBilledConsultationFee: jest.fn(async () => '750.00'),
   };
 
   const patients: Record<string, Fn> = {
@@ -182,17 +184,48 @@ describe('BookingService.createBooking', () => {
     expect(result.payment.gatewayOrderId).toBe('order_test_1');
   });
 
+  /**
+   * *** THIS ASSERTION USED TO BE FLAKY, AND THE FLAKE WAS REAL. ***
+   *
+   * It read `heldForMinutes = (holdExpiresAt - before) / 60_000` and asserted
+   * `<= 45`, where `before` was sampled in the TEST and `holdExpiresAt` is
+   * built inside `createBooking` from a LATER `new Date()`. So the value is
+   * `45 + elapsed`, and the upper bound only held while `elapsed` rounded to
+   * zero milliseconds — true on an idle machine, false the moment the process
+   * is descheduled mid-call. Under a full-suite run (91 suites across parallel
+   * workers) that happens occasionally, which is exactly the "passes in
+   * isolation, fails once under load" signature. Measured directly: with
+   * ~111ms of elapsed time the expression evaluates to 45.00185.
+   *
+   * Bounding it on BOTH sides of the call makes it deterministic without
+   * weakening it — the hold must still be exactly 45 minutes past a clock read
+   * taken during the call, which is the property the config key is about.
+   */
   it('sets hold_expires_at from booking.slot_hold_minutes', async () => {
     const h = buildHarness();
     h.appConfig.getNumber.mockResolvedValueOnce(45);
 
     const before = Date.now();
     await h.service.createBooking(input, PATIENT);
+    const after = Date.now();
     const inserted = h.repo.insert.mock.calls[0][0] as { holdExpiresAt: Date };
 
-    const heldForMinutes = (inserted.holdExpiresAt.getTime() - before) / 60_000;
-    expect(heldForMinutes).toBeGreaterThan(44);
-    expect(heldForMinutes).toBeLessThanOrEqual(45);
+    const fortyFiveMinutes = 45 * 60_000;
+    expect(inserted.holdExpiresAt.getTime()).toBeGreaterThanOrEqual(before + fortyFiveMinutes);
+    expect(inserted.holdExpiresAt.getTime()).toBeLessThanOrEqual(after + fortyFiveMinutes);
+  });
+
+  it('reads the hold length from the config key, and falls back when it is non-positive', async () => {
+    const h = buildHarness();
+    h.appConfig.getNumber.mockResolvedValueOnce(0);
+
+    const before = Date.now();
+    await h.service.createBooking(input, PATIENT);
+    const inserted = h.repo.insert.mock.calls[0][0] as { holdExpiresAt: Date };
+
+    // A `0`/negative config value must not mint an already-expired hold.
+    expect(h.appConfig.getNumber).toHaveBeenCalledWith('booking.slot_hold_minutes', 20);
+    expect(inserted.holdExpiresAt.getTime()).toBeGreaterThanOrEqual(before + 20 * 60_000);
   });
 
   it('writes the creation audit entry inside the transaction', async () => {
@@ -272,6 +305,24 @@ describe('BookingService.createBooking', () => {
     await expect(
       h.service.createBooking({ ...input, concernId: '99999999-9999-4999-8999-999999999999' }, PATIENT),
     ).rejects.toMatchObject({ response: { code: 'CONCERN_NOT_BOOKABLE' } });
+  });
+
+  /**
+   * A reference-code allocation failure is a transient SERVER problem, not a
+   * client one. It used to reuse `INVALID_STATE_TRANSITION` — a 409 whose whole
+   * meaning is "this booking is in a state that forbids what you asked", and
+   * which clients read `currentStatus` off — for a booking that has no state
+   * yet and a caller who did nothing wrong.
+   */
+  it('reports a reference-code allocation failure as a retryable server error, not an invalid state transition', async () => {
+    const h = buildHarness();
+    h.repo.referenceCodeExists.mockResolvedValue(true); // every candidate collides
+
+    const error = await h.service.createBooking(input, PATIENT).catch((e: unknown) => e);
+
+    expect(error).toMatchObject({ status: 503, response: { code: 'REFERENCE_ALLOCATION_FAILED' } });
+    expect(JSON.stringify(error)).not.toContain('currentStatus');
+    expect(h.repo.insert).not.toHaveBeenCalled();
   });
 
   /* ── THE PAYMENT PORT MUST NEVER LEAK ───────────────────────────────────── */
@@ -424,6 +475,47 @@ describe('BookingService.cancel', () => {
     expect(h.audit.write).not.toHaveBeenCalledWith(
       expect.objectContaining({ entityType: 'booking_admin_resolution' }),
     );
+  });
+
+  /**
+   * The refund base must be what the patient WAS BILLED, not the doctor's
+   * current list price. A doctor who lowers their fee mid-flight would
+   * otherwise shrink every pending cancellation's refund while the audit entry
+   * still claimed the full percentage — a short refund that reads as complete.
+   */
+  it('prices the refund off the BILLED fee, not the doctor’s current profile fee', async () => {
+    const h = buildHarness();
+    const start = new Date(Date.now() + 30 * 3_600_000); // 30h notice -> 100% tier
+    h.repo.findByIdForUpdate.mockResolvedValueOnce(makeRow({ scheduledStartAt: start }));
+    h.repo.updateStatusIfIn.mockResolvedValueOnce(
+      makeRow({ status: 'cancelled', scheduledStartAt: start, cancelledByParty: 'patient' }),
+    );
+    // The patient paid 750; the doctor has since dropped their price to 500.
+    h.repo.findBilledConsultationFee.mockResolvedValueOnce('750.00');
+    h.doctors.getPublicProfile.mockResolvedValue({
+      id: DOCTOR_ID,
+      consultationFeeInr: '500.00',
+      consultationDurationMinutes: 30,
+      specialties: [{ id: SPECIALTY_ID, code: 'gen', name: 'General', isPrimary: true }],
+    });
+
+    await h.service.cancel(CONSULTATION_ID, PATIENT, null);
+
+    expect(h.payments.createRefund).toHaveBeenCalledWith(expect.objectContaining({ amount: '750.00' }));
+  });
+
+  it('falls back to the profile fee only when the consultation has no billed amount at all', async () => {
+    const h = buildHarness();
+    const start = new Date(Date.now() + 30 * 3_600_000);
+    h.repo.findByIdForUpdate.mockResolvedValueOnce(makeRow({ scheduledStartAt: start }));
+    h.repo.updateStatusIfIn.mockResolvedValueOnce(
+      makeRow({ status: 'cancelled', scheduledStartAt: start, cancelledByParty: 'patient' }),
+    );
+    h.repo.findBilledConsultationFee.mockResolvedValueOnce(null);
+
+    await h.service.cancel(CONSULTATION_ID, PATIENT, null);
+
+    expect(h.payments.createRefund).toHaveBeenCalledWith(expect.objectContaining({ amount: '750.00' }));
   });
 
   it('makes no refund call when nothing was ever captured', async () => {
@@ -601,6 +693,70 @@ describe('BookingService.reschedule', () => {
       response: { code: 'DOCTOR_NOT_BOOKABLE' },
     });
   });
+
+  /* ── THE BOOKING BEING MOVED MUST NOT BLOCK ITS OWN MOVE ─────────────────── */
+
+  /**
+   * `isSlotBookable(doctorId, startsAt)` cannot be told to ignore one
+   * consultation, so the appointment being rescheduled is itself one of the
+   * doctor's busy intervals and the advisory pre-check answers `already_taken`
+   * against the patient's own booking. Reproduced live before the fix:
+   * rescheduling a 09:00 30-minute booking to 09:00, and to 09:15, both
+   * returned 409 `SLOT_NOT_BOOKABLE / already_taken`.
+   */
+  it('allows a move to the SAME slot — the only thing occupying it is the booking being moved', async () => {
+    const h = buildHarness();
+    h.availability.isSlotBookable.mockResolvedValueOnce({ bookable: false, reason: 'already_taken' });
+    h.repo.hasOccupyingOverlap.mockResolvedValueOnce(false); // nobody else is there
+
+    const start = new Date('2026-03-02T10:00:00.000Z');
+    await expect(h.service.reschedule(CONSULTATION_ID, PATIENT, start)).resolves.toBeDefined();
+    expect(h.repo.insert).toHaveBeenCalled();
+  });
+
+  it('allows a move to a slot that OVERLAPS the booking being moved (10:00 → 10:15 on a 30-minute consult)', async () => {
+    const h = buildHarness();
+    h.availability.isSlotBookable.mockResolvedValueOnce({ bookable: false, reason: 'already_taken' });
+    h.repo.hasOccupyingOverlap.mockResolvedValueOnce(false);
+
+    const overlapping = new Date('2026-03-02T10:15:00.000Z');
+    await expect(h.service.reschedule(CONSULTATION_ID, PATIENT, overlapping)).resolves.toBeDefined();
+
+    // The exclusion is what makes it legal: the row being moved is excluded,
+    // and the window checked is the one the REPLACEMENT will occupy.
+    expect(h.repo.hasOccupyingOverlap).toHaveBeenCalledWith(
+      DOCTOR_ID,
+      overlapping,
+      new Date(overlapping.getTime() + 30 * 60_000),
+      CONSULTATION_ID,
+    );
+  });
+
+  it('still refuses when SOMEBODY ELSE occupies the target window — the exclusion loosens nothing', async () => {
+    const h = buildHarness();
+    h.availability.isSlotBookable.mockResolvedValueOnce({ bookable: false, reason: 'already_taken' });
+    h.repo.hasOccupyingOverlap.mockResolvedValueOnce(true); // another patient is there
+
+    await expect(h.service.reschedule(CONSULTATION_ID, PATIENT, NEW_START)).rejects.toMatchObject({
+      status: 409,
+      response: { code: 'SLOT_NOT_BOOKABLE', reason: 'already_taken' },
+    });
+    expect(h.repo.insert).not.toHaveBeenCalled();
+  });
+
+  it.each(['blocked', 'outside_working_hours', 'too_soon', 'too_far_ahead', 'doctor_not_bookable'] as const)(
+    'does not second-guess the %s verdict — only already_taken can be caused by the moved row',
+    async (reason) => {
+      const h = buildHarness();
+      h.availability.isSlotBookable.mockResolvedValueOnce({ bookable: false, reason });
+
+      await expect(h.service.reschedule(CONSULTATION_ID, PATIENT, NEW_START)).rejects.toMatchObject({
+        response: { code: 'SLOT_NOT_BOOKABLE', reason },
+      });
+      expect(h.repo.hasOccupyingOverlap).not.toHaveBeenCalled();
+      expect(h.repo.insert).not.toHaveBeenCalled();
+    },
+  );
 
   it.each(['pending_payment', 'completed', 'cancelled', 'expired', 'no_show'] as const)(
     'refuses to reschedule from %s',

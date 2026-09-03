@@ -3,6 +3,7 @@ import type { BookingContract, BookingView, BusyInterval, ConsultationSummary, D
 import { toBookingView, toConsultationSummary } from './booking.mapper';
 import { BookingRepository } from './booking.repository';
 import { BookingService } from './booking.service';
+import { BookingSlotHoldService } from './booking-slot-hold.service';
 
 /**
  * Booking's single public surface (`backend/README.md` §2).
@@ -45,6 +46,7 @@ export class BookingFacade implements BookingContract {
   constructor(
     private readonly repo: BookingRepository,
     private readonly service: BookingService,
+    private readonly holds: BookingSlotHoldService,
   ) {}
 
   /* ── availability's BUSY_INTERVAL_PROVIDER ─────────────────────────────── */
@@ -94,6 +96,13 @@ export class BookingFacade implements BookingContract {
   async getBooking(consultationId: string): Promise<BookingView | null> {
     const row = await this.repo.findById(consultationId);
     return row ? toBookingView(row) : null;
+  }
+
+  /* ── M-12 (Payments) ───────────────────────────────────────────────────── */
+
+  /** See `BookingContract#confirmPayment` — the paid -> scheduled transition, idempotent, with the late-capture path underneath it. */
+  async confirmPayment(consultationId: string): Promise<BookingView> {
+    return toBookingView(await this.holds.confirmPayment(consultationId));
   }
 
   /* ── M-13 (Instant Consult) ────────────────────────────────────────────── */

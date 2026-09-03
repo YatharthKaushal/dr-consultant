@@ -117,6 +117,40 @@ export interface BookingContract {
   /** The full booking view by id, or `null`. For M-12/M-14/M-15/M-19, which each hang their own record off a consultation id. */
   getBooking(consultationId: string): Promise<BookingView | null>;
 
+  /* ── For M-12 (Payments) ───────────────────────────────────────────────── */
+
+  /**
+   * *** THE PAID -> SCHEDULED TRANSITION. M-12 CALLS THIS WHEN A PAYMENT IS
+   * CAPTURED. ***
+   *
+   * Booking's single most important state change had NO public entry point:
+   * `BookingSlotHoldService.confirmPayment` existed and was documented as
+   * handling "the ordinary case" of a capture webhook, but it was not on this
+   * contract, so nothing outside this module could reach it (`backend/
+   * README.md` §2 — a module's only public surface is its facade). The only
+   * path from a captured payment to a `scheduled` booking was therefore the
+   * expiry sweep, which by construction looks only at holds that have ALREADY
+   * LAPSED — so a patient who paid successfully stayed `pending_payment` until
+   * their hold ran out (default 20 minutes) and the next sweep tick picked it
+   * up. The slot was never lost, but the booking was not confirmed, and
+   * `reschedule` (which requires `scheduled`) was refused for that whole
+   * window.
+   *
+   * Idempotent by design, because a gateway webhook can arrive more than once
+   * and can arrive late:
+   *   `pending_payment` -> `scheduled`, hold cleared.
+   *   `scheduled`       -> returned unchanged (a replayed webhook is not an error).
+   *   hold already gone -> the residual late-capture path: re-acquire the slot
+   *                        atomically if it is still free, otherwise file for
+   *                        admin resolution with the money HELD, never refunded.
+   *
+   * WIRING NOTE FOR THE COORDINATOR: M-12 does not call this yet. Booking must
+   * not reach into payment to arrange it (the dependency runs booking ->
+   * payment, via `BOOKING_PAYMENT_PORT`), so closing the loop is one call from
+   * M-12's capture path — which is that module's change to make, not this one's.
+   */
+  confirmPayment(consultationId: string): Promise<BookingView>;
+
   /* ── For M-13 (Instant Consult) ────────────────────────────────────────── */
 
   /**

@@ -186,6 +186,39 @@ export class BookingRepository {
   }
 
   /**
+   * The consultation fee THIS consultation was actually billed at, read off its
+   * own `payments` row.
+   *
+   * *** WHY THIS IS READ AND NOT TAKEN FROM THE DOCTOR'S PROFILE. *** The
+   * refund base has to be what the patient PAID, and a doctor's
+   * `consultation_fee_inr` is live, mutable configuration — a doctor who
+   * lowers their fee after a booking would silently shrink the refund base for
+   * every cancellation still in flight, so a patient owed 100% of the ₹750 they
+   * paid would be automatically refunded 100% of the NEW ₹500 and the audit
+   * entry would still read `refundPct: 100`. A short refund that looks
+   * complete in the audit trail is the worst shape this could take. (Raising
+   * the fee fails safe in the other direction: M-12 refuses a refund larger
+   * than the capture, so it lands in the admin queue instead.)
+   *
+   * This is the SECOND deliberate cross-module read of `payments` in this file
+   * — see the class doc comment for the first (`gateway_order_id`) and the
+   * reasoning that licenses it. `BookingPaymentPort.getByConsultationId`
+   * returns `{paymentId, status, paidAt}` and no amounts, and that signature is
+   * fixed by the parallel M-12 worktree, so the fee is not reachable through
+   * the port. One column, read-only. It is the same column M-12's own refund
+   * service recomputes its capture ceiling from, so the two agree by
+   * construction.
+   */
+  async findBilledConsultationFee(consultationId: string, executor: Executor = this.db): Promise<string | null> {
+    const [row] = await executor
+      .select({ consultationFee: paymentsTable.consultationFee })
+      .from(paymentsTable)
+      .where(eq(paymentsTable.consultationId, consultationId))
+      .limit(1);
+    return row?.consultationFee ?? null;
+  }
+
+  /**
    * Whether `(doctorId, scheduledStartAt)` is occupied by a LIVE consultation
    * other than `excludeConsultationId`. Advisory only — a pre-check for a
    * clean error message. The partial unique index remains the authority, and
@@ -206,6 +239,52 @@ export class BookingRepository {
           eq(consultationsTable.scheduledStartAt, scheduledStartAt),
           inArray(consultationsTable.status, [...SLOT_OCCUPYING_STATUSES]),
           excludeConsultationId ? ne(consultationsTable.id, excludeConsultationId) : undefined,
+        ),
+      )
+      .limit(1);
+    return row !== undefined;
+  }
+
+  /**
+   * Whether any OTHER live consultation of this doctor's overlaps the half-open
+   * interval `[startsAt, endsAt)` — the same occupying-status set and the same
+   * overlap rule `availability-slot.engine.ts#evaluateSlotBookability` applies
+   * to its busy intervals, but with one consultation excluded.
+   *
+   * *** WHY THIS EXISTS. *** `AvailabilityContract.isSlotBookable` takes only
+   * `(doctorId, startsAtUtc)` — it has no way to say "ignore this one booking".
+   * So during a RESCHEDULE the appointment being moved is itself one of the
+   * doctor's busy intervals, and the advisory pre-check answers `already_taken`
+   * against the patient's own booking, refusing to move it to the same slot or
+   * to any slot inside its own duration. `booking.service.ts#reschedule` uses
+   * this to re-test that ONE verdict with the moved row excluded; every other
+   * `SlotBookability` reason is unrelated to the moved row and still stands.
+   *
+   * Deliberately NOT a widening of the availability contract: which
+   * consultation is being moved is booking's own fact about booking's own
+   * table, and `consultations` is this module's (`backend/README.md` §2).
+   */
+  async hasOccupyingOverlap(
+    doctorId: string,
+    startsAt: Date,
+    endsAt: Date,
+    excludeConsultationId: string | null,
+    executor: Executor = this.db,
+  ): Promise<boolean> {
+    const [row] = await executor
+      .select({ id: consultationsTable.id })
+      .from(consultationsTable)
+      .where(
+        and(
+          eq(consultationsTable.doctorId, doctorId),
+          isNotNull(consultationsTable.scheduledStartAt),
+          inArray(consultationsTable.status, [...SLOT_OCCUPYING_STATUSES]),
+          excludeConsultationId ? ne(consultationsTable.id, excludeConsultationId) : undefined,
+          // Half-open overlap: existing.start < new.end AND existing.end > new.start.
+          // `existing.end` is computed in SQL from the row's OWN duration, so a
+          // long consultation that started before `startsAt` is still caught.
+          lt(consultationsTable.scheduledStartAt, endsAt),
+          sql`${consultationsTable.scheduledStartAt} + (${consultationsTable.durationMinutes} * interval '1 minute') > ${startsAt}`,
         ),
       )
       .limit(1);
