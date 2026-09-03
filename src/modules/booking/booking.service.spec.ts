@@ -96,6 +96,8 @@ function buildHarness(overrides: Partial<Harness> = {}) {
     isSlotOccupied: jest.fn(async () => false),
     hasOccupyingOverlap: jest.fn(async () => false),
     findBilledConsultationFee: jest.fn(async () => '750.00'),
+    // ADDITIVE (M-13): the candidate query behind the instant payment sweep.
+    listExpiredInstantHolds: jest.fn(async () => []),
   };
 
   const patients: Record<string, Fn> = {
@@ -887,5 +889,142 @@ describe('BookingService instant consultations', () => {
     await expect(
       h.service.assignDoctor(CONSULTATION_ID, DOCTOR_ID, { party: 'system', accountId: null }),
     ).rejects.toMatchObject({ response: { code: 'INVALID_STATE_TRANSITION' } });
+  });
+});
+
+/**
+ * ADDITIVE (M-13). The narrow status-move method M-13 drives the instant
+ * lifecycle through, rather than reaching into `consultations` itself.
+ *
+ * The property worth guarding is the RESTRICTION, not the happy path: this is
+ * the only method here that takes a target status as an argument, so the tests
+ * below are mostly about what it refuses to do.
+ */
+describe('BookingService.transitionInstantConsultation', () => {
+  const AWAITING = { consultationId: CONSULTATION_ID, to: 'awaiting_doctor' as const, from: ['pending_payment' as const] };
+
+  it('moves an instant consultation and audits before/after transactionally', async () => {
+    const h = buildHarness();
+    h.repo.findByIdForUpdate.mockResolvedValueOnce(makeRow({ mode: 'instant', status: 'pending_payment' }));
+
+    const result = await h.service.transitionInstantConsultation({ ...AWAITING, holdExpiresAt: null, reason: 'routing' });
+
+    expect(result.changed).toBe(true);
+    expect(h.repo.updateStatusIfIn).toHaveBeenCalledWith(
+      CONSULTATION_ID,
+      ['pending_payment'],
+      { status: 'awaiting_doctor', holdExpiresAt: null },
+      h.db,
+    );
+    expect(h.audit.write).toHaveBeenCalledWith(
+      expect.objectContaining({
+        actorType: 'system',
+        metadata: expect.objectContaining({
+          change: 'instant_transition',
+          before: 'pending_payment',
+          after: 'awaiting_doctor',
+          reason: 'routing',
+        }),
+      }),
+      h.db,
+    );
+  });
+
+  it('takes the ROW LOCK first, like every other transition in this service', async () => {
+    const h = buildHarness();
+    h.repo.findByIdForUpdate.mockResolvedValueOnce(makeRow({ mode: 'instant', status: 'pending_payment' }));
+
+    await h.service.transitionInstantConsultation(AWAITING);
+
+    expect(h.repo.findByIdForUpdate).toHaveBeenCalledWith(CONSULTATION_ID, h.db);
+  });
+
+  it('*** REFUSES A SCHEDULED CONSULTATION *** — it can never become a general status setter', async () => {
+    const h = buildHarness();
+    h.repo.findByIdForUpdate.mockResolvedValueOnce(makeRow({ mode: 'scheduled', status: 'pending_payment' }));
+
+    const result = await h.service.transitionInstantConsultation(AWAITING);
+
+    // Otherwise this would route around cancel/reschedule/no-show and their
+    // policies.
+    expect(result).toMatchObject({ changed: false, refusal: 'not_instant' });
+    expect(h.repo.updateStatusIfIn).not.toHaveBeenCalled();
+    expect(h.audit.write).not.toHaveBeenCalled();
+  });
+
+  it('enforces the CALLER-supplied from-set — M-13 owns the state machine, this module owns the lock', async () => {
+    const h = buildHarness();
+    h.repo.findByIdForUpdate.mockResolvedValueOnce(makeRow({ mode: 'instant', status: 'cancelled' }));
+    h.repo.updateStatusIfIn.mockResolvedValueOnce(undefined);
+
+    const result = await h.service.transitionInstantConsultation(AWAITING);
+
+    expect(result).toMatchObject({ changed: false, refusal: 'illegal_transition' });
+    expect(h.audit.write).not.toHaveBeenCalled();
+  });
+
+  it('REFUSES rather than throws, so M-13s sweeps are not derailed by one candidate', async () => {
+    const h = buildHarness();
+    h.repo.findByIdForUpdate.mockResolvedValueOnce(undefined);
+
+    await expect(h.service.transitionInstantConsultation(AWAITING)).resolves.toEqual({
+      changed: false,
+      booking: null,
+      refusal: 'not_found',
+    });
+  });
+
+  it('is an idempotent no-op when already in the target status, and writes no audit row', async () => {
+    const h = buildHarness();
+    h.repo.findByIdForUpdate.mockResolvedValueOnce(makeRow({ mode: 'instant', status: 'awaiting_doctor' }));
+
+    const result = await h.service.transitionInstantConsultation(AWAITING);
+
+    expect(result.changed).toBe(false);
+    expect(result.refusal).toBeUndefined();
+    expect(h.repo.updateStatusIfIn).not.toHaveBeenCalled();
+    expect(h.audit.write).not.toHaveBeenCalled();
+  });
+
+  it('leaves the hold ALONE when holdExpiresAt is omitted — `null` is a meaningful value, so presence decides, not truthiness', async () => {
+    const h = buildHarness();
+    h.repo.findByIdForUpdate.mockResolvedValueOnce(makeRow({ mode: 'instant', status: 'awaiting_doctor' }));
+
+    await h.service.transitionInstantConsultation({
+      consultationId: CONSULTATION_ID,
+      to: 'expired',
+      from: ['awaiting_doctor'],
+    });
+
+    expect(h.repo.updateStatusIfIn).toHaveBeenCalledWith(CONSULTATION_ID, ['awaiting_doctor'], { status: 'expired' }, h.db);
+  });
+
+  it('sets a payment hold when M-13 hands it one (the accept-then-pay window)', async () => {
+    const h = buildHarness();
+    const payBy = new Date('2026-03-02T10:05:00.000Z');
+    h.repo.findByIdForUpdate.mockResolvedValueOnce(makeRow({ mode: 'instant', status: 'awaiting_doctor' }));
+
+    await h.service.transitionInstantConsultation({
+      consultationId: CONSULTATION_ID,
+      to: 'pending_payment',
+      from: ['awaiting_doctor'],
+      holdExpiresAt: payBy,
+    });
+
+    expect(h.repo.updateStatusIfIn).toHaveBeenCalledWith(
+      CONSULTATION_ID,
+      ['awaiting_doctor'],
+      { status: 'pending_payment', holdExpiresAt: payBy },
+      h.db,
+    );
+  });
+
+  it('lists expired instant holds through the repository for M-13s payment sweep', async () => {
+    const h = buildHarness();
+    const now = new Date('2026-03-02T11:00:00.000Z');
+
+    await h.service.listExpiredInstantHolds(now, 100);
+
+    expect(h.repo.listExpiredInstantHolds).toHaveBeenCalledWith(now, 100);
   });
 });
