@@ -278,7 +278,28 @@ export class PricingService {
         await this.discounts.confirm({
           consultationId: input.consultationId,
           paymentId: input.paymentId,
-          capturedComponents: components.map((row) => ({ code: row.code, amount: row.lineTotal })),
+          // *** GROSS, NOT `lineTotal`. THE CONVENTION IS LOAD-BEARING. ***
+          //
+          // `line_total` is taxable value PLUS tax, and it is already NET of any
+          // discount. Passing it made the affiliate commission base wrong twice
+          // over: it put GST INTO the base -- which promotion's own
+          // `promotion-discount.util.ts` states must never happen ("GST IS NEVER
+          // A BASE"; paying commission out of collected tax is not ours to do) --
+          // and it let `net_platform_margin` subtract the discount a SECOND time,
+          // because that base is defined as the convenience fee LESS the
+          // discount and promotions applies that subtraction itself.
+          //
+          // `gross_amount` is pre-discount and pre-tax, which is what every one
+          // of promotion's three bases actually wants:
+          //     net_platform_margin  = gross - discount   (promotions subtracts)
+          //     convenience_fee      = gross
+          //     consultation_fee     = gross
+          //
+          // The frozen port carries one amount per component, so it can only
+          // carry one convention; gross is the one that serves all three. Do not
+          // "improve" this to a net or tax-inclusive figure without changing
+          // `affiliate.service.ts#resolveBasePaise` in the same commit.
+          capturedComponents: components.map((row) => ({ code: row.code, amount: row.grossAmount })),
         });
       } catch (error) {
         this.logger.error(

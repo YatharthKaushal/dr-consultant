@@ -386,6 +386,54 @@ describe('PricingService', () => {
       expect(audit.write).not.toHaveBeenCalled();
     });
 
+    /**
+     * *** THE COMMISSION-BASE CONVENTION. THIS WAS A REAL BUG. ***
+     *
+     * The seam carries ONE amount per component, so it can carry only one
+     * convention, and promotions reads it as GROSS — pre-discount, pre-tax.
+     * Passing `lineTotal` instead (taxable value plus tax, already net of the
+     * discount) was wrong twice over: it put GST into the affiliate commission
+     * base, which promotions' own util states must never happen, and it let
+     * `net_platform_margin` subtract the discount a SECOND time, because that
+     * base is the convenience fee LESS the discount and promotions applies that
+     * subtraction itself.
+     *
+     * With a 100.00 convenience fee, an 18% GST and a 50.00 discount, the three
+     * candidate figures are 100.00 (gross), 50.00 (taxable) and 59.00
+     * (lineTotal). Only gross lets promotions arrive at the correct 50.00 base.
+     */
+    it('passes each component GROSS — never lineTotal, which would tax the commission base', async () => {
+      // Only the four money columns matter here; the rest of the row is noise.
+      quotes.findComponents.mockResolvedValue([
+        { code: 'convenience_fee', grossAmount: '100.00', discountAmount: '50.00', taxableValue: '50.00', lineTotal: '59.00' },
+      ] as unknown as Awaited<ReturnType<typeof quotes.findComponents>>);
+
+      await service.markConsumed({ quoteId: 'q1', consultationId: 'c1', paymentId: 'p1' });
+
+      expect(discounts.confirm).toHaveBeenCalledWith(
+        expect.objectContaining({
+          capturedComponents: [{ code: 'convenience_fee', amount: '100.00' }],
+        }),
+      );
+    });
+
+    it('does not leak a tax-inclusive or discounted figure into the commission base', async () => {
+      // Only the four money columns matter here; the rest of the row is noise.
+      quotes.findComponents.mockResolvedValue([
+        { code: 'convenience_fee', grossAmount: '100.00', discountAmount: '50.00', taxableValue: '50.00', lineTotal: '59.00' },
+      ] as unknown as Awaited<ReturnType<typeof quotes.findComponents>>);
+
+      await service.markConsumed({ quoteId: 'q1', consultationId: 'c1', paymentId: 'p1' });
+
+      const sent = (
+        discounts.confirm.mock.calls[0][0] as unknown as {
+          capturedComponents: ReadonlyArray<{ amount: string }>;
+        }
+      ).capturedComponents;
+      expect(sent.map((c) => c.amount)).not.toContain('59.00'); // lineTotal — carries GST
+      expect(sent.map((c) => c.amount)).not.toContain('50.00'); // taxableValue — already net
+    });
+
     /** The money is already captured; a promotions failure must not rewrite that outcome. */
     it('still reports success when confirming the discount throws', async () => {
       discounts.confirm.mockRejectedValue(new Error('promotions is down'));

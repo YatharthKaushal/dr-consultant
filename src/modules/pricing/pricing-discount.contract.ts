@@ -138,6 +138,17 @@ export interface DiscountPort {
   confirm(input: {
     consultationId: string;
     paymentId: string;
+    /**
+     * Each component's GROSS amount — PRE-DISCOUNT and PRE-TAX.
+     *
+     * *** THE CONVENTION IS LOAD-BEARING AND WAS ONCE WRONG. *** Passing
+     * `line_total` here (taxable value plus tax, already net of discount) puts
+     * GST into the affiliate commission base and lets `net_platform_margin`
+     * subtract the discount a second time, because that base is defined as the
+     * convenience fee LESS the discount and the promotion side applies that
+     * subtraction itself. Gross is the only convention that serves all three
+     * bases through a port that carries one amount per component.
+     */
     capturedComponents?: ReadonlyArray<{ code: string; amount: string }>;
   }): Promise<{ reservationId: string; status: 'consumed' } | null>;
   release(input: { consultationId: string; reason: string }): Promise<{ reservationId: string; status: 'released' } | null>;
