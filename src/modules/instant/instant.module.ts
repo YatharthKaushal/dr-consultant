@@ -8,6 +8,8 @@ import { InstantDoctorController } from './instant-doctor.controller';
 import { InstantEventBus } from './instant-event.bus';
 import { InstantExpiryService } from './instant-expiry.service';
 import { InstantPresenceService } from './instant-presence.service';
+import { NotificationFacade } from '../notification/notification.facade';
+import { NotificationModule } from '../notification/notification.module';
 import { NOTIFICATION_PORT } from './instant.constants';
 import { InstantController } from './instant.controller';
 import { InstantFacade } from './instant.facade';
@@ -53,14 +55,20 @@ import { UnavailableNotificationProvider } from './unavailable-notification.prov
  * ---------------------------------------------------------------------------
  * *** `NOTIFICATION_PORT` IS THE M-08 SEAM. ***
  *
- * Bound to `UnavailableNotificationProvider`, a null object that returns
- * `{ queued: false, reason: 'provider_unavailable' }` and — unlike every other
- * null object in this codebase — NEVER THROWS. *** M-13 IS FULLY FUNCTIONAL
- * WITHOUT M-08: *** SSE is the primary channel for a doctor with the app open,
- * which is the whole population Available Now describes, and push is the
- * fallback for a backgrounded one. Post-merge the COORDINATOR rebinds this one
- * line to `NotificationFacade`, which satisfies `NotificationPort`
- * structurally — see `instant-notification.contract.ts`.
+ * *** REBOUND. *** Now bound to `NotificationFacade` (M-08 merged), which
+ * satisfies `NotificationPort` structurally — no adapter, no cast — because
+ * this module's local mirror in `instant-notification.contract.ts` and M-08's
+ * own `NotificationContract` were frozen to the same shape before either was
+ * written. The handover was the one line it was designed to be.
+ *
+ * `UnavailableNotificationProvider` stays in the tree, unbound: it is the null
+ * object this module was built and tested against, and rebinding it here is
+ * the hard kill-switch that takes push out of the instant path at the DI
+ * level. It returns `{ queued: false, reason: 'provider_unavailable' }` and —
+ * unlike every other null object in this codebase — NEVER THROWS, because
+ * *** M-13 IS FULLY FUNCTIONAL WITHOUT M-08: *** SSE is the primary channel
+ * for a doctor with the app open, which is the whole population Available Now
+ * describes, and push is only the fallback for a backgrounded one.
  *
  * ---------------------------------------------------------------------------
  * *** SINGLE INSTANCE. THIS IS A DECISION, NOT AN OVERSIGHT. ***
@@ -89,12 +97,12 @@ import { UnavailableNotificationProvider } from './unavailable-notification.prov
  * is the single thing standing between this module and horizontal scaling.
  */
 @Module({
-  imports: [BookingModule, DoctorModule, PaymentModule],
+  imports: [BookingModule, DoctorModule, PaymentModule, NotificationModule],
   controllers: [InstantController, InstantDoctorController, InstantAdminController],
   providers: [
     InstantRepository,
     InstantEventBus,
-    { provide: NOTIFICATION_PORT, useClass: UnavailableNotificationProvider },
+    { provide: NOTIFICATION_PORT, useExisting: NotificationFacade },
     InstantConfigService,
     InstantPresenceService,
     InstantService,
