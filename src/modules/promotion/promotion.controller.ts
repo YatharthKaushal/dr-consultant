@@ -20,6 +20,15 @@ import { PROMOTION_DEFAULT_CURRENCY } from './promotion.constants';
  *
  * ── WHAT IS DELIBERATELY NOT HERE ─────────────────────────────────────────
  *
+ * The public link-slug exchange is NOT here either, and that is structural
+ * rather than stylistic: `AccountTypeGuard` reads `@AccountType(...)` off the
+ * HANDLER OR THE CLASS and does not consult `@Public()`, so a `@Public()` route
+ * inside this class-level `@AccountType('patient')` controller would still be
+ * rejected with `WRONG_ACCOUNT_TYPE` — it has no `request.auth` to match. It
+ * therefore lives in `PromotionLinkController`, which carries no class-level
+ * account type at all. (Fixing the guard instead was rejected: `shared/auth` is
+ * touched by every parallel worktree and this module does not need it changed.)
+ *
  * There is NO `reserve`, `confirm` or `release` route. Those are called by
  * PRICING through `PromotionFacade`, inside a checkout it orchestrates — a
  * patient-triggerable `reserve` would let anyone pin a discount against a

@@ -43,11 +43,6 @@ export class ReferralRepository {
     return row;
   }
 
-  async findEventById(id: string, executor: Executor = this.db): Promise<ReferralEventRow | null> {
-    const [row] = await executor.select().from(referralEventsTable).where(eq(referralEventsTable.id, id)).limit(1);
-    return row ?? null;
-  }
-
   /** Has this patient ever been a referee? The pre-check in front of the index — advisory, never authoritative. */
   async findEventByReferee(refereePatientId: string, executor: Executor = this.db): Promise<ReferralEventRow | null> {
     const [row] = await executor
@@ -67,15 +62,6 @@ export class ReferralRepository {
     return row ?? null;
   }
 
-  async findEventByConsultation(consultationId: string, executor: Executor = this.db): Promise<ReferralEventRow | null> {
-    const [row] = await executor
-      .select()
-      .from(referralEventsTable)
-      .where(eq(referralEventsTable.consultationId, consultationId))
-      .limit(1);
-    return row ?? null;
-  }
-
   /**
    * *** THE PER-REFERRER CAP. *** How many of one patient's referrals have
    * actually QUALIFIED. Counted, never stored — the same reasoning as the
@@ -90,20 +76,6 @@ export class ReferralRepository {
           eq(referralEventsTable.referrerPatientId, referrerPatientId),
           eq(referralEventsTable.status, 'qualified'),
         ),
-      );
-    return row?.value ?? 0;
-  }
-
-  async countForReferrerByStatus(
-    referrerPatientId: string,
-    status: ReferralEventStatus,
-    executor: Executor = this.db,
-  ): Promise<number> {
-    const [row] = await executor
-      .select({ value: count() })
-      .from(referralEventsTable)
-      .where(
-        and(eq(referralEventsTable.referrerPatientId, referrerPatientId), eq(referralEventsTable.status, status)),
       );
     return row?.value ?? 0;
   }

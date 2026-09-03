@@ -95,16 +95,14 @@ export type ConsultationLookupStatus = string | 'unknown';
 
 export interface PromotionBookingLookupPort {
   /**
-   * The consultation's current status, or `'unknown'` if it cannot be
+   * The status of each consultation named, or `'unknown'` where it cannot be
    * determined — including when the consultation does not exist.
    *
-   * *** NEVER THROWS. *** A caller may treat any outcome as data.
-   */
-  getConsultationStatus(consultationId: string): Promise<ConsultationLookupStatus>;
-
-  /**
-   * The same, for a batch — the sweep examines up to a hundred candidates a
-   * pass and one query is better than a hundred.
+   * *** BATCH-ONLY, DELIBERATELY. *** There is no single-id variant, because the
+   * sweep examines up to a hundred candidates a pass and one query is better
+   * than a hundred — and because every method here is one more thing the
+   * coordinator's `BookingFacade` adapter has to implement. A caller that wants
+   * one status passes an array of one.
    *
    * Returns a map keyed by consultation id. An id the port cannot answer for is
    * either absent from the map or mapped to `'unknown'`; both mean the same

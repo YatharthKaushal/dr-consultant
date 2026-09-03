@@ -29,11 +29,6 @@ import type { ConsultationLookupStatus, PromotionBookingLookupPort } from './pro
 export class UnavailablePromotionBookingLookupProvider implements PromotionBookingLookupPort {
   private readonly logger = new Logger(UnavailablePromotionBookingLookupProvider.name);
 
-  async getConsultationStatus(consultationId: string): Promise<ConsultationLookupStatus> {
-    this.report(`status of consultation ${consultationId}`);
-    return 'unknown';
-  }
-
   async getConsultationStatuses(
     consultationIds: readonly string[],
   ): Promise<ReadonlyMap<string, ConsultationLookupStatus>> {

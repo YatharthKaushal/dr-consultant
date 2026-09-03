@@ -343,6 +343,17 @@ export const PROMOTION_SWEEP_INTERVAL_MS = 60_000;
 export const PROMOTION_SWEEP_BATCH_SIZE = 100;
 
 /**
+ * How long a `promotion_code_attempts` row is kept.
+ *
+ * Far longer than the throttle's one-hour window, on purpose: the counter never
+ * looks back further than an hour, but the rows are ALSO the only evidence that
+ * somebody walked the code namespace — and a probe is a pattern across days, not
+ * within an hour. Thirty days is long enough to see one and short enough that
+ * the table stays small.
+ */
+export const PROMOTION_ATTEMPT_RETENTION_DAYS = 30;
+
+/**
  * Consultation statuses that mean the booking is DEAD, so a reservation held
  * against it can be released with no risk of releasing a discount under a live
  * payment. Anything not in this list — including a status this module does not

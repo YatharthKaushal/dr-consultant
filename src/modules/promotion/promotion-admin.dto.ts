@@ -21,6 +21,7 @@ import {
   AFFILIATE_PARTNER_STATUSES,
   AFFILIATE_SETTLEMENT_METHODS,
   DISCOUNT_INSTRUMENT_KINDS,
+  REFERRAL_EVENT_STATUSES,
   DISCOUNT_INSTRUMENT_STATUSES,
   DISCOUNT_VALUE_KINDS,
 } from '../../schema/enums.schema';
@@ -438,4 +439,27 @@ export class ExportRedemptionsDto {
   @IsOptional()
   @IsISO8601({}, { message: 'createdTo must be an ISO 8601 timestamp.' })
   createdTo?: string;
+}
+
+export class ListReferralEventsDto {
+  @IsOptional()
+  @IsUUID()
+  referrerPatientId?: string;
+
+  @IsOptional()
+  @IsIn([...REFERRAL_EVENT_STATUSES])
+  status?: (typeof REFERRAL_EVENT_STATUSES)[number];
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(PROMOTION_LIST_MAX_LIMIT)
+  limit?: number;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  offset?: number;
 }

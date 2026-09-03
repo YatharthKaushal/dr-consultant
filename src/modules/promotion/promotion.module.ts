@@ -7,6 +7,7 @@ import { PromotionAdminService } from './promotion-admin.service';
 import { PromotionConfigRepository } from './promotion-config.repository';
 import { PromotionConfigService } from './promotion-config.service';
 import { PromotionController } from './promotion.controller';
+import { PromotionLinkController } from './promotion-link.controller';
 import { PromotionFacade } from './promotion.facade';
 import { PromotionRepository } from './promotion.repository';
 import { PromotionService } from './promotion.service';
@@ -65,7 +66,7 @@ import { UnavailablePromotionBookingLookupProvider } from './unavailable-promoti
  * collision for one fixed-period job.
  */
 @Module({
-  controllers: [PromotionController, PromotionAdminController],
+  controllers: [PromotionController, PromotionLinkController, PromotionAdminController],
   providers: [
     PromotionRepository,
     PromotionConfigRepository,

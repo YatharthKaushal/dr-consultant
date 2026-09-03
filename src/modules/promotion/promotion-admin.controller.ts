@@ -8,7 +8,13 @@ import { AffiliateService } from './affiliate.service';
 import { PromotionAdminService } from './promotion-admin.service';
 import { PromotionConfigService } from './promotion-config.service';
 import { PromotionSweepService } from './promotion-sweep.service';
-import { toCommissionSummary, toPartnerSummary, toSettlementSummary } from './promotion.mapper';
+import {
+  toCommissionSummary,
+  toPartnerSummary,
+  toReferralEventSummary,
+  toSettlementSummary,
+} from './promotion.mapper';
+import { ReferralRepository } from './referral.repository';
 import { PromotionRepository } from './promotion.repository';
 import {
   CreateInstrumentDto,
@@ -18,6 +24,7 @@ import {
   ListCommissionsDto,
   ListInstrumentsDto,
   ListPartnersDto,
+  ListReferralEventsDto,
   SetInstrumentStatusDto,
   SetPartnerStatusDto,
   UpdateInstrumentDto,
@@ -58,6 +65,7 @@ export class PromotionAdminController {
     private readonly admin: PromotionAdminService,
     private readonly affiliates: AffiliateService,
     private readonly promotionRepo: PromotionRepository,
+    private readonly referralRepo: ReferralRepository,
     private readonly config: PromotionConfigService,
     private readonly sweep: PromotionSweepService,
   ) {}
@@ -150,6 +158,38 @@ export class PromotionAdminController {
     @Body() dto: SetInstrumentStatusDto,
   ) {
     return this.admin.setInstrumentStatus(auth.accountId, instrumentId, dto.status);
+  }
+
+  /* ---- Referrals ------------------------------------------------------- */
+
+  /**
+   * The referral tracker.
+   *
+   * *** THIS IS THE ONE SHAPE THAT NAMES BOTH PATIENTS, AND IT IS ADMIN-ONLY. ***
+   * `toReferralEventSummary` carries `referrerPatientId` AND `refereePatientId`,
+   * which together are a patient-to-patient relationship — exactly what
+   * `docs/SRS.md` §6.2's minimum-necessary principle says not to hand around.
+   * The PATIENT-facing `GET /promotions/referral` returns counts instead, so a
+   * referrer learns how many of their referrals qualified and never which of
+   * their friends did or did not attend a consultation.
+   *
+   * `promotions.read`, which `operations` holds — working out why somebody's
+   * referral did not pay out is support work.
+   */
+  @Get('referrals')
+  @RequirePermission(PERMISSIONS.PROMOTIONS_READ)
+  async listReferrals(@Query() query: ListReferralEventsDto) {
+    const filter = {
+      referrerPatientId: query.referrerPatientId,
+      status: query.status,
+      limit: query.limit ?? PROMOTION_LIST_DEFAULT_LIMIT,
+      offset: query.offset ?? 0,
+    };
+    const [rows, total] = await Promise.all([
+      this.referralRepo.listEvents(filter),
+      this.referralRepo.countEvents(filter),
+    ]);
+    return { rows: rows.map(toReferralEventSummary), total };
   }
 
   /* ---- Export ---------------------------------------------------------- */
