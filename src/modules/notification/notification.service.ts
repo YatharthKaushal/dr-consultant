@@ -83,10 +83,16 @@ export class NotificationService {
     try {
       return await this.deliver(request);
     } catch (error: unknown) {
+      // *** THE HANDLER ITSELF MUST NOT THROW. ***
+      // It is reached with whatever the caller passed, INCLUDING a null or
+      // half-built request — a caller mid-failure is exactly the caller most
+      // likely to hand us one. Reading `request.templateCode` directly here
+      // threw a TypeError on `notify(null)` and turned the one method
+      // documented as never throwing into one that did.
       const detail = error instanceof Error ? error.message : String(error);
-      this.logger.error(
-        `notify failed for template ${request.templateCode} (audience ${request.audience?.kind ?? 'unknown'}): ${detail}`,
-      );
+      const templateCode = request?.templateCode ?? 'unknown';
+      const audienceKind = request?.audience?.kind ?? 'unknown';
+      this.logger.error(`notify failed for template ${templateCode} (audience ${audienceKind}): ${detail}`);
       return { queued: false, notificationId: null, reason: NOTIFICATION_RESULT_REASONS.PROVIDER_UNAVAILABLE };
     }
   }
