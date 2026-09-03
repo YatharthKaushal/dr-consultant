@@ -568,6 +568,49 @@ describe('InstantService', () => {
       });
     });
 
+    describe('the patient cancelled while the offer was outstanding', () => {
+      /**
+       * A real window, not an exotic one: M-11's `POST /bookings/:id/cancel`
+       * accepts `awaiting_doctor`, and this module deliberately has no cancel
+       * path of its own, so a patient CAN cancel between the offer landing
+       * and the doctor tapping accept.
+       */
+      it('*** MINTS NO GATEWAY ORDER *** — the status is re-read before the first irreversible call', async () => {
+        const h = buildHarness();
+        h.bookings.getBooking.mockResolvedValue(makeBooking({ status: 'cancelled' }));
+
+        await expect(h.service.accept(ATTEMPT_ID, DOCTOR_ID)).rejects.toMatchObject({
+          response: { code: INSTANT_ERROR_CODES.INVALID_STATE_TRANSITION, currentStatus: 'cancelled' },
+        });
+
+        // A `payments` row against a consultation nobody is going to hold is
+        // a money-shaped mess to unpick, and one the patient never asked for.
+        expect(h.payments.createOrderForConsultation).not.toHaveBeenCalled();
+        expect(h.bookings.assignDoctor).not.toHaveBeenCalled();
+      });
+
+      it('hands the doctor straight back to the pool', async () => {
+        const h = buildHarness();
+        h.bookings.getBooking.mockResolvedValue(makeBooking({ status: 'cancelled' }));
+
+        await expect(h.service.accept(ATTEMPT_ID, DOCTOR_ID)).rejects.toBeInstanceOf(ConflictException);
+
+        expect(h.presence.transition).toHaveBeenCalledWith(
+          expect.objectContaining({ to: 'available_now', reason: 'accept_rolled_back_consultation_status_cancelled' }),
+        );
+      });
+
+      it('refuses the same way for a request a sweep already released', async () => {
+        const h = buildHarness();
+        h.bookings.getBooking.mockResolvedValue(makeBooking({ status: 'expired' }));
+
+        await expect(h.service.accept(ATTEMPT_ID, DOCTOR_ID)).rejects.toMatchObject({
+          response: { currentStatus: 'expired' },
+        });
+        expect(h.payments.createOrderForConsultation).not.toHaveBeenCalled();
+      });
+    });
+
     describe('compensation', () => {
       it('payment setup fails -> the doctor is freed, the request is RELEASED, and the error is rewrapped', async () => {
         const h = buildHarness();
