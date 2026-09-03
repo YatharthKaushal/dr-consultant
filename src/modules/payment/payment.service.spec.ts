@@ -3,6 +3,7 @@ import type { AuditService } from '../../shared/audit/audit.service';
 import type { PaymentConfigService } from './payment-config.service';
 import type { PaymentRepository } from './payment.repository';
 import { PaymentService } from './payment.service';
+import type { PricingFacade } from '../pricing/pricing.facade';
 import type { RazorpayClient } from './razorpay.client';
 
 const PAYMENT_ID = 'e1f7a8d0-0000-4000-8000-000000000001';
@@ -35,6 +36,7 @@ describe('PaymentService', () => {
   let config: jest.Mocked<PaymentConfigService>;
   let gateway: jest.Mocked<RazorpayClient>;
   let audit: jest.Mocked<AuditService>;
+  let pricing: jest.Mocked<PricingFacade>;
   let service: PaymentService;
 
   beforeEach(() => {
@@ -59,7 +61,25 @@ describe('PaymentService', () => {
 
     audit = { write: jest.fn().mockResolvedValue(undefined) } as unknown as jest.Mocked<AuditService>;
 
-    service = new PaymentService({} as Database, payments, config, gateway, audit);
+    pricing = {
+      // Every fixture in this spec is a LEGACY payment (`priceQuoteId: null`),
+      // so `capturedTotalPaise` takes the `calculateBill` branch and none of
+      // these are reached. They exist so the constructor is satisfiable.
+      getQuoteTotals: jest.fn().mockResolvedValue({}),
+      preview: jest.fn(),
+      createQuote: jest.fn(),
+      pin: jest.fn(),
+      materialiseAndPin: jest.fn(),
+      markConsumed: jest.fn().mockResolvedValue({ changed: true }),
+      abandon: jest.fn().mockResolvedValue({ changed: true }),
+      allocateInvoiceNumber: jest.fn().mockResolvedValue({ number: 'INV/2026-27/000001', issuedAt: new Date() }),
+      allocateCreditNoteNumber: jest.fn().mockResolvedValue({ number: 'CRN/2026-27/000001', issuedAt: new Date() }),
+      apportionRefund: jest.fn(),
+      refundAmountForPct: jest.fn(),
+      hasCatalogue: jest.fn().mockResolvedValue(false),
+    } as unknown as jest.Mocked<PricingFacade>;
+
+    service = new PaymentService({} as Database, payments, config, gateway, audit, pricing);
   });
 
   /* ================================================================== */

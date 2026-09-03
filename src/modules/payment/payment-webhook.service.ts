@@ -4,13 +4,15 @@ import { EventEmitter2 } from '@nestjs/event-emitter';
 import { AuditService } from '../../shared/audit/audit.service';
 import { PAYMENT_CAPTURED_EVENT, type PaymentCapturedEvent } from './payment.contract';
 import { PaymentEventRepository } from './payment-event.repository';
+import type { PaymentRow } from '../../schema/payments.schema';
 import { PaymentRepository } from './payment.repository';
 import {
   PAYMENT_AUDIT_ENTITY_TYPES,
   PAYMENT_ERROR_CODES,
   RAZORPAY_EVENTS,
 } from './payment.constants';
-import { gatewayAmountToPaise, rupeesToPaise } from './payment-money.util';
+import { capturedTotalPaise, gatewayAmountToPaise } from './payment-money.util';
+import { PricingFacade } from '../pricing/pricing.facade';
 import { RazorpayErrorClassifier } from './razorpay-error.classifier';
 import type { RazorpayWebhookEnvelope } from './razorpay.types';
 import { RefundRepository } from './refund.repository';
@@ -81,6 +83,8 @@ export class PaymentWebhookService {
     private readonly audit: AuditService,
     /** Announces a capture to booking. See `PAYMENT_CAPTURED_EVENT`; `EventsModule` is `@Global()`, so nothing needs importing. */
     private readonly emitter: EventEmitter2,
+    /** Reads the authoritative total, consumes the quote and allocates the invoice serial at capture. */
+    private readonly pricing: PricingFacade,
   ) {}
 
   /**
@@ -290,8 +294,12 @@ export class PaymentWebhookService {
       return 'handled';
     }
 
-    const expectedPaise =
-      rupeesToPaise(payment.consultationFee) + rupeesToPaise(payment.convenienceFee) + rupeesToPaise(payment.gstAmount);
+    // *** ONE DERIVATION, SHARED WITH THE OTHER THREE CALL SITES. ***
+    // This used to sum the three stored columns while
+    // `payment.service.ts#expectedTotalPaise` recomputed via `calculateBill`.
+    // Four derivations, one of them different, agreeing only by construction —
+    // see `payment-money.util.ts#capturedTotalPaise`.
+    const expectedPaise = capturedTotalPaise(payment, await this.resolveQuoteTotal(payment));
     const actualPaise = gatewayAmountToPaise(entity.amount ?? 0);
 
     if (actualPaise !== expectedPaise) {
@@ -338,6 +346,19 @@ export class PaymentWebhookService {
 
     this.logger.log(`Payment ${payment.id} captured (gateway payment ${entity.id}).`);
 
+    // *** THE QUOTE IS CONSUMED AND THE INVOICE SERIAL IS TAKEN, AT CAPTURE. ***
+    // Not at intent: a checkout that is merely started must never burn a number,
+    // because a gap in a statutory series is its own compliance question
+    // (`pricing-document-sequences.schema.ts`).
+    //
+    // Best-effort, and deliberately so. The capture is ALREADY COMMITTED at this
+    // point; if this threw, `record`'s handler-failure branch would mark a
+    // delivery that actually succeeded as `failed` and feed it to the retry
+    // sweep. The bookkeeping must not be able to rewrite the outcome of the money
+    // it is reporting on — the same argument this method already makes for
+    // wrapping `PAYMENT_CAPTURED_EVENT`.
+    await this.finaliseInvoice(payment);
+
     // *** TELL BOOKING. *** The money is committed and audited; this takes the
     // consultation from `pending_payment` to `scheduled` without waiting for
     // the hold to lapse and the sweep to notice. Emitted AFTER the capture is
@@ -368,6 +389,67 @@ export class PaymentWebhookService {
     }
 
     return 'handled';
+  }
+
+  /**
+   * `price_quotes.total_payable` for a quoted payment, or `null` for a legacy one.
+   *
+   * Crosses to `modules/pricing` through its facade, never by reading its table
+   * (`backend/README.md` §2). A quoted payment whose quote cannot be resolved
+   * returns `null`, and `capturedTotalPaise` then THROWS rather than quietly
+   * re-deriving a different number from the legacy columns.
+   */
+  private async resolveQuoteTotal(payment: PaymentRow): Promise<string | null> {
+    if (payment.priceQuoteId === null) return null;
+    const totals = await this.pricing.getQuoteTotals([payment.priceQuoteId]);
+    return totals[payment.priceQuoteId] ?? null;
+  }
+
+  /**
+   * Consumes the quote, confirms the discount, and allocates the s.31 invoice
+   * serial — everything that becomes true only once money has actually arrived.
+   *
+   * *** ENTIRELY BEST-EFFORT. *** Every failure is logged and swallowed, because
+   * the capture is already durable and a throw here would be recorded as a
+   * failed webhook delivery for a payment that genuinely succeeded.
+   *
+   * The serial is allocated only when `invoice_number` is still null, and the
+   * write is itself guarded on that column, so a replayed capture cannot take a
+   * second number. A crash between the allocation commit and the column write
+   * would leave one gap; that window is narrow, visible (the sequence is ahead of
+   * the last issued invoice) and preferable to the alternative, which is holding
+   * a lock across two modules' tables in one transaction — forbidden by
+   * `backend/README.md` §2.
+   */
+  private async finaliseInvoice(payment: PaymentRow): Promise<void> {
+    try {
+      if (payment.priceQuoteId !== null) {
+        await this.pricing.markConsumed({
+          quoteId: payment.priceQuoteId,
+          consultationId: payment.consultationId,
+          paymentId: payment.id,
+        });
+      }
+
+      if (payment.invoiceNumber === null) {
+        const invoice = await this.pricing.allocateInvoiceNumber();
+        const rows = await this.payments.attachInvoiceNumberIfAbsent(
+          payment.id,
+          invoice.number,
+          invoice.issuedAt,
+        );
+        if (rows === 0) {
+          this.logger.warn(
+            `Payment ${payment.id} already carried an invoice number; serial ${invoice.number} was allocated and not used.`,
+          );
+        }
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logger.error(
+        `Payment ${payment.id} was captured, but consuming its quote or allocating its invoice number failed: ${message}`,
+      );
+    }
   }
 
   /**

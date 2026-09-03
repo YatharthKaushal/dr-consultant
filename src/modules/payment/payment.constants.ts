@@ -48,6 +48,22 @@ export const PAYMENT_ERROR_CODES = {
   PAYOUT_NOT_PAYABLE: 'PAYOUT_NOT_PAYABLE',
   /** A `PUT /admin/payments/config` body whose value fails this module's own shape check. */
   CONFIG_INVALID: 'PAYMENT_CONFIG_INVALID',
+  /**
+   * *** THE CONFIG SCREEN THIS ONE REPLACED. ***
+   * `payments.convenience_fee_pct` and `payments.gst_rate` no longer price
+   * anything once a pricing catalogue exists — the engine reads
+   * `pricing.components` instead. Editing them would change nothing, and an
+   * admin watching a GST rate change do nothing is a guaranteed support
+   * incident, so the write path refuses and names the new screen. The READ path
+   * is kept for legacy re-derivation.
+   */
+  CONFIG_SUPERSEDED: 'PAYMENT_CONFIG_SUPERSEDED',
+  /**
+   * The whole bill was discounted away. Razorpay will not create a zero-value
+   * order, and this release has no no-payment path, so it is refused loudly
+   * rather than failing opaquely at the gateway.
+   */
+  ZERO_VALUE_ORDER: 'PRICING_ZERO_VALUE_ORDER',
   /** A `PUT /admin/payments/config` naming a key this module does not own. */
   CONFIG_KEY_NOT_OWNED: 'PAYMENT_CONFIG_KEY_NOT_OWNED',
   /** The webhook HMAC did not verify, or the signature header was absent/malformed. THE ENTIRE AUTH BOUNDARY for that route. */
