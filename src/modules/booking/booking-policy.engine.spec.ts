@@ -137,4 +137,38 @@ describe('refundAmountFor', () => {
     expect(refundAmountFor('not-a-number', 100)).toBe('0.00');
     expect(refundAmountFor('-10.00', 100)).toBe('0.00');
   });
+
+  /* ------------------------------------------------------------------ */
+  /* Regressions for the float-arithmetic defect this function once had  */
+  /* ------------------------------------------------------------------ */
+
+  /**
+   * The old implementation ran `Math.round((paise * refundPct) / 100)` with no
+   * guard on the sign of the percentage, so a negative tier produced a NEGATIVE
+   * refund string ('-375.00') and handed it to the gateway as a refund amount.
+   * A refund is never negative; an incomputable one is zero.
+   */
+  it('refuses a negative percentage instead of emitting a negative refund', () => {
+    expect(refundAmountFor('750.00', -50)).toBe('0.00');
+  });
+
+  it('degrades to zero for a non-finite percentage', () => {
+    expect(refundAmountFor('750.00', Number.NaN)).toBe('0.00');
+    expect(refundAmountFor('750.00', Number.POSITIVE_INFINITY)).toBe('0.00');
+  });
+
+  /**
+   * The ceiling of `numeric(10,2)`. Floats lose integer precision above 2^53
+   * paise; `bigint` does not, and this is the shape of amount where the old
+   * `Number(amount) * 100` step was least trustworthy.
+   */
+  it('stays exact at the top of numeric(10,2)', () => {
+    expect(refundAmountFor('99999999.99', 100)).toBe('99999999.99');
+    expect(refundAmountFor('99999999.99', 50)).toBe('50000000.00');
+  });
+
+  /** Fractional tiers are representable — `numeric(5,2)` allows 12.50%. */
+  it('handles a fractional percentage', () => {
+    expect(refundAmountFor('749.00', 12.5)).toBe('93.63');
+  });
 });

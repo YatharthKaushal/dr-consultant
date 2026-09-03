@@ -1,4 +1,10 @@
 import type { Party } from '../../schema/enums.schema';
+import {
+  applyPctToPaise,
+  paiseToRupees,
+  pctToBasisPoints,
+  rupeesToPaise,
+} from '../../shared/money/money.util';
 
 /**
  * *** THE CANCELLATION / RESCHEDULE POLICY. THIS SHAPE IS INVENTED HERE. ***
@@ -169,16 +175,45 @@ export function decideRefund(input: {
  * places — the shape `payments`/`refunds` store (`numeric(10,2)`) and the
  * shape `BookingPaymentPort.createRefund` expects.
  *
- * Computed in integer PAISE and rounded once, at the end: `19999 * 50 / 100`
- * in floating point is not reliably `99.995`, and money that rounds twice
- * drifts. Rounding is half-up on the paise, which is the direction that
+ * Computed in integer PAISE as `bigint` and rounded ONCE, half-up, which
  * favours the patient on a tie.
+ *
+ * ── WHAT THIS USED TO DO, AND WHY IT WAS WRONG ─────────────────────────────
+ *
+ * This function previously claimed, in this same comment, to compute in
+ * integer paise. It did not. It ran `Number(amount)` on a `numeric(10,2)`
+ * string, multiplied by a float percentage, and then went BACK through
+ * floating point to format: `(refundPaise / 100).toFixed(2)`. The integer step
+ * in the middle was undone at both ends.
+ *
+ * That mattered because this is not a display figure — the result is handed to
+ * `BookingPaymentPort.createRefund` and becomes the amount sent to Razorpay.
+ * It was real money computed in IEEE-754, which is precisely the class of error
+ * `shared/money/money.util.ts` exists to prevent.
+ *
+ * It existed only because the money arithmetic used to live inside
+ * `modules/payment`, where this module could not import it. Now that those
+ * primitives are in `shared/`, there is one implementation and this uses it.
+ *
+ * ── DEGRADATION IS PART OF THE CONTRACT ────────────────────────────────────
+ *
+ * A malformed or negative amount, or a nonsensical percentage, returns
+ * `'0.00'` rather than throwing. Callers treat a zero refund as "nothing to
+ * refund" and carry on cancelling; throwing here would fail an otherwise-valid
+ * cancellation over a figure that is already suspect. The shared primitives
+ * are strict by design, so the refusal is caught and converted rather than
+ * pre-empted by a looser parse — a negative percentage now yields `'0.00'`
+ * instead of the NEGATIVE refund the old float path would happily produce.
  */
 export function refundAmountFor(amount: string, refundPct: number): string {
-  const parsed = Number(amount);
-  if (!Number.isFinite(parsed) || parsed < 0) return '0.00';
+  try {
+    if (!Number.isFinite(refundPct)) return '0.00';
 
-  const paise = Math.round(parsed * 100);
-  const refundPaise = Math.round((paise * refundPct) / 100);
-  return (refundPaise / 100).toFixed(2);
+    const refundPaise = applyPctToPaise(rupeesToPaise(amount), pctToBasisPoints(refundPct.toFixed(2)));
+    return paiseToRupees(refundPaise);
+  } catch {
+    // MoneyFormatError from any of the three: an unparsable or negative amount,
+    // or a percentage outside 0.00-999.99. All mean "no computable refund".
+    return '0.00';
+  }
 }
