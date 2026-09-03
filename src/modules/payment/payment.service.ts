@@ -277,6 +277,23 @@ export class PaymentService {
     });
 
     this.logger.log(`Payment ${payment.id} reconciled to paid from the gateway (webhook never arrived or was late).`);
+
+    // *** DELIBERATELY DOES NOT EMIT `PAYMENT_CAPTURED_EVENT`. ***
+    //
+    // This looks like the webhook's capture path, which does emit, so the
+    // asymmetry is worth stating: the only caller of this method is M-11's
+    // expiry sweep (`booking-slot-hold.service.ts` Tier 2), and it CONFIRMS THE
+    // BOOKING ITSELF on `status === 'paid'` — that is the whole point of the
+    // tier. Emitting here would add a second, concurrent `confirmPayment` on
+    // the one path that already handles it. Harmless (the transaction takes
+    // `SELECT ... FOR UPDATE` and the confirm is idempotent) but a self-inflicted
+    // race, and it would make the sweep's `confirmed`/`stillHeld` return value
+    // ambiguous about which caller did the work.
+    //
+    // If a SECOND caller ever appears — an admin "reconcile this payment now"
+    // button is the obvious one — it must either confirm the booking itself, as
+    // the sweep does, or this method must start emitting and the sweep's own
+    // call must come out. Do not simply add the emit.
     return { status: 'paid', changed: true };
   }
 

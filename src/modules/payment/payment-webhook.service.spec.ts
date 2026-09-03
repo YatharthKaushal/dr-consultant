@@ -1,5 +1,7 @@
 import { createHmac } from 'node:crypto';
+import type { EventEmitter2 } from '@nestjs/event-emitter';
 import type { AuditService } from '../../shared/audit/audit.service';
+import { PAYMENT_CAPTURED_EVENT } from './payment.contract';
 import type { PaymentEventRepository } from './payment-event.repository';
 import type { PaymentRepository } from './payment.repository';
 import { PaymentWebhookService } from './payment-webhook.service';
@@ -49,12 +51,13 @@ function sign(body: Buffer, secret = SECRET): string {
 }
 
 const PAYMENT_ID = 'e1f7a8d0-0000-4000-8000-000000000001';
+const CONSULTATION_ID = 'c0000000-0000-4000-8000-000000000001';
 
 /** A `payments` row shaped like the real one, billing FR-7.3's 708.00. */
 function paymentRow(overrides: Record<string, unknown> = {}) {
   return {
     id: PAYMENT_ID,
-    consultationId: 'c0000000-0000-4000-8000-000000000001',
+    consultationId: CONSULTATION_ID,
     currency: 'INR',
     consultationFee: '500.00',
     convenienceFeePct: '20.00',
@@ -77,6 +80,7 @@ describe('PaymentWebhookService', () => {
   let refunds: jest.Mocked<RefundRepository>;
   let refundService: jest.Mocked<RefundService>;
   let audit: jest.Mocked<AuditService>;
+  let emitter: jest.Mocked<EventEmitter2>;
   let service: PaymentWebhookService;
 
   beforeEach(() => {
@@ -106,8 +110,9 @@ describe('PaymentWebhookService', () => {
 
     refundService = { recomputePaymentRefundStatus: jest.fn().mockResolvedValue(undefined) } as unknown as jest.Mocked<RefundService>;
     audit = { write: jest.fn().mockResolvedValue(undefined) } as unknown as jest.Mocked<AuditService>;
+    emitter = { emit: jest.fn().mockReturnValue(true) } as unknown as jest.Mocked<EventEmitter2>;
 
-    service = new PaymentWebhookService(events, payments, refunds, refundService, audit);
+    service = new PaymentWebhookService(events, payments, refunds, refundService, audit, emitter);
   });
 
   /* ================================================================== */
@@ -409,6 +414,54 @@ describe('PaymentWebhookService', () => {
           metadata: expect.objectContaining({ outcome: 'captured' }) as never,
         }),
       );
+    });
+
+    /* ---------------------------------------------------------------- */
+    /* The paid -> scheduled signal that booking listens for             */
+    /* ---------------------------------------------------------------- */
+
+    it('announces the capture so booking can take the consultation live', async () => {
+      await service.record({ eventId: 'evt_1', rawBody, signatureVerified: true });
+      expect(emitter.emit).toHaveBeenCalledWith(PAYMENT_CAPTURED_EVENT, {
+        paymentId: PAYMENT_ID,
+        consultationId: CONSULTATION_ID,
+        gatewayPaymentId: 'pay_29QQoUBi66xm2f',
+      });
+    });
+
+    it('does NOT announce a capture it refused for an amount mismatch', async () => {
+      const wrongAmount = Buffer.from(JSON.stringify(capturedEnvelope()).replace('70800', '70799'));
+      await service.record({ eventId: 'evt_1', rawBody: wrongAmount, signatureVerified: true });
+      expect(emitter.emit).not.toHaveBeenCalled();
+    });
+
+    it('does NOT re-announce a replayed capture — the second delivery is a no-op', async () => {
+      payments.findById.mockResolvedValue(paymentRow({ paidAt: new Date(), status: 'paid' }));
+      await service.record({ eventId: 'evt_1', rawBody, signatureVerified: true });
+      expect(emitter.emit).not.toHaveBeenCalled();
+    });
+
+    it('does NOT announce when it lost the race and marked nothing', async () => {
+      payments.markPaidIfUnpaid.mockResolvedValue(0);
+      await service.record({ eventId: 'evt_1', rawBody, signatureVerified: true });
+      expect(emitter.emit).not.toHaveBeenCalled();
+    });
+
+    it('records the capture as PROCESSED even if announcing it throws', async () => {
+      // The capture is already committed by the time the event is emitted, so a
+      // throw here must not rewrite a successful capture into a `failed`
+      // delivery with a processing_error — which is what would happen if the
+      // emit were not wrapped, since `record` treats any handler throw as a
+      // failed delivery and feeds it to the retry sweep.
+      emitter.emit.mockImplementation(() => {
+        throw new Error('listener blew up');
+      });
+
+      const result = await service.record({ eventId: 'evt_1', rawBody, signatureVerified: true });
+
+      expect(result.outcome).toBe('processed');
+      expect(payments.markPaidIfUnpaid).toHaveBeenCalled();
+      expect(events.markFailed).not.toHaveBeenCalled();
     });
   });
 

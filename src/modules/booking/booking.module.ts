@@ -7,6 +7,7 @@ import { PatientModule } from '../patient/patient.module';
 import { PaymentFacade } from '../payment/payment.facade';
 import { PaymentModule } from '../payment/payment.module';
 import { BOOKING_PAYMENT_PORT } from './booking.constants';
+import { BookingPaymentListener } from './booking-payment.listener';
 import { BookingAdminController } from './booking-admin.controller';
 import { BookingController } from './booking.controller';
 import { BookingDoctorController } from './booking-doctor.controller';
@@ -70,6 +71,9 @@ import { BookingSlotHoldService } from './booking-slot-hold.service';
     { provide: BOOKING_PAYMENT_PORT, useExisting: PaymentFacade },
     BookingService,
     BookingSlotHoldService,
+    // Closes the paid -> scheduled loop. Not exported: it is driven by
+    // `PAYMENT_CAPTURED_EVENT`, never called.
+    BookingPaymentListener,
     BookingFacade,
   ],
   exports: [BookingFacade],

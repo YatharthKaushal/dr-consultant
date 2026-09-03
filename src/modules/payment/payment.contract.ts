@@ -38,6 +38,49 @@ export interface CreatedOrder {
   breakdown: PaymentBreakdown;
 }
 
+/* -------------------------------------------------------------------------- */
+/* The paid -> scheduled signal                                               */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * *** EMITTED WHEN A PAYMENT IS CAPTURED. Booking listens and takes the
+ * consultation live. ***
+ *
+ * WHY AN EVENT AND NOT A CALL. The compile-time dependency runs
+ * booking -> payment (`booking.module.ts` imports `PaymentFacade` and binds it
+ * at `BOOKING_PAYMENT_PORT`). Payment calling `BookingFacade.confirmPayment`
+ * directly would close that into a module cycle. An event inverts the runtime
+ * direction while leaving the compile-time direction alone: payment knows
+ * nothing about booking, and booking imports this name from payment's public
+ * surface — the same direction it already depends in.
+ *
+ * DELIVERY IS BEST-EFFORT, AND THAT IS SAFE. `@nestjs/event-emitter` is
+ * in-process and synchronous; a listener that throws is caught and logged by
+ * the framework (`suppressErrors` defaults to true), and a process that dies
+ * between the capture and the listener loses the notification entirely.
+ * Neither loses the booking, because this event is a LATENCY OPTIMISATION over
+ * a durable backstop that already works: M-11's two-tier sweep asks the gateway
+ * about every expired hold with an order, and confirms the ones that came back
+ * paid. Without this event a paid booking still goes live — just up to
+ * `booking.slot_hold_minutes` later, with the patient watching a
+ * `pending_payment` screen. With it, promptly. Nothing here is the only thing
+ * standing between a captured payment and a live consultation.
+ *
+ * Correspondingly: DO NOT move a money decision into a listener for this. The
+ * event says what already happened and is already committed.
+ */
+export const PAYMENT_CAPTURED_EVENT = 'payment.captured';
+
+/** Payload of {@link PAYMENT_CAPTURED_EVENT}. JSON-safe, like every value on this surface. */
+export interface PaymentCapturedEvent {
+  /** Our `payments.id`. */
+  paymentId: string;
+  /** The consultation to take live — `consultations.id`. */
+  consultationId: string;
+  /** Razorpay's payment id, for correlating logs against the gateway dashboard. */
+  gatewayPaymentId: string;
+}
+
 export interface PaymentContract {
   /** Quote a bill WITHOUT persisting anything — booking shows this before checkout. */
   quote(consultationFeeInr: string): Promise<PaymentBreakdown>;

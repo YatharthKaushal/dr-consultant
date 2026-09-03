@@ -1,6 +1,8 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { Injectable, Logger, UnauthorizedException } from '@nestjs/common';
+import { EventEmitter2 } from '@nestjs/event-emitter';
 import { AuditService } from '../../shared/audit/audit.service';
+import { PAYMENT_CAPTURED_EVENT, type PaymentCapturedEvent } from './payment.contract';
 import { PaymentEventRepository } from './payment-event.repository';
 import { PaymentRepository } from './payment.repository';
 import {
@@ -77,6 +79,8 @@ export class PaymentWebhookService {
     private readonly refunds: RefundRepository,
     private readonly refundService: RefundService,
     private readonly audit: AuditService,
+    /** Announces a capture to booking. See `PAYMENT_CAPTURED_EVENT`; `EventsModule` is `@Global()`, so nothing needs importing. */
+    private readonly emitter: EventEmitter2,
   ) {}
 
   /**
@@ -333,6 +337,36 @@ export class PaymentWebhookService {
     });
 
     this.logger.log(`Payment ${payment.id} captured (gateway payment ${entity.id}).`);
+
+    // *** TELL BOOKING. *** The money is committed and audited; this takes the
+    // consultation from `pending_payment` to `scheduled` without waiting for
+    // the hold to lapse and the sweep to notice. Emitted AFTER the capture is
+    // durable, so a listener can only ever observe a fact.
+    //
+    // This cannot break the webhook: `@nestjs/event-emitter` wraps every
+    // listener in try/catch (`suppressErrors` defaults to true), so a booking
+    // failure is logged there rather than thrown here — which matters, because
+    // a throw would turn into a non-2xx and Razorpay would redeliver forever.
+    // If it is lost anyway, the sweep still confirms the booking later.
+    // Wrapped because the capture is ALREADY COMMITTED at this point. If the
+    // announcement threw, `record`'s handler-failure branch would mark this
+    // delivery `failed` with a `processing_error` — recording a capture that
+    // actually succeeded as a failure, and feeding it to the retry sweep. The
+    // notification must not be able to rewrite the outcome of the money it is
+    // reporting on.
+    try {
+      this.emitter.emit(PAYMENT_CAPTURED_EVENT, {
+        paymentId: payment.id,
+        consultationId: payment.consultationId,
+        gatewayPaymentId: entity.id,
+      } satisfies PaymentCapturedEvent);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logger.error(
+        `Payment ${payment.id} was captured, but announcing it failed; the expiry sweep will confirm the booking. ${message}`,
+      );
+    }
+
     return 'handled';
   }
 
