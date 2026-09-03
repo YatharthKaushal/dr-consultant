@@ -1,12 +1,21 @@
 import { Injectable } from '@nestjs/common';
+import { DoctorPresenceService } from './doctor-presence.service';
 import { DoctorSpecialtyService } from './doctor-specialty.service';
 import type {
+  CompletionGateResult,
   DoctorContract,
+  DoctorPresenceState,
   DoctorSchedulingParameters,
   DoctorSchedulingParametersById,
+  InstantRoutingCandidate,
   ListedDoctorFilter,
   ListedDoctorSummary,
+  ListInstantRoutingCandidatesFilter,
+  PresenceActor,
+  PresenceTransitionInput,
+  PresenceTransitionResult,
   PublicDoctorProfile,
+  ResetPresenceInput,
 } from './doctor.contract';
 import { DoctorService } from './doctor.service';
 
@@ -15,6 +24,7 @@ export class DoctorFacade implements DoctorContract {
   constructor(
     private readonly doctorService: DoctorService,
     private readonly specialtyService: DoctorSpecialtyService,
+    private readonly presenceService: DoctorPresenceService,
   ) {}
 
   async getPublicProfile(doctorId: string): Promise<PublicDoctorProfile | null> {
@@ -42,5 +52,36 @@ export class DoctorFacade implements DoctorContract {
   /** ADDITIVE (M-09/search) — see `doctor.contract.ts`. */
   async listListedDoctors(filter: ListedDoctorFilter): Promise<ListedDoctorSummary[]> {
     return this.doctorService.listListedDoctors(filter);
+  }
+
+  /* ── ADDITIVE (M-13/presence and instant consult) ──────────────────────── */
+  /* See `doctor-presence.service.ts`'s header for the whole boundary argument. */
+
+  async getPresenceState(doctorId: string): Promise<DoctorPresenceState | null> {
+    return this.presenceService.getPresenceState(doctorId);
+  }
+
+  async transitionPresence(input: PresenceTransitionInput): Promise<PresenceTransitionResult> {
+    return this.presenceService.transitionPresence(input);
+  }
+
+  async setCompletionGate(input: {
+    doctorId: string;
+    consultationId: string;
+    actor: PresenceActor;
+  }): Promise<CompletionGateResult> {
+    return this.presenceService.setCompletionGate(input);
+  }
+
+  async clearCompletionGate(input: { consultationId: string; actor: PresenceActor }): Promise<CompletionGateResult> {
+    return this.presenceService.clearCompletionGate(input);
+  }
+
+  async listInstantRoutingCandidates(filter: ListInstantRoutingCandidatesFilter): Promise<InstantRoutingCandidate[]> {
+    return this.presenceService.listInstantRoutingCandidates(filter);
+  }
+
+  async resetPresence(input: ResetPresenceInput): Promise<{ doctorIds: string[] }> {
+    return this.presenceService.resetPresence(input);
   }
 }

@@ -10,7 +10,7 @@ import {
 import { randomBytes } from 'node:crypto';
 import { DATABASE } from '../../config/db/database.module';
 import type { Database } from '../../config/db/database.config';
-import type { ConsultationRow } from '../../schema/consultations.schema';
+import type { ConsultationRow, NewConsultationRow } from '../../schema/consultations.schema';
 import type { ConsultationStatus, Party } from '../../schema/enums.schema';
 import { AppConfigService } from '../../shared/app-config/app-config.service';
 import { AuditService } from '../../shared/audit/audit.service';
@@ -40,13 +40,35 @@ import {
   refundAmountFor,
   type RefundPolicy,
 } from './booking-policy.engine';
-import { BookingRepository } from './booking.repository';
+import { BookingRepository, type ExpiredInstantHold } from './booking.repository';
 
 /** Who is acting. `party` drives both the ownership check and `cancelled_by_party`. */
 export interface BookingActor {
   party: Party;
   /** `null` only for `party: 'system'` (the sweep). */
   accountId: string | null;
+}
+
+/** ADDITIVE (M-13) — see `BookingService#transitionInstantConsultation`. */
+export interface InstantTransitionInput {
+  consultationId: string;
+  /** Only the statuses the instant flow itself moves through; anything else stays behind `cancel`/`reschedule`/`markNoShow`. */
+  to: Extract<ConsultationStatus, 'awaiting_doctor' | 'pending_payment' | 'expired'>;
+  /** The statuses this move is legal FROM — M-13's state machine, enforced here under the row lock. */
+  from: readonly ConsultationStatus[];
+  /** Omit to leave the hold alone. `null` clears it; a date sets it. */
+  holdExpiresAt?: Date | null;
+  /** Carried into the audit row's `metadata.reason`. */
+  reason?: string;
+}
+
+/** ADDITIVE (M-13) — see `BookingService#transitionInstantConsultation`. */
+export interface InstantTransitionResult {
+  /** `false` for both an idempotent no-op (already in `to`) and a refusal — `refusal` tells them apart. */
+  changed: boolean;
+  /** The row as it stands after the call, or `null` when the consultation does not exist. */
+  booking: ConsultationRow | null;
+  refusal?: 'not_found' | 'not_instant' | 'illegal_transition';
 }
 
 export interface CreateBookingInput {
@@ -280,6 +302,84 @@ export class BookingService {
 
       return updated;
     });
+  }
+
+  /**
+   * *** ADDITIVE (M-13). THE INSTANT LIFECYCLE'S STATUS MOVES. ***
+   *
+   * `consultations` is this module's table, and FR-10.2 puts three status
+   * moves inside M-13's flow that no method here covered:
+   *
+   *   `pending_payment` -> `awaiting_doctor`   the request starts routing
+   *   `awaiting_doctor` -> `pending_payment`   a doctor accepted; now pay
+   *   `awaiting_doctor` -> `expired`           every doctor was tried
+   *
+   * The alternative was M-13 writing `consultations.status` itself, which is
+   * precisely the drift `booking.repository.ts`'s header flags in the other
+   * direction. So the split is the same one M-05 makes for `doctors.presence`:
+   * *** THE CALLER SUPPLIES THE LEGAL FROM-STATES, THIS MODULE TAKES THE ROW
+   * LOCK AND ENFORCES THEM. *** M-13 owns the instant state machine; M-11
+   * owns the row.
+   *
+   * Restricted to `mode: 'instant'` rows, so this can never become a general
+   * status setter that routes around `cancel`/`reschedule`/`markNoShow` and
+   * their policies. And it is NON-THROWING for a refused move — it returns a
+   * `refusal`, because both of M-13's sweeps call it in a batch loop where one
+   * refused candidate must not abandon the rest.
+   */
+  async transitionInstantConsultation(input: InstantTransitionInput): Promise<InstantTransitionResult> {
+    return this.db.transaction(async (tx) => {
+      const row = await this.repo.findByIdForUpdate(input.consultationId, tx);
+      if (!row) return { changed: false, booking: null, refusal: 'not_found' as const };
+
+      // The whole reason this is safe to expose: it cannot touch a scheduled
+      // booking, so none of M-11's own policies can be routed around with it.
+      if (row.mode !== 'instant') {
+        return { changed: false, booking: row, refusal: 'not_instant' as const };
+      }
+
+      // Idempotent no-op — a retried sweep tick must not look like a state
+      // change in the audit log.
+      if (row.status === input.to) {
+        return { changed: false, booking: row };
+      }
+
+      const patch: Partial<NewConsultationRow> = { status: input.to };
+      // `holdExpiresAt` is only written when the caller says so, and `null` is
+      // a MEANINGFUL value here (clear the hold), so the field's presence is
+      // what decides — not its truthiness.
+      if (input.holdExpiresAt !== undefined) patch.holdExpiresAt = input.holdExpiresAt;
+
+      const updated = await this.repo.updateStatusIfIn(input.consultationId, input.from, patch, tx);
+      if (!updated) {
+        return { changed: false, booking: row, refusal: 'illegal_transition' as const };
+      }
+
+      await this.audit.write(
+        {
+          actorType: 'system',
+          actorId: null,
+          action: 'update',
+          entityType: BOOKING_AUDIT_ENTITY_TYPES.CONSULTATION,
+          entityId: input.consultationId,
+          consultationId: input.consultationId,
+          metadata: {
+            change: 'instant_transition',
+            before: row.status,
+            after: input.to,
+            ...(input.reason ? { reason: input.reason } : {}),
+          },
+        },
+        tx,
+      );
+
+      return { changed: true, booking: updated };
+    });
+  }
+
+  /** ADDITIVE (M-13) — see `BookingRepository#listExpiredInstantHolds`. */
+  async listExpiredInstantHolds(now: Date, limit: number): Promise<ExpiredInstantHold[]> {
+    return this.repo.listExpiredInstantHolds(now, limit);
   }
 
   /* ── Cancel ───────────────────────────────────────────────────────────── */
