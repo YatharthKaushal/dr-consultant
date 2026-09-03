@@ -63,9 +63,28 @@ export interface BookingPaymentPort {
 
   /**
    * Creates the `payments` row and the gateway order for a consultation that
-   * already exists. Called INSIDE this module's booking transaction, so a
-   * throw here rolls the consultation insert back and no orphan hold survives
-   * — see `booking.service.ts#createBooking`.
+   * already exists.
+   *
+   * *** CALLED AFTER THE BOOKING TRANSACTION HAS COMMITTED, NOT INSIDE IT. ***
+   * (This comment previously said the opposite — that the call runs inside the
+   * booking transaction and that a throw rolls the consultation insert back.
+   * It does not, it cannot, and the difference is the entire safety argument
+   * of this seam, so the stale version is corrected here rather than left to
+   * mislead the next reader of the most money-critical boundary in the module.)
+   *
+   * It cannot run inside that transaction: this port takes no `tx` and
+   * `backend/README.md` §2 forbids cross-module transactions, so M-12 writes on
+   * its OWN connection — and a `payments` insert on another connection would
+   * block on the foreign-key check against a `consultations` row that is still
+   * uncommitted, waiting on a transaction that is itself waiting for this call
+   * to return. That deadlock would fire on every single booking.
+   *
+   * So `createBooking` is a two-step SAGA instead: commit the hold, then call
+   * this. A throw here is COMPENSATED — the hold is released to `expired` — and
+   * rewrapped as `PAYMENT_SETUP_FAILED`; if this process dies in the window
+   * between the two steps, the row is left `pending_payment` with a hold and no
+   * payment, which is exactly Tier 1 of the expiry sweep. See
+   * `booking.service.ts#createBooking` for the full argument.
    */
   createOrderForConsultation(input: { consultationId: string; consultationFeeInr: string }): Promise<CreatedOrder>;
 

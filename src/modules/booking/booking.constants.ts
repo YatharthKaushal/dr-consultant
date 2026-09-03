@@ -73,6 +73,15 @@ export const BOOKING_ERROR_CODES = {
   INVALID_POLICY_SHAPE: 'INVALID_POLICY_SHAPE',
   /** The document id does not exist, or does not belong to the patient on this consultation. */
   DOCUMENT_NOT_ATTACHABLE: 'DOCUMENT_NOT_ATTACHABLE',
+  /**
+   * `generateReferenceCode` could not find a free `reference_code` in five
+   * tries. A transient SERVER-side failure, not anything the caller did — it
+   * previously reused `INVALID_STATE_TRANSITION`, which is a client-facing
+   * "this booking is in the wrong state" code and carries a `currentStatus` a
+   * client will read; a client switching on the code would have rendered a
+   * state message for a booking that has no state yet.
+   */
+  REFERENCE_ALLOCATION_FAILED: 'REFERENCE_ALLOCATION_FAILED',
 } as const;
 export type BookingErrorCode = (typeof BOOKING_ERROR_CODES)[keyof typeof BOOKING_ERROR_CODES];
 

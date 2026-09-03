@@ -1,4 +1,12 @@
-import { BadRequestException, ConflictException, Inject, Injectable, Logger, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  ConflictException,
+  Inject,
+  Injectable,
+  Logger,
+  NotFoundException,
+  ServiceUnavailableException,
+} from '@nestjs/common';
 import { randomBytes } from 'node:crypto';
 import { DATABASE } from '../../config/db/database.module';
 import type { Database } from '../../config/db/database.config';
@@ -441,7 +449,10 @@ export class BookingService {
    *   1. Cancel the old row FIRST. That is what frees its slot, because
    *      `cancelled` is not in the partial unique index's status list — and
    *      it is what lets a patient reschedule to a time that overlaps their
-   *      own current booking, including the same slot.
+   *      own current booking, including the same slot. (The ADVISORY
+   *      pre-check has to be told about that case separately — see
+   *      `assertReschedulableInto`, which is what actually makes the
+   *      overlapping and same-slot moves reachable.)
    *   2. Insert the new row. If the new slot is taken, the index raises
    *      `23505`, the WHOLE transaction rolls back, and the old booking is
    *      restored untouched. A failed reschedule never costs the patient the
@@ -467,14 +478,7 @@ export class BookingService {
     // Validated exactly like a fresh booking — same doctor gate, same slot
     // gate. `isSlotBookable` stays advisory; the index still decides.
     if (!(await this.doctors.isVerifiedAndListed(existing.doctorId))) throw doctorNotBookable();
-    const bookability = await this.availability.isSlotBookable(existing.doctorId, newStartAt);
-    if (!bookability.bookable) {
-      throw new ConflictException({
-        code: BOOKING_ERROR_CODES.SLOT_NOT_BOOKABLE,
-        message: 'That slot cannot be booked.',
-        reason: bookability.reason,
-      });
-    }
+    await this.assertReschedulableInto(existing, newStartAt);
 
     // Resolved BEFORE the transaction opens: the port is a remote call, and a
     // remote call must never run while we hold a row lock.
@@ -832,6 +836,55 @@ export class BookingService {
     });
   }
 
+  /**
+   * The slot gate for a RESCHEDULE, which is not quite the gate for a fresh
+   * booking.
+   *
+   * *** THE BOOKING BEING MOVED MUST NOT BLOCK ITS OWN MOVE. ***
+   * `AvailabilityContract.isSlotBookable` takes only `(doctorId, startsAtUtc)`
+   * — there is no way to tell it "ignore this one consultation" — so it counts
+   * the appointment we are about to cancel among the doctor's busy intervals
+   * and answers `already_taken`. That made rescheduling to the SAME slot, or to
+   * any slot inside the appointment's own duration (a 10:00 half-hour consult
+   * moved to 10:15), fail with a 409 naming a conflict against the patient's
+   * own booking — while `reschedule`'s doc comment promised exactly that case
+   * would work. Verified live before the fix: `POST /bookings/:id/reschedule`
+   * to 09:00 and to 09:15 on a 09:00 30-minute booking both returned
+   * `SLOT_NOT_BOOKABLE / already_taken`.
+   *
+   * `already_taken` is the ONLY verdict this can affect, so it is the only one
+   * re-tested — against this module's own table, with the moved row excluded
+   * and the same occupying-status set the partial unique index uses. Every
+   * other reason (`blocked`, `outside_working_hours`, `too_soon`,
+   * `too_far_ahead`, `doctor_not_bookable`) is a fact about the doctor's
+   * calendar rules that the moved row cannot have caused, and still stands.
+   *
+   * This LOOSENS nothing: a slot genuinely taken by somebody else still fails
+   * here, and if it is taken between this check and the insert the partial
+   * unique index refuses the insert and the whole reschedule rolls back.
+   */
+  private async assertReschedulableInto(existing: ConsultationRow, newStartAt: Date): Promise<void> {
+    const doctorId = existing.doctorId;
+    if (doctorId === null) throw bookingNotFound();
+
+    const bookability = await this.availability.isSlotBookable(doctorId, newStartAt);
+    if (bookability.bookable) return;
+
+    if (bookability.reason === 'already_taken') {
+      // The interval the REPLACEMENT row will occupy — its own duration, which
+      // is what `reschedule` copies onto the new row.
+      const endsAt = new Date(newStartAt.getTime() + existing.durationMinutes * 60_000);
+      const takenByAnother = await this.repo.hasOccupyingOverlap(doctorId, newStartAt, endsAt, existing.id);
+      if (!takenByAnother) return;
+    }
+
+    throw new ConflictException({
+      code: BOOKING_ERROR_CODES.SLOT_NOT_BOOKABLE,
+      message: 'That slot cannot be booked.',
+      reason: bookability.reason,
+    });
+  }
+
   /** Every "may this be booked at all" check a create or reschedule shares. */
   private async validateBookingTargets(input: {
     patientId: string;
@@ -912,8 +965,20 @@ export class BookingService {
     return payment;
   }
 
-  /** The doctor's fee, as the refund base. Falls back to the live profile because `payments` (M-12's table) is not ours to read for amounts. */
+  /**
+   * The refund base: what THIS consultation was actually billed, read off its
+   * own payment row (`booking.repository.ts#findBilledConsultationFee` explains
+   * why it is read there and not taken from the doctor's live profile).
+   *
+   * The live profile remains the fallback for the case where no payment row
+   * exists at all — unreachable from the cancellation path, which only gets
+   * here once the port has already reported `status: 'paid'`, but a wrong
+   * refund is worse than a redundant guard.
+   */
   private async resolveConsultationFee(booking: ConsultationRow): Promise<string> {
+    const billed = await this.repo.findBilledConsultationFee(booking.id);
+    if (billed !== null) return billed;
+
     if (!booking.doctorId) return '0';
     const profile = await this.doctors.getPublicProfile(booking.doctorId);
     return profile?.consultationFeeInr ?? '0';
@@ -950,8 +1015,11 @@ export class BookingService {
       const code = `${BOOKING_REFERENCE_PREFIX}-${stamp}-${tail}`;
       if (!(await this.repo.referenceCodeExists(code))) return code;
     }
-    throw new ConflictException({
-      code: BOOKING_ERROR_CODES.INVALID_STATE_TRANSITION,
+    // 503, not 409: nothing about the request is wrong and there is nothing
+    // for the caller to change — the server transiently could not allocate,
+    // and retrying is exactly the right response.
+    throw new ServiceUnavailableException({
+      code: BOOKING_ERROR_CODES.REFERENCE_ALLOCATION_FAILED,
       message: 'Could not allocate a booking reference. Please try again.',
     });
   }
