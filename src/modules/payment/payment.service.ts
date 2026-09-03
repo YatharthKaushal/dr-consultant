@@ -236,16 +236,16 @@ export class PaymentService {
     let order: { id: string };
     try {
       order = await this.gateway.createOrder({
-      // *** THE QUOTE'S TOTAL, NOT A RECOMPUTED ONE. ***
-      amount: paiseToGatewayAmount(totalPayablePaise),
-      currency: PAYMENT_DEFAULT_CURRENCY,
-      // `payments.id` as the receipt. Razorpay treats `receipt` as an
-      // idempotency key and REJECTS a second create with the same value, which
-      // makes a duplicated create for one payment row impossible at the
-      // gateway as well as here. A uuid is 36 chars, inside Razorpay's 40-char
-      // limit.
-      receipt: payment.id,
-      notes: { consultationId: input.consultationId, paymentId: payment.id },
+        // *** THE QUOTE'S TOTAL, NOT A RECOMPUTED ONE. ***
+        amount: paiseToGatewayAmount(totalPayablePaise),
+        currency: PAYMENT_DEFAULT_CURRENCY,
+        // `payments.id` as the receipt. Razorpay treats `receipt` as an
+        // idempotency key and REJECTS a second create with the same value,
+        // which makes a duplicated create for one payment row impossible at
+        // the gateway as well as here. A uuid is 36 chars, inside Razorpay's
+        // 40-char limit.
+        receipt: payment.id,
+        notes: { consultationId: input.consultationId, paymentId: payment.id },
       });
     } catch (error) {
       // No order exists, so no money can move against this quote — release the
