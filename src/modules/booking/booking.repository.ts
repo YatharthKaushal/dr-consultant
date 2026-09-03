@@ -24,6 +24,19 @@ type Executor = Database | DatabaseTransaction;
  */
 const QUERY_MARGIN_MS = 24 * 60 * 60 * 1000;
 
+/**
+ * ADDITIVE (M-13): one instant consultation whose payment hold has lapsed.
+ * See `BookingContract#listExpiredInstantHolds` for why M-13 needs its own
+ * candidate query rather than reusing `ExpiredHoldCandidate`.
+ */
+export interface ExpiredInstantHold {
+  consultationId: string;
+  patientId: string;
+  /** `null` while the request is still searching — the crash window between `createInstantBooking` and the move to `awaiting_doctor`. */
+  doctorId: string | null;
+  holdExpiresAt: Date | null;
+}
+
 /** One expired hold, with just enough of its payment to decide which sweep tier it belongs to. */
 export interface ExpiredHoldCandidate {
   consultationId: string;
@@ -176,6 +189,45 @@ export class BookingRepository {
       .leftJoin(paymentsTable, eq(paymentsTable.consultationId, consultationsTable.id))
       .where(
         and(
+          eq(consultationsTable.status, 'pending_payment'),
+          isNotNull(consultationsTable.holdExpiresAt),
+          lte(consultationsTable.holdExpiresAt, now),
+        ),
+      )
+      .orderBy(asc(consultationsTable.holdExpiresAt))
+      .limit(limit);
+  }
+
+  /**
+   * ADDITIVE (M-13): every INSTANT consultation sitting in `pending_payment`
+   * past its hold — the candidate query behind M-13's post-acceptance payment
+   * sweep.
+   *
+   * Why this is not `findExpiredHoldCandidates` with a `mode` filter: that
+   * query exists to decide a TIER (does a gateway order exist), and M-13's
+   * sweep does not want a tier. An instant consult that reached checkout is
+   * exactly the case M-11's Tier 2 refuses to release — it asks the gateway
+   * and keeps holding on anything but a definitive failure. That is right for
+   * a scheduled slot and wrong for a live doctor, who cannot be held while a
+   * patient thinks about it. M-13 releases on ITS OWN clock and accepts the
+   * late-capture path underneath; see `instant-expiry.service.ts`.
+   *
+   * `hold_expires_at IS NOT NULL` is explicit for the same reason it is
+   * there: a `pending_payment` row with no hold is not an expired hold.
+   * `consultations_hold_expires_at_index` backs the range predicate.
+   */
+  async listExpiredInstantHolds(now: Date, limit: number, executor: Executor = this.db): Promise<ExpiredInstantHold[]> {
+    return executor
+      .select({
+        consultationId: consultationsTable.id,
+        patientId: consultationsTable.patientId,
+        doctorId: consultationsTable.doctorId,
+        holdExpiresAt: consultationsTable.holdExpiresAt,
+      })
+      .from(consultationsTable)
+      .where(
+        and(
+          eq(consultationsTable.mode, 'instant'),
           eq(consultationsTable.status, 'pending_payment'),
           isNotNull(consultationsTable.holdExpiresAt),
           lte(consultationsTable.holdExpiresAt, now),

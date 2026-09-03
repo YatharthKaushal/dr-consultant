@@ -1,3 +1,5 @@
+import type { DoctorPresence } from '../../schema/enums.schema';
+
 export interface PublicDoctorSpecialty {
   id: string;
   code: string;
@@ -104,6 +106,135 @@ export interface DoctorContract {
    * applies it from `getEarliestBookableSlots` after this call.
    */
   listListedDoctors(filter: ListedDoctorFilter): Promise<ListedDoctorSummary[]>;
+
+  /* ── ADDITIVE (M-13/presence and instant consult) ──────────────────────── */
+
+  /**
+   * *** THE M-13 BOUNDARY. READ `doctor-presence.service.ts`'s HEADER. ***
+   *
+   * `presence`, `allow_instant_consult` and `blocked_by_consultation_id` are
+   * columns on `doctors`, so M-05 writes them; M-13 owns the rules that
+   * decide when they move. The five methods below are the whole of that
+   * seam — M-13 never touches this table, and this module never invents a
+   * transition.
+   */
+
+  /** The doctor's live routing-relevant state, or `null` if the doctor id does not exist. Also serves FR-4.2's "live availability" on a listing card. */
+  getPresenceState(doctorId: string): Promise<DoctorPresenceState | null>;
+
+  /**
+   * One presence transition (FR-10.4), taken under `SELECT ... FOR UPDATE` on
+   * the doctor row, with the legal FROM-states supplied by the CALLER — M-13
+   * holds the transition table, this module holds the lock that enforces it.
+   *
+   * NEVER THROWS for a refused transition; it returns a `refusal` code, so a
+   * sweep processing a batch is not derailed by one candidate and a
+   * controller can map the refusal to its own module's error vocabulary.
+   */
+  transitionPresence(input: PresenceTransitionInput): Promise<PresenceTransitionResult>;
+
+  /** *** SETS THE COMPLETION GATE (FR-10.5). *** Refuses if the doctor is already gated by a different consultation. */
+  setCompletionGate(input: { doctorId: string; consultationId: string; actor: PresenceActor }): Promise<CompletionGateResult>;
+
+  /** *** CLEARS THE COMPLETION GATE (FR-10.5). *** Addressed by consultation, and idempotent — M-15 must be able to retry it. */
+  clearCompletionGate(input: { consultationId: string; actor: PresenceActor }): Promise<CompletionGateResult>;
+
+  /**
+   * Every doctor an instant request may be offered to, in the order to try
+   * them: `presence = 'available_now'`, `allow_instant_consult`, practises
+   * the booked specialty, `blocked_by_consultation_id IS NULL`, verified and
+   * listed. `scheduled_only` is deliberately never a candidate (FR-10.3).
+   */
+  listInstantRoutingCandidates(filter: ListInstantRoutingCandidatesFilter): Promise<InstantRoutingCandidate[]>;
+
+  /** THE BOOT SWEEP: reset every doctor in `from` to `to`, because after a restart no realtime channel exists to vouch for them. Returns the doctors actually moved. */
+  resetPresence(input: ResetPresenceInput): Promise<{ doctorIds: string[] }>;
+}
+
+/** Who is driving a presence or completion-gate write. `system` is the router and the sweeps; `doctor` is a self-service change; `admin` is an operator override. */
+export interface PresenceActor {
+  actorType: 'doctor' | 'admin' | 'system';
+  /** `null` only when `actorType` is `system`. */
+  actorId: string | null;
+}
+
+/** See `DoctorContract#getPresenceState`. */
+export interface DoctorPresenceState {
+  doctorId: string;
+  presence: DoctorPresence;
+  allowInstantConsult: boolean;
+  /** *** THE COMPLETION GATE. *** Non-null means documentation is outstanding and no instant request may be routed here. */
+  blockedByConsultationId: string | null;
+  /** `verified` + `isListed`. A doctor failing this is never routed, whatever their presence says. */
+  isVerifiedAndListed: boolean;
+}
+
+/** See `DoctorContract#transitionPresence`. */
+export interface PresenceTransitionInput {
+  doctorId: string;
+  to: DoctorPresence;
+  /** The states this move is legal FROM — the caller's transition table, enforced here under the row lock. */
+  from: readonly DoctorPresence[];
+  /** Refuse while `blocked_by_consultation_id` is set. Set on any move INTO a routable state. */
+  requireNotGated?: boolean;
+  actor: PresenceActor;
+  /** Free-form detail carried into the audit row's `metadata.reason`. */
+  reason?: string;
+}
+
+/** Why a presence transition did not happen. Absent when it did, or when the call was an idempotent no-op. */
+export type PresenceRefusal = 'doctor_not_found' | 'illegal_transition' | 'completion_gated';
+
+/** See `DoctorContract#transitionPresence`. */
+export interface PresenceTransitionResult {
+  /** `false` for both an idempotent no-op (already in `to`) and a refusal — `refusal` tells them apart. */
+  changed: boolean;
+  /** `null` only when the doctor row does not exist. */
+  before: DoctorPresence | null;
+  after: DoctorPresence | null;
+  refusal?: PresenceRefusal;
+  blockedByConsultationId?: string | null;
+}
+
+/** See `DoctorContract#setCompletionGate` / `#clearCompletionGate`. */
+export interface CompletionGateResult {
+  changed: boolean;
+  /** The gated doctor. `null` when no doctor was found, or when nothing was gated by that consultation. */
+  doctorId: string | null;
+  blockedByConsultationId: string | null;
+  refusal?: 'doctor_not_found' | 'already_gated';
+}
+
+/** See `DoctorContract#listInstantRoutingCandidates`. */
+export interface ListInstantRoutingCandidatesFilter {
+  /** The consultation's booking-time specialty snapshot. */
+  specialtyId: string;
+  /** Doctors already offered this request, never re-offered (FR-10.6 routes to the NEXT doctor). */
+  excludeDoctorIds?: readonly string[];
+  limit: number;
+}
+
+/**
+ * See `DoctorContract#listInstantRoutingCandidates`. Deliberately NOT
+ * `ListedDoctorSummary`: routing needs the fee (to price the order the moment
+ * the doctor accepts) and the duration (to stamp on the consultation), and
+ * nothing else — a candidate set is not a listing and must not quietly become
+ * one.
+ */
+export interface InstantRoutingCandidate {
+  doctorId: string;
+  fullName: string;
+  /** Decimal string — `numeric(10,2)`. A float would round a fee. */
+  consultationFeeInr: string;
+  consultationDurationMinutes: number;
+}
+
+/** See `DoctorContract#resetPresence`. */
+export interface ResetPresenceInput {
+  from: readonly DoctorPresence[];
+  to: DoctorPresence;
+  actor: PresenceActor;
+  reason?: string;
 }
 
 /** See `DoctorContract#getSchedulingParameters`. */

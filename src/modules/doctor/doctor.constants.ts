@@ -5,6 +5,24 @@ export const DOCTOR_AUDIT_ENTITY_TYPES = {
   DOCTOR: 'doctor',
   DOCTOR_SPECIALTY: 'doctor_specialty',
   DOCTOR_DOCUMENT: 'doctor_document',
+  /**
+   * ADDITIVE (M-13/presence). A `doctors.presence` transition. `entity_id` is
+   * the doctor id; the before/after states are in `metadata`.
+   *
+   * Split from `DOCTOR` deliberately: presence changes several times an hour
+   * per live doctor, and mixing them into the `doctor` entity stream would
+   * bury the profile/verification/fee history an auditor actually opens that
+   * stream to read.
+   */
+  DOCTOR_PRESENCE: 'doctor_presence',
+  /**
+   * ADDITIVE (M-13/presence). *** THE COMPLETION GATE *** —
+   * `doctors.blocked_by_consultation_id` being set or cleared (FR-10.5).
+   * `entity_id` is the doctor id and `consultation_id` names the gating
+   * consultation, so "why could this doctor take no instant request between
+   * 14:05 and 14:40" is one query.
+   */
+  DOCTOR_COMPLETION_GATE: 'doctor_completion_gate',
 } as const;
 
 export const DOCTOR_ERROR_CODES = {
