@@ -167,6 +167,57 @@ const optionalEnv = z.object({
   // same reason. Non-secret `cloudName` lives in `storage_providers.config`.
   CLOUDINARY_API_KEY: z.string().optional(),
   CLOUDINARY_API_SECRET: z.string().optional(),
+
+  /*
+   * modules/notification (M-08) — Firebase Cloud Messaging service accounts,
+   * ONE PER APP.
+   *
+   * `docs/MODULES.md` M-08: "Separate push credentials per app, since the
+   * patient and doctor apps are separate store listings." Two store listings
+   * means two Firebase projects and two service accounts, so `firebase-admin`
+   * is initialised twice under two names — see `fcm-push.adapter.ts`. FCM
+   * forwards to APNs for iOS, so the APNs key is uploaded to the Firebase
+   * console rather than configured here.
+   *
+   * *** ALL SIX ARE OPTIONAL, AND NONE IS VALIDATED BEYOND BEING A STRING. ***
+   * That is a deliberate departure from how `AI_CREDENTIAL_ENCRYPTION_KEY` is
+   * treated (required, regex-checked) and a deliberate match for the four
+   * S3/Cloudinary values above. Two reasons, and the second is the important
+   * one:
+   *
+   *   1. A deployment may legitimately run with only one app configured, or
+   *      with neither — early development, a staging box, CI. A missing
+   *      credential makes push unavailable for that audience and nothing
+   *      else: the `notifications` row is still written, the in-app inbox and
+   *      the admin panel are unaffected, and `notifications.failure_reason`
+   *      records "queued but not delivered".
+   *
+   *   2. *** A MALFORMED CREDENTIAL MUST NOT BE ABLE TO STOP THE SERVER
+   *      BOOTING. *** `validateEnv` exits the process on a value that is
+   *      PRESENT BUT INVALID, so a regex here — "must look like a PEM", say —
+   *      would turn one mistyped private key into a server that will not
+   *      start. Notifications are the least critical thing this server does;
+   *      they must not be able to take down consultations, payments or
+   *      sign-in. So the shape check lives in the adapter, where a bad key
+   *      degrades one audience's push and is logged once.
+   *
+   * The private key is a multi-line PEM. A `.env` file cannot hold a raw
+   * newline in an unquoted value, so it is stored with literal `\n`
+   * sequences; `fcm-push.adapter.ts#normalizePrivateKey` unescapes them (and
+   * strips surrounding quotes) at the point of use, keeping this schema a
+   * plain declaration of shape exactly as the S3 and Cloudinary secrets are.
+   *
+   * Non-secret values are NOT here and are not admin-editable either: a
+   * Firebase project id is part of a service-account credential, not a
+   * business rule an admin tunes. The admin-editable half of M-08 is the
+   * COPY, which lives in `app_config` under `notifications.templates`.
+   */
+  FCM_PATIENT_PROJECT_ID: z.string().optional(),
+  FCM_PATIENT_CLIENT_EMAIL: z.string().optional(),
+  FCM_PATIENT_PRIVATE_KEY: z.string().optional(),
+  FCM_DOCTOR_PROJECT_ID: z.string().optional(),
+  FCM_DOCTOR_CLIENT_EMAIL: z.string().optional(),
+  FCM_DOCTOR_PRIVATE_KEY: z.string().optional(),
 });
 
 export const envSchema = requiredEnv.extend(optionalEnv.shape);
