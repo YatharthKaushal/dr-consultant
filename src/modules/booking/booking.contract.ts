@@ -176,4 +176,51 @@ export interface BookingContract {
    * `instant_consultancy` — that table is M-13's.
    */
   assignDoctor(consultationId: string, doctorId: string): Promise<BookingView>;
+
+  /**
+   * *** ADDITIVE (M-13). THE INSTANT LIFECYCLE'S STATUS MOVES. ***
+   *
+   * FR-10.2 orders the instant flow request -> accept -> PAY, which puts
+   * three status moves inside M-13's flow that nothing on this contract
+   * covered:
+   *
+   *   `pending_payment` -> `awaiting_doctor`   the request starts routing
+   *   `awaiting_doctor` -> `pending_payment`   a doctor accepted; now pay
+   *   `awaiting_doctor` -> `expired`           every doctor was tried
+   *
+   * The caller supplies the legal FROM-states and this module takes the row
+   * lock and enforces them — the same rule/write split M-05 makes for
+   * `doctors.presence`, and the reason M-13 never writes `consultations`
+   * itself. Restricted to `mode: 'instant'` rows, so it cannot become a
+   * general status setter that routes around cancel/reschedule/no-show.
+   *
+   * NON-THROWING for a refused move: both of M-13's sweeps call it in a batch
+   * loop, where one refused candidate must not abandon the rest.
+   */
+  transitionInstantConsultation(input: {
+    consultationId: string;
+    to: 'awaiting_doctor' | 'pending_payment' | 'expired';
+    from: readonly ConsultationStatus[];
+    /** Omit to leave the hold alone. `null` clears it; a date sets it. */
+    holdExpiresAt?: Date | null;
+    reason?: string;
+  }): Promise<{ changed: boolean; booking: BookingView | null; refusal?: 'not_found' | 'not_instant' | 'illegal_transition' }>;
+
+  /**
+   * ADDITIVE (M-13): instant consultations sitting in `pending_payment` past
+   * their hold — the candidate query behind M-13's post-acceptance payment
+   * sweep, the failure mode with no equivalent in the scheduled flow (a
+   * doctor accepted, and the patient never paid).
+   *
+   * Deliberately NOT served by this module's own two-tier sweep, which by
+   * design refuses to release a hold that reached the gateway. That is right
+   * for a slot and wrong for a live doctor. See
+   * `booking.repository.ts#listExpiredInstantHolds`.
+   */
+  listExpiredInstantHolds(now: Date, limit: number): Promise<Array<{
+    consultationId: string;
+    patientId: string;
+    doctorId: string | null;
+    holdExpiresAt: Date | null;
+  }>>;
 }

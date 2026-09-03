@@ -5,6 +5,7 @@ import { StorageModule } from '../storage/storage.module';
 import { DoctorAdminController } from './doctor-admin.controller';
 import { DoctorDocumentRepository } from './doctor-document.repository';
 import { DoctorDocumentService } from './doctor-document.service';
+import { DoctorPresenceService } from './doctor-presence.service';
 import { DoctorReliabilityService } from './doctor-reliability.service';
 import { DoctorSpecialtyRepository } from './doctor-specialty.repository';
 import { DoctorSpecialtyService } from './doctor-specialty.service';
@@ -45,6 +46,10 @@ import { DoctorService } from './doctor.service';
     DoctorSpecialtyService,
     DoctorDocumentService,
     DoctorReliabilityService,
+    // ADDITIVE (M-13): the write half of `doctors.presence` /
+    // `blocked_by_consultation_id`. Not exported — M-13 reaches it through
+    // `DoctorFacade`, like every other cross-module call.
+    DoctorPresenceService,
     DoctorFacade,
   ],
   exports: [DoctorFacade],
