@@ -8,6 +8,7 @@ import { ReferralRepository } from './referral.repository';
 import { ReferralService } from './referral.service';
 import type { ConsultationLookupStatus, PromotionBookingLookupPort } from './promotion-booking.contract';
 import {
+  PROMOTION_ATTEMPT_RETENTION_DAYS,
   PROMOTION_BOOKING_LOOKUP_PORT,
   PROMOTION_PAID_CONSULTATION_STATUSES,
   PROMOTION_SWEEP_BATCH_SIZE,
@@ -155,6 +156,9 @@ export class PromotionSweepService implements OnModuleInit, OnApplicationShutdow
           `Reservation sweep: ${reservations.released} released, ${reservations.confirmed} confirmed, ${reservations.kept} kept, ${reservations.failed} failed.`,
         );
       }
+
+      const purged = await this.purgeOldAttempts();
+      if (purged > 0) this.logger.log(`Attempt retention: ${purged} promotion_code_attempts rows dropped.`);
 
       const qualifications = await this.sweepQualifications();
       if (
@@ -351,6 +355,34 @@ export class PromotionSweepService implements OnModuleInit, OnApplicationShutdow
     }
 
     return result;
+  }
+
+  /**
+   * Drops attempt rows past their retention window.
+   *
+   * `promotion-code-attempts.schema.ts`: "Rows are disposable. `created_at` is
+   * indexed so a retention sweep can drop old ones cheaply." Without this the
+   * table grows forever — one row per code attempt, for every patient, for the
+   * life of the product — to serve a counter that never looks further back than
+   * one hour.
+   *
+   * BOUNDED per pass, so a first run against a large backlog does not take a
+   * long-lived lock on a table the checkout path reads.
+   *
+   * The window is deliberately much wider than the throttle's one hour: an
+   * attempt row is also the only evidence that somebody probed the code
+   * namespace, which is worth keeping long enough to notice a pattern in.
+   */
+  private async purgeOldAttempts(): Promise<number> {
+    const cutoff = new Date(Date.now() - PROMOTION_ATTEMPT_RETENTION_DAYS * 24 * 60 * 60 * 1000);
+    try {
+      return await this.repo.deleteAttemptsOlderThan(cutoff, PROMOTION_SWEEP_BATCH_SIZE);
+    } catch (error) {
+      // Retention is housekeeping. Failing it must never stop the two passes
+      // that touch money-adjacent state.
+      this.logger.warn(`Could not purge old promotion code attempts: ${describeError(error)}`);
+      return 0;
+    }
   }
 
   /**

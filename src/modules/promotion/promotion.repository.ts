@@ -472,15 +472,6 @@ export class PromotionRepository {
     return row ?? null;
   }
 
-  async findRedemptionById(id: string, executor: Executor = this.db): Promise<DiscountRedemptionRow | null> {
-    const [row] = await executor
-      .select()
-      .from(discountRedemptionsTable)
-      .where(eq(discountRedemptionsTable.id, id))
-      .limit(1);
-    return row ?? null;
-  }
-
   /**
    * Burns a reservation. Guarded on `status = 'reserved'`, so a replayed
    * capture updates zero rows and the caller can tell the difference — the same
@@ -621,20 +612,6 @@ export class PromotionRepository {
       .orderBy(desc(discountRedemptionsTable.createdAt))
       .limit(limit)
       .offset(offset);
-  }
-
-  /** A patient's own redemption history, for the patient-facing screen. */
-  async listRedemptionsForPatient(
-    patientId: string,
-    limit: number,
-    executor: Executor = this.db,
-  ): Promise<DiscountRedemptionRow[]> {
-    return executor
-      .select()
-      .from(discountRedemptionsTable)
-      .where(eq(discountRedemptionsTable.patientId, patientId))
-      .orderBy(desc(discountRedemptionsTable.createdAt))
-      .limit(limit);
   }
 
   /**

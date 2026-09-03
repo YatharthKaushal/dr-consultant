@@ -1,5 +1,5 @@
 import { PromotionSweepService } from './promotion-sweep.service';
-import { PROMOTION_SWEEP_BATCH_SIZE } from './promotion.constants';
+import { PROMOTION_ATTEMPT_RETENTION_DAYS, PROMOTION_SWEEP_BATCH_SIZE } from './promotion.constants';
 
 /**
  * *** THE TIERED SWEEP, AND THE ONE RULE THAT MATTERS MOST: `unknown` MEANS
@@ -50,7 +50,11 @@ function build(
     config?: Partial<typeof CONFIG>;
   } = {},
 ) {
-  const repo = { findExpiredReservationCandidates: jest.fn().mockResolvedValue([]), ...overrides.repo };
+  const repo = {
+    findExpiredReservationCandidates: jest.fn().mockResolvedValue([]),
+    deleteAttemptsOlderThan: jest.fn().mockResolvedValue(0),
+    ...overrides.repo,
+  };
   const referralRepo = { findQualifyingCandidates: jest.fn().mockResolvedValue([]), ...overrides.referralRepo };
   const affiliateRepo = { findPendingCommissions: jest.fn().mockResolvedValue([]), ...overrides.affiliateRepo };
 
@@ -325,6 +329,61 @@ describe('PromotionSweepService', () => {
       const result = await service.sweepQualifications();
       expect(result.failed).toBe(1);
       expect(affiliates.accrueCommission).toHaveBeenCalled();
+    });
+  });
+
+  describe('attempt retention', () => {
+    /**
+     * `promotion_code_attempts` grows by one row per code attempt, forever, to
+     * serve a counter that never looks back further than an hour. Without a
+     * retention pass the table that the CHECKOUT PATH reads on every code
+     * resolution becomes the largest in the schema.
+     */
+    it('drops rows past the retention window, bounded per pass', async () => {
+      const timer = { unref: jest.fn() };
+      const ticks: Array<() => void> = [];
+      jest.spyOn(global, 'setInterval').mockImplementation((handler: TimerHandler) => {
+        ticks.push(handler as () => void);
+        return timer as never;
+      });
+
+      const { service, repo } = build({ repo: { deleteAttemptsOlderThan: jest.fn().mockResolvedValue(12) } });
+      service.onModuleInit();
+      ticks[0]();
+      await new Promise((resolve) => setImmediate(resolve));
+
+      expect(repo.deleteAttemptsOlderThan).toHaveBeenCalledWith(expect.any(Date), PROMOTION_SWEEP_BATCH_SIZE);
+      // Thirty days back, not one hour: the rows are also the only evidence that
+      // somebody walked the code namespace, and a probe is a pattern across days.
+      const cutoff = repo.deleteAttemptsOlderThan.mock.calls[0][0] as Date;
+      const daysBack = (Date.now() - cutoff.getTime()) / (24 * 60 * 60 * 1000);
+      expect(Math.round(daysBack)).toBe(PROMOTION_ATTEMPT_RETENTION_DAYS);
+
+      service.onApplicationShutdown();
+      jest.restoreAllMocks();
+    });
+
+    it('*** NEVER LETS HOUSEKEEPING STOP THE PASSES THAT TOUCH MONEY ***', async () => {
+      const timer = { unref: jest.fn() };
+      const ticks: Array<() => void> = [];
+      jest.spyOn(global, 'setInterval').mockImplementation((handler: TimerHandler) => {
+        ticks.push(handler as () => void);
+        return timer as never;
+      });
+
+      const { service, repo, referralRepo } = build({
+        repo: { deleteAttemptsOlderThan: jest.fn().mockRejectedValue(new Error('lock timeout')) },
+      });
+      service.onModuleInit();
+      ticks[0]();
+      await new Promise((resolve) => setImmediate(resolve));
+
+      // The retention failure was swallowed and the qualification pass still ran.
+      expect(repo.deleteAttemptsOlderThan).toHaveBeenCalled();
+      expect(referralRepo.findQualifyingCandidates).toHaveBeenCalled();
+
+      service.onApplicationShutdown();
+      jest.restoreAllMocks();
     });
   });
 

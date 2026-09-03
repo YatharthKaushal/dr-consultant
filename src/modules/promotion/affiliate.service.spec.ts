@@ -619,6 +619,49 @@ describe('AffiliateService', () => {
     });
   });
 
+  describe('resolveLinkSlug — the only unauthenticated entry point', () => {
+    it('exchanges an active partner’s slug for a token, and returns NOTHING else', async () => {
+      // No partner id, no doctor name, no terms. The token is inert until an
+      // authenticated request presents it.
+      const { service } = build({ repo: { findPartnerByLinkSlug: jest.fn().mockResolvedValue(partner()) } });
+      const resolved = await service.resolveLinkSlug('dr-smith-clinic');
+
+      expect(Object.keys(resolved ?? {}).sort()).toEqual(['expiresAt', 'token']);
+      expect(service.verifyAttributionToken(resolved!.token)).toMatchObject({ partnerId: PARTNER });
+    });
+
+    it('*** COLLAPSES unknown / paused / switched-off into ONE answer ***', async () => {
+      // So an unauthenticated caller cannot walk the slug namespace and learn
+      // which doctors have arrangements — the same collapse, for the same
+      // reason, as the code resolver's single CODE_NOT_USABLE.
+      const unknown = build({ repo: { findPartnerByLinkSlug: jest.fn().mockResolvedValue(null) } });
+      expect(await unknown.service.resolveLinkSlug('dr-smith-clinic')).toBeNull();
+
+      const paused = build({ repo: { findPartnerByLinkSlug: jest.fn().mockResolvedValue(partner({ status: 'paused' })) } });
+      expect(await paused.service.resolveLinkSlug('dr-smith-clinic')).toBeNull();
+
+      const off = build({
+        repo: { findPartnerByLinkSlug: jest.fn().mockResolvedValue(partner()) },
+        config: { affiliateEnabled: false },
+      });
+      expect(await off.service.resolveLinkSlug('dr-smith-clinic')).toBeNull();
+    });
+
+    it('does not even query on a malformed slug', async () => {
+      const { service, repo } = build();
+      expect(await service.resolveLinkSlug('Dr Smith!')).toBeNull();
+      expect(await service.resolveLinkSlug('short')).toBeNull();
+      expect(repo.findPartnerByLinkSlug).not.toHaveBeenCalled();
+    });
+
+    it('*** WRITES NO ROW — nothing is stored for an anonymous visitor, ever ***', async () => {
+      const { service, repo } = build({ repo: { findPartnerByLinkSlug: jest.fn().mockResolvedValue(partner()) } });
+      await service.resolveLinkSlug('dr-smith-clinic');
+      expect(repo.recordAttribution).not.toHaveBeenCalled();
+      expect(repo.insertCommissionIfAbsent).not.toHaveBeenCalled();
+    });
+  });
+
   describe('recordAttribution — LAST TOUCH WINS', () => {
     it('writes the row and honours the CONFIGURED window, not the token’s', async () => {
       // An admin shortening the attribution window must not be overridden by a

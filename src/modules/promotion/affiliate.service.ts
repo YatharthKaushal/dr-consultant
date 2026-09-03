@@ -968,6 +968,38 @@ export class AffiliateService {
     return this.repo.listSettlements(partnerId, limit, offset);
   }
 
+  /**
+   * Resolves a LINK SLUG from a shared URL into a signed, self-expiring token.
+   *
+   * *** THIS IS THE ONLY UNAUTHENTICATED ENTRY POINT IN THE MODULE, AND IT
+   * RETURNS NOTHING BUT A TOKEN. *** No partner id, no doctor name, no
+   * commission terms — a caller learns only that some slug resolves, and the
+   * token it gets back is inert until an authenticated request presents it.
+   *
+   * Why it exists at all: `affiliate_partners.link_slug` is what a doctor
+   * actually shares — `/r/dr-smith-clinic` is a link somebody will type, and a
+   * 200-character signed token is not. The slug is a DELIBERATELY SEPARATE
+   * NAMESPACE from `discount_instruments.code` (`affiliate-partners.schema.ts`:
+   * "a slug lives in a URL and a code is typed into a box"), so resolving one
+   * here cannot leak anything about the other.
+   *
+   * `null` for an unknown slug, a paused partner, or a switched-off mechanism —
+   * which is every slug today, since affiliates ship off. Collapsed into one
+   * answer for the same reason the code resolver collapses its refusals: a
+   * distinguishable "that slug exists but the partner is paused" is a confirmed
+   * hit for anybody walking the namespace.
+   */
+  async resolveLinkSlug(linkSlug: string): Promise<{ token: string; expiresAt: Date } | null> {
+    const config = await this.config.getResolved();
+    if (!config.affiliateEnabled) return null;
+    if (!/^[a-z0-9-]{6,40}$/.test(linkSlug)) return null;
+
+    const partner = await this.repo.findPartnerByLinkSlug(linkSlug);
+    if (!partner || partner.status !== 'active') return null;
+
+    return this.mintAttributionToken(partner.id, config.affiliateAttributionDays);
+  }
+
   /** Mints a link token for a partner, honouring the master switch. Returns `null` when affiliates are off — an admin must not be handed a URL that cannot work. */
   async issueAttributionLink(partnerId: string): Promise<{ token: string; expiresAt: Date } | null> {
     const config = await this.config.getResolved();
