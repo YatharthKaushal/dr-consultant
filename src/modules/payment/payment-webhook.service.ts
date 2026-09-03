@@ -392,6 +392,31 @@ export class PaymentWebhookService {
   }
 
   /**
+   * Releases the quote behind a payment the gateway has definitively failed.
+   *
+   * Best-effort: the failure is already recorded and the webhook must answer
+   * 2xx, or Razorpay redelivers forever. A leaked reservation is visible and
+   * recoverable; a webhook retry storm is not.
+   */
+  private async releaseQuoteForFailedPayment(paymentId: string): Promise<void> {
+    try {
+      const payment = await this.payments.findById(paymentId);
+      if (!payment || payment.priceQuoteId == null) return;
+
+      await this.pricing.abandon({
+        quoteId: payment.priceQuoteId,
+        consultationId: payment.consultationId,
+        reason: 'payment_failed',
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logger.error(
+        `Payment ${paymentId} failed, but its quote could not be released; the discount reservation may be held until it lapses. ${message}`,
+      );
+    }
+  }
+
+  /**
    * `price_quotes.total_payable` for a quoted payment, or `null` for a legacy one.
    *
    * Crosses to `modules/pricing` through its facade, never by reading its table
@@ -479,6 +504,15 @@ export class PaymentWebhookService {
       return 'handled';
     }
 
+    // *** THE PAYMENT DEFINITIVELY FAILED, SO RELEASE THE PRICE. ***
+    // This is the ordinary end of an abandoned checkout, and the only place a
+    // PINNED quote's discount reservation is released on the unhappy path — the
+    // stale-draft sweep deliberately leaves pinned quotes alone, because one may
+    // have a live payment behind it. Here the gateway has said otherwise, and
+    // `markFailedIfNotPaid` is guarded on `paid_at IS NULL`, so reaching this
+    // line means no capture happened.
+    await this.releaseQuoteForFailedPayment(resolvedPaymentId);
+
     await this.audit.write({
       actorType: 'system',
       actorId: null,
@@ -518,6 +552,20 @@ export class PaymentWebhookService {
       this.logger.log(`Refund ${refund.id} was already processed — replay is a no-op.`);
       return 'handled';
     }
+
+    // *** THE CREDIT-NOTE SERIAL IS TAKEN HERE, AND ONLY HERE ON THIS PATH. ***
+    //
+    // A refund reaches `processed` in one of two ways: the gateway answered
+    // `processed` to our own HTTP call (handled in `RefundService.createRefund`)
+    // or this webhook settled it later. This is the usual one — Razorpay's
+    // synchronous answer is normally `pending`.
+    //
+    // Allocated at SETTLEMENT, never at intent: a refund the gateway rejects
+    // must not burn a number, because a gap in a statutory series is its own
+    // compliance question (`pricing-document-sequences.schema.ts`). Guarded on
+    // `credit_note_number IS NULL`, so a replayed delivery that somehow got past
+    // `markProcessedIfNot` still cannot take a second number.
+    await this.refundService.allocateCreditNote(refund.id);
 
     // Now that a refund has settled, the payment may have become
     // `partially_refunded` or `refunded`.
