@@ -14,6 +14,7 @@ import { IdentityModule } from './modules/identity/identity.module';
 import { McpModule } from './modules/mcp/mcp.module';
 import { PatientModule } from './modules/patient/patient.module';
 import { PaymentModule } from './modules/payment/payment.module';
+import { PricingModule } from './modules/pricing/pricing.module';
 import { SearchModule } from './modules/search/search.module';
 import { SearchToolModule } from './modules/search/tools/search-tool.module';
 import { StorageModule } from './modules/storage/storage.module';
@@ -61,6 +62,14 @@ import { ErrorsModule } from './shared/errors/errors.module';
     // M-10: documents and file storage. Depends only on M-01/M-02
     // (`docs/MODULES.md`), so it needs no other feature module imported here.
     DocumentModule,
+    // M-12.5: pricing. The backend's single source of truth for every price —
+    // the bill becomes a priced list of components, each with its own tax
+    // treatment, frozen onto an immutable quote before the gateway order exists.
+    // Listed BEFORE PaymentModule because payment consumes `PricingFacade`; the
+    // dependency runs payment -> pricing and never back, so there is no cycle.
+    // (Ordering is for readability, not correctness — Nest resolves the provider
+    // graph regardless.)
+    PricingModule,
     // M-12: payments and billing (Razorpay). Imports no feature module of its
     // own — `docs/MODULES.md` lists M-12 as depending on M-05/M-11, but at the
     // code level the dependency runs the other way: booking calls payments

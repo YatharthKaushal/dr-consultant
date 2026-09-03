@@ -128,7 +128,7 @@ export class PricingService {
       action: 'create',
       entityType: PRICING_AUDIT_ENTITY_TYPES.QUOTE,
       entityId: written.quoteId,
-      consultationId,
+      consultationId: consultationId ?? undefined,
       metadata: {
         totalPayable: paiseToRupees(resolved.priced.totalPayablePaise),
         placeOfSupply: resolved.placeOfSupplyStateCode,
@@ -293,7 +293,7 @@ export class PricingService {
       action: 'update',
       entityType: PRICING_AUDIT_ENTITY_TYPES.QUOTE,
       entityId: input.quoteId,
-      consultationId: input.consultationId,
+      consultationId: input.consultationId ?? undefined,
       metadata: { transition: 'consumed', paymentId: input.paymentId },
     });
 
@@ -334,7 +334,7 @@ export class PricingService {
         action: 'update',
         entityType: PRICING_AUDIT_ENTITY_TYPES.QUOTE,
         entityId: input.quoteId,
-        consultationId: input.consultationId,
+        consultationId: input.consultationId ?? undefined,
         metadata: { transition: status, reason: input.reason },
       });
     }
