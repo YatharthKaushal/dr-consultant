@@ -71,3 +71,22 @@ export * from './complaints.schema';
 export * from './consents.schema';
 export * from './data-deletion-requests.schema';
 export * from './notifications.schema';
+
+// Pricing — the bill becomes a priced list of components, each with its own
+// tax treatment, frozen onto an immutable quote before the gateway order exists.
+export * from './price-quotes.schema';
+export * from './price-quote-components.schema';
+export * from './refund-components.schema';
+export * from './pricing-document-sequences.schema';
+
+// Promotions — coupons, vouchers, refer-and-earn and doctor affiliates, sharing
+// one code namespace. `affiliate_partners` carries the NMC warning that governs
+// whether the affiliate half may be enabled at all.
+export * from './discount-instruments.schema';
+export * from './discount-redemptions.schema';
+export * from './referral-events.schema';
+export * from './affiliate-partners.schema';
+export * from './affiliate-attributions.schema';
+export * from './affiliate-commissions.schema';
+export * from './affiliate-settlements.schema';
+export * from './promotion-code-attempts.schema';
