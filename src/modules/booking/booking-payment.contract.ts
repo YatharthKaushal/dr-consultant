@@ -114,5 +114,25 @@ export interface BookingPaymentPort {
     reason: string;
     initiatedByAdminId: string | null;
     isAutomatic: boolean;
+    /**
+     * *** OPTIONAL, AND IT REDEFINES THE REFUND BASE. ***
+     *
+     * When present AND the payment was priced by the pricing engine, `amount` is
+     * ignored and the refund is computed as this percentage of the CAPTURED
+     * TOTAL. `refundPct` has always meant "percent of the consultation FEE"
+     * here — a 100% tier returned 500.00 of a 618.00 bill — and this is what
+     * changes it.
+     *
+     * *** THIS IS A COMMERCIAL CHANGE, NOT A BUG FIX. *** It changes what the
+     * published cancellation policy actually pays out, and it needs the client's
+     * sign-off.
+     *
+     * `amount` is still sent and is still authoritative for a LEGACY payment
+     * (one with no quote), which has no per-component breakdown to apportion
+     * against. So the two together are "percent of the total where we can,
+     * percent of the fee where we cannot" — never a silent change of base on a
+     * historical row.
+     */
+    refundPct?: number;
   }): Promise<{ refundId: string; status: string }>;
 }

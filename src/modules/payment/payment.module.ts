@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { PricingModule } from '../pricing/pricing.module';
 import { PaymentAdminController } from './payment-admin.controller';
 import { PaymentAdminService } from './payment-admin.service';
 import { PaymentConfigRepository } from './payment-config.repository';
@@ -10,6 +11,7 @@ import { PaymentService } from './payment.service';
 import { PaymentWebhookController } from './payment-webhook.controller';
 import { PaymentWebhookService } from './payment-webhook.service';
 import { RazorpayClient } from './razorpay.client';
+import { RefundComponentRepository } from '../pricing/refund-component.repository';
 import { RefundRepository } from './refund.repository';
 import { RefundService } from './refund.service';
 
@@ -34,6 +36,7 @@ import { RefundService } from './refund.service';
  * import" `backend/README.md` §2 forbids.
  */
 @Module({
+  imports: [PricingModule],
   controllers: [PaymentWebhookController, PaymentAdminController],
   providers: [
     // Gateway boundary — the only thing that talks to Razorpay.
@@ -42,6 +45,11 @@ import { RefundService } from './refund.service';
     PaymentRepository,
     RefundRepository,
     PaymentEventRepository,
+    // `refund_components` is pricing's table; this module writes it because it
+    // owns the `refunds` row the FK hangs off. Provided here rather than
+    // exported from PricingModule so the pricing facade stays the only public
+    // surface for everything else.
+    RefundComponentRepository,
     PaymentConfigRepository,
     // Rules.
     PaymentConfigService,

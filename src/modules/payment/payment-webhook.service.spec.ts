@@ -5,6 +5,7 @@ import { PAYMENT_CAPTURED_EVENT } from './payment.contract';
 import type { PaymentEventRepository } from './payment-event.repository';
 import type { PaymentRepository } from './payment.repository';
 import { PaymentWebhookService } from './payment-webhook.service';
+import type { PricingFacade } from '../pricing/pricing.facade';
 import type { RefundRepository } from './refund.repository';
 import type { RefundService } from './refund.service';
 
@@ -81,6 +82,7 @@ describe('PaymentWebhookService', () => {
   let refundService: jest.Mocked<RefundService>;
   let audit: jest.Mocked<AuditService>;
   let emitter: jest.Mocked<EventEmitter2>;
+  let pricing: jest.Mocked<PricingFacade>;
   let service: PaymentWebhookService;
 
   beforeEach(() => {
@@ -108,11 +110,32 @@ describe('PaymentWebhookService', () => {
       markFailedIfNotProcessed: jest.fn().mockResolvedValue(1),
     } as unknown as jest.Mocked<RefundRepository>;
 
-    refundService = { recomputePaymentRefundStatus: jest.fn().mockResolvedValue(undefined) } as unknown as jest.Mocked<RefundService>;
+    refundService = {
+      recomputePaymentRefundStatus: jest.fn().mockResolvedValue(undefined),
+      allocateCreditNote: jest.fn().mockResolvedValue(undefined),
+    } as unknown as jest.Mocked<RefundService>;
     audit = { write: jest.fn().mockResolvedValue(undefined) } as unknown as jest.Mocked<AuditService>;
     emitter = { emit: jest.fn().mockReturnValue(true) } as unknown as jest.Mocked<EventEmitter2>;
 
-    service = new PaymentWebhookService(events, payments, refunds, refundService, audit, emitter);
+    pricing = {
+      // Every fixture in this spec is a LEGACY payment (`priceQuoteId: null`),
+      // so `capturedTotalPaise` takes the `calculateBill` branch and none of
+      // these are reached. They exist so the constructor is satisfiable.
+      getQuoteTotals: jest.fn().mockResolvedValue({}),
+      preview: jest.fn(),
+      createQuote: jest.fn(),
+      pin: jest.fn(),
+      materialiseAndPin: jest.fn(),
+      markConsumed: jest.fn().mockResolvedValue({ changed: true }),
+      abandon: jest.fn().mockResolvedValue({ changed: true }),
+      allocateInvoiceNumber: jest.fn().mockResolvedValue({ number: 'INV/2026-27/000001', issuedAt: new Date() }),
+      allocateCreditNoteNumber: jest.fn().mockResolvedValue({ number: 'CRN/2026-27/000001', issuedAt: new Date() }),
+      apportionRefund: jest.fn(),
+      refundAmountForPct: jest.fn(),
+      hasCatalogue: jest.fn().mockResolvedValue(false),
+    } as unknown as jest.Mocked<PricingFacade>;
+
+    service = new PaymentWebhookService(events, payments, refunds, refundService, audit, emitter, pricing);
   });
 
   /* ================================================================== */

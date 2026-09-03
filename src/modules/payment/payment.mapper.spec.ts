@@ -56,18 +56,71 @@ function refundRow(amount: string, status: RefundRow['status']): RefundRow {
   } as RefundRow;
 }
 
-describe('toBreakdown', () => {
-  /** FR-7.3, and there is deliberately no stored total column to disagree with it. */
-  it('sums the stored components rather than reading a total', () => {
+describe('toBreakdown — the ONE derivation of a captured total', () => {
+  /**
+   * *** THIS BEHAVIOUR CHANGED DELIBERATELY, AND THE CHANGE IS THE POINT. ***
+   *
+   * `toBreakdown` used to sum the three stored columns itself. That was one of
+   * FOUR independent re-derivations of the captured total, and
+   * `payment.service.ts#expectedTotalPaise` — the one that GATES
+   * `reconcileWithGateway`'s amount check — recomputed it via `calculateBill`
+   * instead. They agreed only by construction; a discount or a third component
+   * would have made the sweep silently refuse to mark real captures paid.
+   *
+   * All four now go through `payment-money.util.ts#capturedTotalPaise`:
+   *   quote present -> `price_quotes.total_payable`
+   *   quote absent  -> `calculateBill`, which is what a legacy row was billed at
+   *                    and what its gateway order was actually created for.
+   */
+  it('reproduces FR-7.3 for a legacy row', () => {
     expect(toBreakdown(paymentRow()).totalPayable).toBe('708.00');
   });
 
-  it('sums components that carry odd paise exactly', () => {
-    // 333.33 + 53.60 + 69.65 = 456.58, all hand-derived.
+  /**
+   * Odd paise, on a row whose columns are CONSISTENT WITH ITS OWN SNAPSHOTTED
+   * RATES — which is the only state a real row can be in, because the row and
+   * the gateway order are written from one `calculateBill` result.
+   *
+   * At a 333.33 fee: convenience is round(333.33 x 20%) = 66.67, subtotal
+   * 400.00, GST round(400.00 x 18%) = 72.00, total 472.00.
+   *
+   * (The previous version of this test used 333.33 / 53.60 / 69.65 — amounts
+   * that contradict the row's own 20% and 18% rates and that no real row could
+   * hold. Under one shared derivation such a row resolves to what its rates say
+   * it was billed, not to the sum of its inconsistent columns.)
+   */
+  it('handles odd paise exactly on a legacy row', () => {
     const breakdown = toBreakdown(
-      paymentRow({ consultationFee: '333.33', convenienceFee: '53.60', gstAmount: '69.65' }),
+      paymentRow({ consultationFee: '333.33', convenienceFee: '66.67', gstAmount: '72.00' }),
     );
-    expect(breakdown.totalPayable).toBe('456.58');
+    expect(breakdown.totalPayable).toBe('472.00');
+  });
+
+  /**
+   * *** A QUOTED PAYMENT'S TOTAL IS THE QUOTE'S COLUMN, NOT A RE-SUM. ***
+   * Here the legacy columns deliberately disagree with the quote — which is
+   * exactly what a discounted bill looks like, since the three columns become a
+   * lossy summary once a discount exists.
+   */
+  it('reads the quote’s total for a priced payment, ignoring the legacy columns', () => {
+    const breakdown = toBreakdown(
+      paymentRow({ priceQuoteId: 'q0000000-0000-4000-8000-000000000001' }),
+      '559.00',
+    );
+    expect(breakdown.totalPayable).toBe('559.00');
+  });
+
+  /**
+   * *** NEVER FALL BACK. *** A quoted payment whose quote cannot be resolved is
+   * a broken invariant, and re-deriving it from the legacy columns would compute
+   * a different number for any discounted bill — the exact divergence the shared
+   * helper exists to close. Refusing means a capture waits for a human, which is
+   * the correct direction to err for money.
+   */
+  it('refuses to guess when a priced payment’s quote is missing', () => {
+    expect(() => toBreakdown(paymentRow({ priceQuoteId: 'q0000000-0000-4000-8000-000000000001' }))).toThrow(
+      /refusing to re-derive/,
+    );
   });
 });
 

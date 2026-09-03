@@ -33,6 +33,106 @@
 
 import { applyPctToPaise, pctToBasisPoints, rupeesToPaise } from '../../shared/money/money.util';
 
+/* -------------------------------------------------------------------------- */
+/* THE ONE PLACE A CAPTURED TOTAL IS DERIVED                                   */
+/* -------------------------------------------------------------------------- */
+
+/** The fields `capturedTotalPaise` reads. A structural type, so a partial row or a test fixture satisfies it. */
+export interface PricedPaymentColumns {
+  consultationFee: string;
+  convenienceFeePct: string;
+  convenienceFee: string;
+  gstPct: string;
+  gstAmount: string;
+  /**
+   * Null = a LEGACY row, priced by `calculateBill` before the pricing engine
+   * existed.
+   *
+   * Optional, and NULLISH IS TREATED AS ABSENT — `undefined` and `null` both
+   * mean "no quote". A real `PaymentRow` always carries the column, but partial
+   * rows and test fixtures legitimately omit it, and a strict `!== null` check
+   * would read `undefined` as "this payment IS quoted" and then throw because no
+   * total could be found. Distinguishing the two here would be a distinction
+   * with no meaning and one failure mode.
+   */
+  priceQuoteId?: string | null;
+}
+
+/**
+ * *** WHAT THIS PAYMENT WAS ACTUALLY BILLED. THE SINGLE DERIVATION. ***
+ *
+ * ── THE BUG THIS EXISTS TO PREVENT ─────────────────────────────────────────
+ *
+ * The captured total used to be re-derived in FOUR places, and the fourth
+ * derived it DIFFERENTLY:
+ *
+ *   payment.mapper.ts#toBreakdown          fee + convenience + gst   (summed)
+ *   payment-webhook.service.ts#handlePaymentCaptured
+ *                                          fee + convenience + gst   (summed)
+ *   refund.service.ts#capturedPaise        fee + convenience + gst   (summed)
+ *   payment.service.ts#expectedTotalPaise  calculateBill(...)        (RECOMPUTED)
+ *
+ * Those four agreed only BY CONSTRUCTION — every row was written from
+ * `calculateBill`'s own output, so re-summing its three columns happened to
+ * reproduce it. That coincidence ends the moment a bill can carry a discount, a
+ * third component or a tax-inclusive component, which is exactly what the
+ * pricing engine introduces: the three columns become a LOSSY SUMMARY and
+ * re-summing them computes a DIFFERENT NUMBER rather than recomputing the total.
+ *
+ * *** AND THE FOURTH ONE GATES `reconcileWithGateway`'S AMOUNT CHECK. *** So the
+ * failure would not have been cosmetic: the reconciliation sweep would have
+ * started SILENTLY REFUSING TO MARK REAL CAPTURES PAID, on payments where the
+ * money had genuinely arrived, with a log line about an amount mismatch and no
+ * other symptom. Every call site now goes through this one function.
+ *
+ * ── THE TWO BRANCHES, AND WHY THE LEGACY ONE MUST SURVIVE ──────────────────
+ *
+ *   QUOTE PRESENT — `price_quotes.total_payable` is the authoritative amount.
+ *     It is the number the gateway order was created for, it is immutable by
+ *     construction, and it is the only figure that can express a discounted or
+ *     inclusive bill.
+ *
+ *   QUOTE ABSENT — a LEGACY row. Priced by `calculateBill`, and it must keep
+ *     being priced by `calculateBill`. The engine computes
+ *     `sum(round(component x rate))` where `calculateBill` computes
+ *     `round(subtotal x rate)`, and ROUND-THEN-SUM IS NOT SUM-THEN-ROUND — they
+ *     differ by a paise at some fees. Re-pricing a historical row with the
+ *     engine would make the webhook's capture check and `reconcileWithGateway`'s
+ *     amount check start REJECTING real captures, which is precisely the bug
+ *     this helper exists to prevent, reintroduced from the other direction.
+ *     `payments.schema.ts` says the same about `price_quote_id`'s nullability:
+ *     "That distinction must be honoured rather than tidied away."
+ *
+ * @param payment           the row's own columns
+ * @param quoteTotalPayable `price_quotes.total_payable` for `payment.priceQuoteId`,
+ *                          or `null` for a legacy row. A quoted payment whose
+ *                          quote could not be resolved THROWS rather than
+ *                          falling back — see below.
+ */
+export function capturedTotalPaise(
+  payment: PricedPaymentColumns,
+  quoteTotalPayable: string | null,
+): bigint {
+  if (payment.priceQuoteId != null) {
+    if (quoteTotalPayable == null) {
+      // *** NEVER FALL BACK TO `calculateBill` HERE. ***
+      // A quoted payment whose quote is missing is a broken invariant
+      // (`payments.price_quote_id` is a foreign key, so this should be
+      // unreachable), and silently re-deriving it from the three legacy columns
+      // would compute a different number for any bill carrying a discount — the
+      // exact divergence this function was written to close. Refusing loudly
+      // means a capture is not marked paid until a human looks, which is the
+      // correct direction to err for money.
+      throw new Error(
+        `Payment is priced from quote ${payment.priceQuoteId} but that quote could not be resolved; refusing to re-derive its total.`,
+      );
+    }
+    return rupeesToPaise(quoteTotalPayable);
+  }
+
+  return calculateBill(payment.consultationFee, payment.convenienceFeePct, payment.gstPct).totalPayablePaise;
+}
+
 export {
   MoneyFormatError,
   applyPctToPaise,
