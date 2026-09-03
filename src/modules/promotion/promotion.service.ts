@@ -635,6 +635,33 @@ export class PromotionService {
   }
 
   /* ====================================================================== */
+  /* Patient-facing listing                                                 */
+  /* ====================================================================== */
+
+  /**
+   * Every code this patient may redeem right now: their own vouchers and minted
+   * rewards, plus every PUBLICLY LISTED campaign.
+   *
+   * *** AN UNLISTED CAMPAIGN IS NEVER RETURNED HERE. *** `is_publicly_listed =
+   * false` means hidden but still redeemable, which is an explicit product
+   * requirement — and a listing that leaked those codes would hand an attacker
+   * exactly the namespace `promotion_code_attempts`' throttle spends a rate
+   * limiter defending. The repository enforces it in SQL rather than trusting
+   * this method to filter.
+   */
+  async listRedeemableForPatient(
+    patientId: string,
+  ): Promise<ReadonlyArray<{ code: string; label: string; description: string | null; validTo: string | null }>> {
+    const rows = await this.repo.listRedeemableForPatient(patientId, new Date());
+    return rows.map((row) => ({
+      code: row.code,
+      label: row.label,
+      description: row.description,
+      validTo: row.validTo?.toISOString() ?? null,
+    }));
+  }
+
+  /* ====================================================================== */
   /* Resolution and evaluation                                              */
   /* ====================================================================== */
 
