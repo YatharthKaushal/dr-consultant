@@ -100,6 +100,17 @@ export const PERMISSIONS = {
   STORAGE_READ: 'storage.read',
   /** Third-party blob-storage config AND platform-wide upload availability — misconfiguring it breaks uploads for everyone. Treated like `ai.manage`: `super_admin` only. */
   STORAGE_MANAGE: 'storage.manage',
+
+  PROMOTIONS_READ: 'promotions.read',
+  /** Creating and re-pricing coupons, vouchers and the referral programme. *** A DISCOUNT IS MONEY LEAVING THE PLATFORM *** — treated as money movement, not as content. */
+  PROMOTIONS_MANAGE: 'promotions.manage',
+  PROMOTIONS_EXPORT: 'promotions.export',
+
+  AFFILIATES_READ: 'affiliates.read',
+  /** Creating and activating a doctor's affiliate arrangement. Carries the NMC 2023 regulatory exposure — see `affiliate-partners.schema.ts`. */
+  AFFILIATES_MANAGE: 'affiliates.manage',
+  /** Recording that a partner was PAID. The narrowest and most dangerous of the three: it asserts money moved. */
+  AFFILIATES_SETTLE: 'affiliates.settle',
 } as const;
 
 export type PermissionKey = (typeof PERMISSIONS)[keyof typeof PERMISSIONS];
@@ -169,6 +180,15 @@ const DESCRIPTIONS: Record<PermissionKey, string> = {
   [PERMISSIONS.MCP_MANAGE]: 'Create, rescope, deactivate or delete an external MCP client integration.',
   [PERMISSIONS.STORAGE_READ]: 'View the configured blob-storage providers and their health/cooldown state.',
   [PERMISSIONS.STORAGE_MANAGE]: 'Edit a blob-storage provider’s bucket/cloud config, active state and priority.',
+  [PERMISSIONS.PROMOTIONS_READ]:
+    'View coupons, vouchers, referral codes and their redemptions, and the promotions configuration.',
+  [PERMISSIONS.PROMOTIONS_MANAGE]:
+    'Create, re-price, pause or archive a discount code, and edit the refer-and-earn programme.',
+  [PERMISSIONS.PROMOTIONS_EXPORT]: 'Export discount redemptions as CSV.',
+  [PERMISSIONS.AFFILIATES_READ]: "View doctors' affiliate arrangements, attributions and accrued commissions.",
+  [PERMISSIONS.AFFILIATES_MANAGE]:
+    "Create or edit a doctor's affiliate arrangement and activate or pause it (NMC-regulated — see affiliate-partners.schema.ts).",
+  [PERMISSIONS.AFFILIATES_SETTLE]: 'Record that a partner’s accrued commissions were paid.',
 };
 
 export const PERMISSION_DEFINITIONS: readonly PermissionDefinition[] = Object.values(PERMISSIONS).map((key) => ({
@@ -221,7 +241,7 @@ export const ROLE_DEFINITIONS: readonly RoleDefinition[] = [
 const ALL_PERMISSIONS = Object.values(PERMISSIONS);
 
 export const ROLE_PERMISSIONS: Record<RoleCode, readonly PermissionKey[]> = {
-  // All 52 — seeded explicitly (so `GET /admin/roles` shows the truth) AND
+  // All 58 — seeded explicitly (so `GET /admin/roles` shows the truth) AND
   // short-circuited in the resolution query (identity-access.repository.ts),
   // so a permission added between deploys can never lock the owner out
   // before the seed re-runs.
@@ -261,6 +281,31 @@ export const ROLE_PERMISSIONS: Record<RoleCode, readonly PermissionKey[]> = {
     // Read-only, same reasoning: diagnosing "why are uploads failing" is
     // day-to-day support work; `storage.manage` stays super_admin-only.
     PERMISSIONS.STORAGE_READ,
+
+    // *** THE TWO PROMOTION READS, AND NOTHING MORE. ***
+    //
+    // `operations` is defined above as "no clinical reads, NO MONEY MOVEMENT",
+    // and a discount is money leaving the platform — the same class of act as
+    // the refund this role already, deliberately, cannot raise. So it can SEE
+    // every campaign, every redemption, every affiliate arrangement and every
+    // accrued commission (support work: "why did this patient's code not
+    // apply?"), and it can change none of them. `promotions.manage`,
+    // `promotions.export`, `affiliates.manage` and `affiliates.settle` all stay
+    // with `finance` and `super_admin`.
+    //
+    // Note `promotions.export` is withheld even though it is read-shaped: a CSV
+    // of every redemption is a financial extract, and `operations` does not hold
+    // `payments.export` either. The two are consistent on purpose.
+    //
+    // *** FLAGGED: THIS IS THE BUNDLE DECISION MOST LIKELY TO NEED CLIENT
+    // CONFIRMATION IN THIS ROUND *** — exactly as `care_coordinator`'s missing
+    // `clinical.read_records` is flagged below. A client who runs campaigns out
+    // of an operations team rather than a finance team will want
+    // `promotions.manage` here; that is a business call about who owns
+    // discounting, not a technical one, and it is a one-line change to this
+    // array. Ask before assuming.
+    PERMISSIONS.PROMOTIONS_READ,
+    PERMISSIONS.AFFILIATES_READ,
   ],
 
   clinical_governance: [
@@ -317,6 +362,18 @@ export const ROLE_PERMISSIONS: Record<RoleCode, readonly PermissionKey[]> = {
     PERMISSIONS.PAYMENTS_MANAGE_CONFIG,
     PERMISSIONS.AUDIT_READ,
     PERMISSIONS.AUDIT_EXPORT,
+
+    // Discounting and affiliate payouts sit with the role that already owns
+    // refunds, doctor fees and the fee/GST configuration — every one of which is
+    // money leaving the platform. `affiliates.settle` in particular asserts that
+    // a transfer HAPPENED, which is the same act as `payments.refund`'s
+    // payout marking and belongs to the same hands.
+    PERMISSIONS.PROMOTIONS_READ,
+    PERMISSIONS.PROMOTIONS_MANAGE,
+    PERMISSIONS.PROMOTIONS_EXPORT,
+    PERMISSIONS.AFFILIATES_READ,
+    PERMISSIONS.AFFILIATES_MANAGE,
+    PERMISSIONS.AFFILIATES_SETTLE,
   ],
 
   content: [
