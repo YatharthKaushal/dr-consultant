@@ -12,6 +12,7 @@ import { ClinicalModule } from './modules/clinical/clinical.module';
 import { ConsentModule } from './modules/consent/consent.module';
 import { DoctorModule } from './modules/doctor/doctor.module';
 import { DocumentModule } from './modules/document/document.module';
+import { FollowupModule } from './modules/followup/followup.module';
 import { IdentityModule } from './modules/identity/identity.module';
 import { InstantModule } from './modules/instant/instant.module';
 import { McpModule } from './modules/mcp/mcp.module';
@@ -140,6 +141,19 @@ import { ErrorsModule } from './shared/errors/errors.module';
     // consultation to `completed`. Both are consequences of
     // `ClinicalService#finalise`, not of anything added to those modules.
     ClinicalModule,
+    // M-16: seven-day follow-up, safety alerts and the Care Plan composition.
+    // Listed after BookingModule, ClinicalModule and NotificationModule
+    // because it consumes all three facades directly — ordering is for
+    // readability, not correctness, since Nest resolves the provider graph
+    // regardless.
+    //
+    // *** `FollowupFacade.assignPathway` HAS NO CALLER WIRED YET. *** See
+    // `followup.service.ts#assignPathway`'s header for the seam: the natural
+    // caller is `ClinicalService#finalise` (M-15), which already runs two
+    // other cross-module consequences of finalising a consultation. Wiring
+    // that call — and choosing which `pathwayCode` a specialty/concern maps
+    // to — is this module's one piece of unfinished cross-module wiring.
+    FollowupModule,
     HealthModule,
   ],
 })
