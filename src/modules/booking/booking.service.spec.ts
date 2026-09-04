@@ -1037,3 +1037,133 @@ describe('BookingService.transitionInstantConsultation', () => {
     expect(h.repo.listExpiredInstantHolds).toHaveBeenCalledWith(now, 100);
   });
 });
+
+/**
+ * ADDITIVE (M-14). The SIBLING of the method above — the two status moves a
+ * VIDEO CALL makes, for BOTH consultation modes.
+ *
+ * The two methods look alike and their differences are the whole point, so the
+ * tests below deliberately mirror the ones above and diverge exactly where the
+ * behaviour does:
+ *
+ *   - this one does NOT refuse a `scheduled` consultation. A video call on a
+ *     scheduled booking is the ORDINARY case, and the instant one is the
+ *     exception.
+ *   - what stops it becoming a general status setter is instead its
+ *     type-narrowed `to`, which reaches only `in_progress` and
+ *     `awaiting_documentation` — two states no other path in this module
+ *     writes and no policy hangs off.
+ *   - it never touches `hold_expires_at`. A live call has no hold.
+ */
+describe('BookingService.transitionConsultationStatus', () => {
+  const START = {
+    consultationId: CONSULTATION_ID,
+    to: 'in_progress' as const,
+    from: ['scheduled' as const],
+  };
+
+  it('moves the consultation and audits before/after transactionally', async () => {
+    const h = buildHarness();
+    h.repo.findByIdForUpdate.mockResolvedValueOnce(makeRow({ status: 'scheduled' }));
+
+    const result = await h.service.transitionConsultationStatus({ ...START, reason: 'video_participant_joined' });
+
+    expect(result.changed).toBe(true);
+    expect(h.repo.updateStatusIfIn).toHaveBeenCalledWith(
+      CONSULTATION_ID,
+      ['scheduled'],
+      { status: 'in_progress' },
+      h.db,
+    );
+    expect(h.audit.write).toHaveBeenCalledWith(
+      expect.objectContaining({
+        actorType: 'system',
+        consultationId: CONSULTATION_ID,
+        metadata: expect.objectContaining({
+          change: 'consultation_status_transition',
+          before: 'scheduled',
+          after: 'in_progress',
+          reason: 'video_participant_joined',
+        }),
+      }),
+      h.db,
+    );
+  });
+
+  it('takes the ROW LOCK first, like every other transition in this service', async () => {
+    const h = buildHarness();
+    h.repo.findByIdForUpdate.mockResolvedValueOnce(makeRow({ status: 'scheduled' }));
+
+    await h.service.transitionConsultationStatus(START);
+
+    expect(h.repo.findByIdForUpdate).toHaveBeenCalledWith(CONSULTATION_ID, h.db);
+  });
+
+  it('*** WORKS FOR A SCHEDULED CONSULTATION *** — which is exactly why it is not the instant method', async () => {
+    const h = buildHarness();
+    h.repo.findByIdForUpdate.mockResolvedValueOnce(makeRow({ mode: 'scheduled', status: 'scheduled' }));
+
+    await expect(h.service.transitionConsultationStatus(START)).resolves.toMatchObject({ changed: true });
+  });
+
+  it('works for an INSTANT consultation too — one rule for both modes', async () => {
+    const h = buildHarness();
+    h.repo.findByIdForUpdate.mockResolvedValueOnce(makeRow({ mode: 'instant', status: 'scheduled' }));
+
+    await expect(h.service.transitionConsultationStatus(START)).resolves.toMatchObject({ changed: true });
+  });
+
+  it('enforces the CALLER-supplied from-set — M-14 owns the rule, this module owns the lock', async () => {
+    const h = buildHarness();
+    h.repo.findByIdForUpdate.mockResolvedValueOnce(makeRow({ status: 'cancelled' }));
+    h.repo.updateStatusIfIn.mockResolvedValueOnce(undefined);
+
+    const result = await h.service.transitionConsultationStatus(START);
+
+    expect(result).toMatchObject({ changed: false, refusal: 'illegal_transition' });
+    expect(h.audit.write).not.toHaveBeenCalled();
+  });
+
+  it('REFUSES rather than throws, so a webhook handler can still answer 2xx', async () => {
+    const h = buildHarness();
+    h.repo.findByIdForUpdate.mockResolvedValueOnce(undefined);
+
+    await expect(h.service.transitionConsultationStatus(START)).resolves.toEqual({
+      changed: false,
+      booking: null,
+      refusal: 'not_found',
+    });
+  });
+
+  it('*** IS AN IDEMPOTENT NO-OP WHEN ALREADY THERE *** — a redelivered webhook writes no audit row', async () => {
+    const h = buildHarness();
+    h.repo.findByIdForUpdate.mockResolvedValueOnce(makeRow({ status: 'in_progress' }));
+
+    const result = await h.service.transitionConsultationStatus(START);
+
+    expect(result.changed).toBe(false);
+    expect(result.refusal).toBeUndefined();
+    expect(h.repo.updateStatusIfIn).not.toHaveBeenCalled();
+    expect(h.audit.write).not.toHaveBeenCalled();
+  });
+
+  it('ends a call: `awaiting_documentation` from `in_progress`, and never touches the hold', async () => {
+    const h = buildHarness();
+    h.repo.findByIdForUpdate.mockResolvedValueOnce(makeRow({ status: 'in_progress' }));
+
+    await h.service.transitionConsultationStatus({
+      consultationId: CONSULTATION_ID,
+      to: 'awaiting_documentation',
+      from: ['in_progress'],
+    });
+
+    // No `holdExpiresAt` key at all — a live call has no hold, and writing one
+    // would hand a video webhook a lever on M-11's slot machinery.
+    expect(h.repo.updateStatusIfIn).toHaveBeenCalledWith(
+      CONSULTATION_ID,
+      ['in_progress'],
+      { status: 'awaiting_documentation' },
+      h.db,
+    );
+  });
+});

@@ -139,6 +139,23 @@ export class BookingFacade implements BookingContract {
     };
   }
 
+  /* ── M-14 (Video Consultation) ─────────────────────────────────────────── */
+
+  /** See `BookingContract#transitionConsultationStatus` — the rule/write split that keeps M-14 out of `consultations`. */
+  async transitionConsultationStatus(input: {
+    consultationId: string;
+    to: 'in_progress' | 'awaiting_documentation';
+    from: readonly ConsultationStatus[];
+    reason?: string;
+  }): Promise<{ changed: boolean; booking: BookingView | null; refusal?: 'not_found' | 'illegal_transition' }> {
+    const result = await this.service.transitionConsultationStatus(input);
+    return {
+      changed: result.changed,
+      booking: result.booking ? toBookingView(result.booking) : null,
+      ...(result.refusal ? { refusal: result.refusal } : {}),
+    };
+  }
+
   /** See `BookingContract#listExpiredInstantHolds`. */
   async listExpiredInstantHolds(now: Date, limit: number) {
     return this.service.listExpiredInstantHolds(now, limit);
