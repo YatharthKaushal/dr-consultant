@@ -103,17 +103,28 @@ export class ClinicalController {
    * FR-9.5: (re)issue the prescription PDF for a finalised record.
    *
    * The retry for the one consequence of finalising that may fail without
-   * failing the finalise itself. Idempotent — an existing prescription is
-   * returned rather than a second one minted (`DocumentContract
-   * #writePrescriptionPdf`).
+   * failing the finalise itself. An existing prescription is returned rather
+   * than a second one minted (`DocumentContract#writePrescriptionPdf`) — but
+   * see `clinical-pdf.service.ts`: that idempotence is SEQUENTIAL ONLY, and
+   * two concurrent calls to this route really do produce two `patient_files`
+   * rows, because nothing in `patient_files` constrains the pair.
    *
    * *** RETRIEVAL IS NOT HERE. *** The file is a `patient_files` row, so the
    * patient reads it at `GET /documents/me?category=prescription_pdf` and
    * downloads it at `GET /documents/:id/download` — M-10's existing
-   * access-controlled, short-lived signed-URL path (FR-6.1), which already
-   * admits the owning patient, the treating doctor and an admin. A second
-   * download route here would be a second place that decides who may read a
+   * access-controlled, short-lived signed-URL path (FR-6.1). A second download
+   * route here would be a second place that decides who may read a
    * prescription.
+   *
+   * *** WHO THAT PATH ADMITS IS WIDER THAN THIS COMMENT ONCE CLAIMED, AND ONE
+   * OF THE THREE IS A HOLE IN THIS MODULE'S BOUNDARY. *** The doctor branch is
+   * any doctor sharing any consultation with the patient, not the treating
+   * doctor of this one; the admin branch is unconditional, with no
+   * `@RequirePermission` — so `care_coordinator`, which
+   * `clinical-admin.controller.ts` deliberately denies `clinical.read_records`,
+   * can download a prescription carrying the diagnosis, risk category and
+   * medicines. `clinical-pdf.service.ts` has the full finding and says why the
+   * fix is M-10's rather than a second rule here.
    */
   @Post(':id/clinical-record/prescription-pdf')
   @HttpCode(HttpStatus.OK)

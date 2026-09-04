@@ -60,7 +60,7 @@
  * no proof.
  */
 import { randomUUID } from 'node:crypto';
-import { and, eq, inArray } from 'drizzle-orm';
+import { and, eq, inArray, isNotNull } from 'drizzle-orm';
 import {
   connectDatabase,
   disconnectDatabase,
@@ -89,7 +89,7 @@ import { PromotionConsultationLookupProvider } from '../promotion/consultation-l
 import { PROMOTION_DEFAULT_QUALIFYING_STATUSES } from '../promotion/promotion.constants';
 import type { ClinicalBookingPort } from './clinical-booking.contract';
 import { ClinicalGateSweepService } from './clinical-gate-sweep.service';
-import { CLINICAL_ERROR_CODES } from './clinical.constants';
+import { CLINICAL_ERROR_CODES, CLINICAL_GATE_SWEEP_MAX_BATCHES } from './clinical.constants';
 import type { ClinicalPdfService } from './clinical-pdf.service';
 import { ClinicalRepository } from './clinical.repository';
 import { ClinicalService } from './clinical.service';
@@ -114,6 +114,21 @@ interface Fixtures {
   otherConsultationId: string;
   /** A consultation under the NON-prescribing specialty, for the medicine gate. */
   nonPrescribingConsultationId: string;
+  /** Untouched by every other test — the concurrency section needs a consultation with NO record on it. */
+  raceConsultationId: string;
+  /** A second one, so the forced interleaving also starts from no record at all. */
+  forcedRaceConsultationId: string;
+  /** Its OWN prescribing specialty, so flipping `can_prescribe` cannot disturb any other test. */
+  flipSpecialtyId: string;
+  flipConsultationId: string;
+  /** For the concurrent draft-save-vs-finalise race. */
+  draftRaceConsultationId: string;
+  /** For two simultaneous finalises. */
+  finaliseRaceConsultationId: string;
+  /** A third doctor, gated by `pagingStrandedConsultationId`, for the sweep-paging test only. */
+  pagingDoctorId: string;
+  pagingDecoyConsultationId: string;
+  pagingStrandedConsultationId: string;
 }
 
 async function seedFixtures(db: Database): Promise<Fixtures> {
@@ -124,6 +139,10 @@ async function seedFixtures(db: Database): Promise<Fixtures> {
   const [prescribing] = await db
     .insert(specialtiesTable)
     .values({ code: `clin_rx_${runId}`, name: `Clinical Psychiatry ${runId}`, canPrescribe: true })
+    .returning({ id: specialtiesTable.id });
+  const [flip] = await db
+    .insert(specialtiesTable)
+    .values({ code: `clin_flip_${runId}`, name: `Clinical Flip ${runId}`, canPrescribe: true })
     .returning({ id: specialtiesTable.id });
   const [nonPrescribing] = await db
     .insert(specialtiesTable)
@@ -157,11 +176,13 @@ async function seedFixtures(db: Database): Promise<Fixtures> {
     await db
       .insert(doctorSpecialtiesTable)
       .values({ doctorId: row.id, specialtyId: nonPrescribing.id });
+    await db.insert(doctorSpecialtiesTable).values({ doctorId: row.id, specialtyId: flip.id });
     return row.id;
   }
 
   const doctorId = await makeDoctor('Gated Doctor');
   const otherDoctorId = await makeDoctor('Other Gated Doctor');
+  const pagingDoctorId = await makeDoctor('Paging Doctor');
 
   let referenceSeq = 100;
   async function makeConsultation(specialtyId: string, assignedDoctorId: string): Promise<string> {
@@ -183,6 +204,13 @@ async function seedFixtures(db: Database): Promise<Fixtures> {
   const consultationId = await makeConsultation(prescribing.id, doctorId);
   const otherConsultationId = await makeConsultation(prescribing.id, otherDoctorId);
   const nonPrescribingConsultationId = await makeConsultation(nonPrescribing.id, doctorId);
+  const raceConsultationId = await makeConsultation(prescribing.id, doctorId);
+  const forcedRaceConsultationId = await makeConsultation(prescribing.id, doctorId);
+  const flipConsultationId = await makeConsultation(flip.id, doctorId);
+  const draftRaceConsultationId = await makeConsultation(prescribing.id, doctorId);
+  const finaliseRaceConsultationId = await makeConsultation(prescribing.id, doctorId);
+  const pagingDecoyConsultationId = await makeConsultation(prescribing.id, pagingDoctorId);
+  const pagingStrandedConsultationId = await makeConsultation(prescribing.id, pagingDoctorId);
 
   // *** THE COMPLETION GATE, SET. *** This is the state FR-10.5 leaves a doctor
   // in when a consult ends and the notes are still owed.
@@ -194,6 +222,10 @@ async function seedFixtures(db: Database): Promise<Fixtures> {
     .update(doctorsTable)
     .set({ blockedByConsultationId: otherConsultationId })
     .where(eq(doctorsTable.id, otherDoctorId));
+  await db
+    .update(doctorsTable)
+    .set({ blockedByConsultationId: pagingStrandedConsultationId })
+    .where(eq(doctorsTable.id, pagingDoctorId));
 
   return {
     runId,
@@ -205,6 +237,15 @@ async function seedFixtures(db: Database): Promise<Fixtures> {
     consultationId,
     otherConsultationId,
     nonPrescribingConsultationId,
+    raceConsultationId,
+    forcedRaceConsultationId,
+    flipSpecialtyId: flip.id,
+    flipConsultationId,
+    draftRaceConsultationId,
+    finaliseRaceConsultationId,
+    pagingDoctorId,
+    pagingDecoyConsultationId,
+    pagingStrandedConsultationId,
   };
 }
 
@@ -214,8 +255,15 @@ async function teardown(db: Database, fixtures: Fixtures): Promise<void> {
     fixtures.consultationId,
     fixtures.otherConsultationId,
     fixtures.nonPrescribingConsultationId,
+    fixtures.raceConsultationId,
+    fixtures.forcedRaceConsultationId,
+    fixtures.flipConsultationId,
+    fixtures.draftRaceConsultationId,
+    fixtures.finaliseRaceConsultationId,
+    fixtures.pagingDecoyConsultationId,
+    fixtures.pagingStrandedConsultationId,
   ];
-  const doctorIds = [fixtures.doctorId, fixtures.otherDoctorId];
+  const doctorIds = [fixtures.doctorId, fixtures.otherDoctorId, fixtures.pagingDoctorId];
 
   await db.delete(auditLogTable).where(inArray(auditLogTable.consultationId, consultationIds));
   await db
@@ -240,6 +288,7 @@ async function teardown(db: Database, fixtures: Fixtures): Promise<void> {
       inArray(specialtiesTable.id, [
         fixtures.prescribingSpecialtyId,
         fixtures.nonPrescribingSpecialtyId,
+        fixtures.flipSpecialtyId,
       ]),
     );
 }
@@ -249,6 +298,7 @@ describe('M-15 finalisation, against a real database', () => {
   let fixtures: Fixtures;
 
   let clinical: ClinicalService;
+  let clinicalRepo: ClinicalRepository;
   let sweep: ClinicalGateSweepService;
   let presence: DoctorPresenceService;
   let instant: InstantFacade;
@@ -260,7 +310,7 @@ describe('M-15 finalisation, against a real database', () => {
     fixtures = await seedFixtures(db);
 
     const audit = new AuditService(db);
-    const clinicalRepo = new ClinicalRepository(db);
+    clinicalRepo = new ClinicalRepository(db);
     const bookingRepo = new BookingRepository(db);
     const doctorRepo = new DoctorRepository(db);
     presence = new DoctorPresenceService(db, doctorRepo, audit);
@@ -624,6 +674,257 @@ describe('M-15 finalisation, against a real database', () => {
   });
 
   /* ═══════════════════════════════════════════════════════════════════════ */
+  /* 4b. TWO SAVES OF THE *FIRST* DRAFT, AT THE SAME INSTANT.                */
+  /*                                                                         */
+  /* `writeDraft` opens a transaction, reads FOR UPDATE, and INSERTS when it */
+  /* finds nothing. *** `SELECT ... FOR UPDATE` THAT MATCHES ZERO ROWS LOCKS */
+  /* NOTHING *** — there is no row yet to lock — so two requests that arrive */
+  /* before either has committed both read null and both insert against      */
+  /* `clinical_records.consultation_id`, which is UNIQUE.                    */
+  /*                                                                         */
+  /* That is a doctor double-tapping "save" on a notes form they have not    */
+  /* saved before: the single most ordinary thing a user does. Every other   */
+  /* check-then-insert in this codebase carries a `23505` safety net for     */
+  /* exactly this (`consent.service.ts`, `legal-document.service.ts`,        */
+  /* `clinical-template.service.ts`, `booking.service.ts`); this one did     */
+  /* not, and the loser got a raw driver error — a 500, not a saved record.  */
+  /*                                                                         */
+  /* Only a real database can show it. The `db.transaction` fake in          */
+  /* `clinical.service.spec.ts` has no unique index and no rollback.         */
+  /* ═══════════════════════════════════════════════════════════════════════ */
+
+  describe('two concurrent saves of the very first draft', () => {
+    const draft = (summary: string) => ({
+      chiefComplaint: 'Panic attacks on the commute.',
+      riskCategory: 'low' as const,
+      caseSummary: summary,
+    });
+
+    it('*** THREE CONCURRENT FIRST SAVES, UNFORCED — none of them is a 500 ***', async () => {
+      const results = await Promise.allSettled([
+        clinical.saveDraft(fixtures.raceConsultationId, fixtures.doctorId, draft('First writer.')),
+        clinical.saveDraft(fixtures.raceConsultationId, fixtures.doctorId, draft('Second writer.')),
+        clinical.saveDraft(fixtures.raceConsultationId, fixtures.doctorId, draft('Third writer.')),
+      ]);
+
+      const rejected = results.filter((result) => result.status === 'rejected');
+      expect(rejected.map((result) => String((result as PromiseRejectedResult).reason))).toEqual([]);
+
+      const rows = await db
+        .select({ id: clinicalRecordsTable.id })
+        .from(clinicalRecordsTable)
+        .where(eq(clinicalRecordsTable.consultationId, fixtures.raceConsultationId));
+
+      expect(rows).toHaveLength(1);
+    });
+
+    /**
+     * *** THE INTERLEAVING, FORCED — NOT LEFT TO A COIN FLIP. ***
+     *
+     * A plain `Promise.all` of concurrent saves reproduces this most of the
+     * time (measured against this database before the fix: 48 failures in 75
+     * three-way races) but not every time, and a regression test that is red
+     * two runs in three is not a regression test. So the competing request is
+     * committed AT the one instant that matters — after this transaction's
+     * `SELECT ... FOR UPDATE` has found nothing and locked nothing, and
+     * before its INSERT — from a different pooled connection, which is
+     * exactly the state the loser of the real race observes.
+     *
+     * `mockImplementationOnce`: only the FIRST attempt is sabotaged, so the
+     * retry runs entirely against the real repository.
+     */
+    it('*** THE LOSER OF THE INSERT RACE STILL SAVES ITS RECORD *** — a double-tapped save is not a 500', async () => {
+      const findForUpdate = clinicalRepo.findByConsultationIdForUpdate.bind(clinicalRepo);
+      const spy = jest
+        .spyOn(clinicalRepo, 'findByConsultationIdForUpdate')
+        .mockImplementationOnce(async (consultationId, tx) => {
+          const found = await findForUpdate(consultationId, tx);
+          await db.insert(clinicalRecordsTable).values({
+            consultationId,
+            chiefComplaint: 'Competing writer got there first.',
+            riskCategory: 'low',
+          });
+          return found;
+        });
+
+      try {
+        await expect(
+          clinical.saveDraft(fixtures.forcedRaceConsultationId, fixtures.doctorId, draft('Loser writes anyway.')),
+        ).resolves.toMatchObject({ caseSummary: 'Loser writes anyway.' });
+      } finally {
+        spy.mockRestore();
+      }
+
+      const rows = await db
+        .select({ id: clinicalRecordsTable.id, caseSummary: clinicalRecordsTable.caseSummary })
+        .from(clinicalRecordsTable)
+        .where(eq(clinicalRecordsTable.consultationId, fixtures.forcedRaceConsultationId));
+
+      // One row, carrying the loser's content: the retry took the UPDATE
+      // branch against the winner's row rather than inserting a second.
+      expect(rows).toHaveLength(1);
+      expect(rows[0]?.caseSummary).toBe('Loser writes anyway.');
+    });
+
+    it('POSITIVE CONTROL: the second, sequential save still updates rather than inserting', async () => {
+      await clinical.saveDraft(fixtures.raceConsultationId, fixtures.doctorId, draft('Fourth writer.'));
+
+      const rows = await db
+        .select({ caseSummary: clinicalRecordsTable.caseSummary })
+        .from(clinicalRecordsTable)
+        .where(eq(clinicalRecordsTable.consultationId, fixtures.raceConsultationId));
+
+      expect(rows).toHaveLength(1);
+      expect(rows[0]?.caseSummary).toBe('Fourth writer.');
+    });
+  });
+
+  /* ═══════════════════════════════════════════════════════════════════════ */
+  /* 4c. *** THE SPECIALTY FLIPPED BETWEEN THE DRAFT AND THE FINALISE. ***   */
+  /*                                                                         */
+  /* `specialties.can_prescribe` is an admin-editable column, and both gates */
+  /* read it LIVE. So a medicine line CAN sit in a draft belonging to a      */
+  /* consultation that may no longer carry one — which is why                */
+  /* `assertCompletionGate` re-asserts the prescribing gate rather than      */
+  /* trusting "the save-time check already refused it".                      */
+  /* ═══════════════════════════════════════════════════════════════════════ */
+
+  describe('a specialty that stops allowing prescribing mid-consultation', () => {
+    it('*** REFUSES TO SEAL MEDICINES THE CONSULTATION MAY NO LONGER CARRY, AND NOTHING MOVES ***', async () => {
+      // 1. The specialty allows prescribing, so this save is legal.
+      await clinical.saveDraft(fixtures.flipConsultationId, fixtures.doctorId, {
+        chiefComplaint: 'Sleep onset insomnia.',
+        riskCategory: 'low',
+        medicines: [{ name: 'Melatonin', dose: '3mg', frequency: 'At night', duration: '14 days' }],
+        caseSummary: 'Sleep hygiene reviewed; short trial started.',
+      });
+      expect((await readRecord(fixtures.flipConsultationId))?.medicines).toHaveLength(1);
+
+      // 2. An admin flips it. `specialty.service.ts#adminUpdate` does exactly
+      //    this, and nothing in the platform revisits records already drafted.
+      await db
+        .update(specialtiesTable)
+        .set({ canPrescribe: false })
+        .where(eq(specialtiesTable.id, fixtures.flipSpecialtyId));
+
+      // 3. The doctor finalises.
+      await expect(clinical.finalise(fixtures.flipConsultationId, fixtures.doctorId)).rejects.toMatchObject({
+        response: { code: CLINICAL_ERROR_CODES.MEDICINES_NOT_PERMITTED },
+      });
+
+      // Nothing was sealed, and no prescription was produced.
+      expect((await readRecord(fixtures.flipConsultationId))?.finalisedAt).toBeNull();
+      expect(await readConsultationStatus(fixtures.flipConsultationId)).toBe('in_progress');
+    });
+
+    it('and the remedy is the doctor’s own: drop the medicines, write the advice plan, finalise', async () => {
+      await clinical.saveDraft(fixtures.flipConsultationId, fixtures.doctorId, {
+        chiefComplaint: 'Sleep onset insomnia.',
+        riskCategory: 'low',
+        adviceCovered: 'Sleep hygiene and stimulus control.',
+        adviceHomePractice: 'Fixed wake time; no screens after 10pm.',
+        adviceNextFocus: 'Review sleep diary.',
+        adviceWarningSigns: 'Daytime collapse, or thoughts of self-harm.',
+        caseSummary: 'Sleep hygiene reviewed; behavioural plan agreed.',
+      });
+
+      const result = await clinical.finalise(fixtures.flipConsultationId, fixtures.doctorId);
+
+      expect(result.record.finalisedAt).toBeInstanceOf(Date);
+      expect(result.record.medicines).toHaveLength(0);
+      expect(await readConsultationStatus(fixtures.flipConsultationId)).toBe('completed');
+    });
+  });
+
+  /* ═══════════════════════════════════════════════════════════════════════ */
+  /* 4d. *** THE ROW LOCK, AGAINST REAL CONCURRENT REQUESTS. ***             */
+  /*                                                                         */
+  /* `clinical.service.ts`'s header says the gate is checked twice — cheaply */
+  /* before the transaction and authoritatively against the row read         */
+  /* `FOR UPDATE` — because otherwise "save a draft that blanks the case     */
+  /* summary" and "finalise" could interleave so the gate is evaluated       */
+  /* against a row that no longer exists by the time `finalised_at` is       */
+  /* written. `clinical.service.spec.ts` proves that against a `db`          */
+  /* transaction fake WITH NO ROLLBACK AND NO ROW LOCK. This proves it       */
+  /* against Postgres.                                                       */
+  /* ═══════════════════════════════════════════════════════════════════════ */
+
+  describe('a draft save racing a finalise', () => {
+    const advice = {
+      adviceCovered: 'Grounding technique.',
+      adviceHomePractice: 'Daily practice.',
+      adviceNextFocus: 'Exposure hierarchy.',
+      adviceWarningSigns: 'Chest pain that does not settle.',
+    };
+
+    it('*** NEVER PRODUCES A FINALISED RECORD WITH A BLANK CASE SUMMARY ***', async () => {
+      await clinical.saveDraft(fixtures.draftRaceConsultationId, fixtures.doctorId, {
+        chiefComplaint: 'Panic attacks.',
+        riskCategory: 'low',
+        ...advice,
+        caseSummary: 'Panic psychoeducation; grounding taught.',
+      });
+
+      // The blanking save omits `caseSummary` entirely — `PUT` semantics, so
+      // it is CLEARED, which is precisely the interleaving the second check
+      // exists for.
+      const [finalised, blanked] = await Promise.allSettled([
+        clinical.finalise(fixtures.draftRaceConsultationId, fixtures.doctorId),
+        clinical.saveDraft(fixtures.draftRaceConsultationId, fixtures.doctorId, {
+          chiefComplaint: 'Panic attacks.',
+          riskCategory: 'low',
+          ...advice,
+        }),
+      ]);
+
+      const row = await readRecord(fixtures.draftRaceConsultationId);
+
+      // Exactly one of two outcomes, and both are legal. What is NOT legal is
+      // a row with `finalised_at` set and `case_summary` null.
+      expect(Boolean(row?.finalisedAt) && row?.caseSummary === null).toBe(false);
+      if (row?.finalisedAt) {
+        expect(row.caseSummary).toBe('Panic psychoeducation; grounding taught.');
+        expect(finalised.status).toBe('fulfilled');
+      } else {
+        expect(blanked.status).toBe('fulfilled');
+        expect(finalised.status).toBe('rejected');
+      }
+    });
+
+    it('*** TWO SIMULTANEOUS FINALISES SEAL THE RECORD EXACTLY ONCE ***', async () => {
+      await clinical.saveDraft(fixtures.finaliseRaceConsultationId, fixtures.doctorId, {
+        chiefComplaint: 'Low mood.',
+        riskCategory: 'low',
+        adviceCovered: 'Behavioural activation.',
+        adviceHomePractice: 'One pleasant activity daily.',
+        adviceNextFocus: 'Activity scheduling.',
+        adviceWarningSigns: 'Thoughts of self-harm.',
+        caseSummary: 'Mood reviewed; activation plan agreed.',
+      });
+
+      const results = await Promise.allSettled([
+        clinical.finalise(fixtures.finaliseRaceConsultationId, fixtures.doctorId),
+        clinical.finalise(fixtures.finaliseRaceConsultationId, fixtures.doctorId),
+        clinical.finalise(fixtures.finaliseRaceConsultationId, fixtures.doctorId),
+      ]);
+
+      const fulfilled = results.filter((result) => result.status === 'fulfilled');
+      expect(fulfilled).toHaveLength(1);
+      for (const rejection of results.filter((result) => result.status === 'rejected')) {
+        expect((rejection as PromiseRejectedResult).reason).toMatchObject({
+          response: { code: CLINICAL_ERROR_CODES.RECORD_ALREADY_FINALISED },
+        });
+      }
+
+      // And `finalised_at` is the ONE winner's timestamp — not overwritten by
+      // a loser that got as far as the guarded UPDATE.
+      const row = await readRecord(fixtures.finaliseRaceConsultationId);
+      const winner = (fulfilled[0] as PromiseFulfilledResult<Awaited<ReturnType<ClinicalService['finalise']>>>).value;
+      expect(row?.finalisedAt?.toISOString()).toBe(winner.record.finalisedAt?.toISOString());
+    });
+  });
+
+  /* ═══════════════════════════════════════════════════════════════════════ */
   /* 5. THE UNIQUE CONSTRAINT BEHIND "ONE RECORD PER CONSULTATION".          */
   /* ═══════════════════════════════════════════════════════════════════════ */
 
@@ -642,4 +943,90 @@ describe('M-15 finalisation, against a real database', () => {
       expect(rows).toHaveLength(1);
     });
   });
+  /* ═══════════════════════════════════════════════════════════════════════ */
+  /* 6. *** THE SWEEP'S BATCH WAS A BLIND SPOT, NOT A BACKLOG DRAIN. ***     */
+  /*                                                                         */
+  /* `listFinalisedSince` selects records finalised inside the window,       */
+  /* NEWEST FIRST, and nothing the sweep does removes a record from that     */
+  /* set. So a fixed `limit` did not "drain a backlog steadily" the way      */
+  /* `booking-slot-hold.service.ts`'s does — it re-read the same newest      */
+  /* rows every tick, forever, and a gate stranded on the next one was       */
+  /* reachable by NOTHING.                                                   */
+  /*                                                                         */
+  /* Driven with `batchSize: 1` and a three-second window rather than 100    */
+  /* and a day, because the shape of the failure is the same at any scale    */
+  /* and seeding 101 finalised consultations to prove it would be a slower   */
+  /* test that proved less.                                                  */
+  /* ═══════════════════════════════════════════════════════════════════════ */
+
+  describe('the sweep pages across its whole window', () => {
+    it('*** REPAIRS A GATE THAT IS NOT IN THE FIRST BATCH ***', async () => {
+      const anchor = new Date();
+
+      // Every other record this run finalised is pushed out of the way, so the
+      // narrow window below contains exactly the two rows under test and this
+      // spec does not depend on how long the tests above happened to take.
+      await db
+        .update(clinicalRecordsTable)
+        .set({ finalisedAt: new Date(anchor.getTime() - 10 * 60 * 1000) })
+        .where(
+          and(
+            isNotNull(clinicalRecordsTable.finalisedAt),
+            inArray(clinicalRecordsTable.consultationId, [
+              fixtures.consultationId,
+              fixtures.otherConsultationId,
+              fixtures.nonPrescribingConsultationId,
+              fixtures.raceConsultationId,
+              fixtures.forcedRaceConsultationId,
+              fixtures.flipConsultationId,
+              fixtures.draftRaceConsultationId,
+              fixtures.finaliseRaceConsultationId,
+            ]),
+          ),
+        );
+
+      // The rows are written directly: the sweep reads `clinical_records` and
+      // nothing else, and going through `finalise` would clear the very gate
+      // this test needs left behind.
+      for (const [consultationId, finalisedAt] of [
+        [fixtures.pagingDecoyConsultationId, anchor],
+        [fixtures.pagingStrandedConsultationId, new Date(anchor.getTime() - 1000)],
+      ] as const) {
+        await db.insert(clinicalRecordsTable).values({
+          consultationId,
+          chiefComplaint: 'Documented already.',
+          riskCategory: 'low',
+          caseSummary: 'Closed.',
+          finalisedAt,
+        });
+        await db
+          .update(consultationsTable)
+          .set({ status: 'completed' })
+          .where(eq(consultationsTable.id, consultationId));
+      }
+
+      // The crash state: the record is final, but the doctor is still gated by
+      // it — and it is the SECOND row in a newest-first ordering.
+      expect(await readDoctorGate(fixtures.pagingDoctorId)).toBe(fixtures.pagingStrandedConsultationId);
+
+      const result = await sweep.sweepFinalisedRecords(anchor, 3_000, 1);
+
+      // Before the fix the sweep stopped after one batch of one, examined only
+      // the decoy, and left the gate exactly where it was.
+      expect(result.examined).toBe(2);
+      expect(result.gatesCleared).toBe(1);
+      expect(await readDoctorGate(fixtures.pagingDoctorId)).toBeNull();
+    });
+
+    it('reports `truncated` instead of silently absorbing a backlog it could not finish', async () => {
+      // One batch of one, and `CLINICAL_GATE_SWEEP_MAX_BATCHES` pages, against
+      // a window that still holds both rows: the pass ends cleanly either way,
+      // and `truncated` is the honest signal for the case where it does not.
+      const result = await sweep.sweepFinalisedRecords(new Date(), 24 * 60 * 60 * 1000, 1);
+
+      expect(result.truncated).toBe(result.examined >= CLINICAL_GATE_SWEEP_MAX_BATCHES);
+      expect(result.failed).toBe(0);
+    });
+  });
+
 });

@@ -134,8 +134,34 @@ export const CLINICAL_AUDIT_TRAIL_LIMIT = 500;
 /** How often the gate-reconciliation sweep runs. Scheduling is copied from `booking-slot-hold.service.ts` — see `clinical-gate-sweep.service.ts`. */
 export const CLINICAL_GATE_SWEEP_INTERVAL_MS = 60_000;
 
-/** Candidates examined per pass. Bounds one pass's facade calls so a backlog drains steadily instead of in one spike — same reasoning as `SWEEP_BATCH_SIZE`. */
+/**
+ * Candidates read per QUERY, not per pass. One pass pages across the whole
+ * look-back window (`clinical-gate-sweep.service.ts`) — this only bounds how
+ * much of it comes back in a single round trip.
+ *
+ * *** IT USED TO BE PER PASS, AND THAT WAS A BUG. *** The comment here read
+ * "bounds one pass's facade calls so a backlog drains steadily instead of in
+ * one spike — same reasoning as `SWEEP_BATCH_SIZE`", copied from
+ * `booking-slot-hold.service.ts`. That sweep's action moves its candidates out
+ * of its own candidate query and takes the oldest first, so its backlog really
+ * does drain. This one's candidates never leave the set — reconciling a record
+ * leaves it finalised and inside the window — and it takes the NEWEST first,
+ * so every pass re-examined the same newest hundred and nothing else in the
+ * window was reachable at all. See `clinical.repository.ts#listFinalisedSince`.
+ */
 export const CLINICAL_GATE_SWEEP_BATCH_SIZE = 100;
+
+/**
+ * How many pages one pass may read before leaving the rest for the next tick.
+ *
+ * The bound the batch size was reaching for, in the place that can actually
+ * express it. 20 x 100 = 2,000 records per pass, which is a day's finalisations
+ * at a scale this product is nowhere near; past that, a pass that paged the
+ * whole window every 60 seconds would be a self-inflicted load spike. Hitting
+ * this bound sets `truncated` on the result and logs a warning, so a backlog
+ * that genuinely needs a wider horizon is visible instead of silent.
+ */
+export const CLINICAL_GATE_SWEEP_MAX_BATCHES = 20;
 
 /**
  * How far back the sweep looks for finalised records to reconcile.
