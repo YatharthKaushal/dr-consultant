@@ -1,5 +1,7 @@
 import { Module } from '@nestjs/common';
 import { BookingModule } from '../booking/booking.module';
+import { CarehubModule } from '../carehub/carehub.module';
+import { CareHubFacade } from '../carehub/carehub.facade';
 import { CatalogueModule } from '../catalogue/catalogue.module';
 import { ClinicalModule } from '../clinical/clinical.module';
 import { IdentityFacade } from '../identity/identity.facade';
@@ -58,14 +60,16 @@ import { UnavailableCareHubProvider } from './unavailable-care-hub.provider';
  *                           merged too, so unlike every "parallel worktree"
  *                           port in this codebase there is no placeholder
  *                           period to wait out.
- *   Care Hub content         `CARE_HUB_PORT`, bound to
- *                           `UnavailableCareHubProvider` — M-18 does not
- *                           exist yet. Returns `[]`.
- *   Admins by permission     `ADMIN_DIRECTORY_PORT`, bound to
- *                           `UnavailableAdminDirectoryProvider` — no
- *                           existing facade lists admins by permission; see
- *                           that contract's header for the gap and what
- *                           closes it.
+ *   Care Hub content         `CARE_HUB_PORT`, bound to the real
+ *                           `CareHubFacade` (M-18) — rebound post-merge,
+ *                           `UnavailableCareHubProvider` stays in the tree
+ *                           unbound as the kill-switch.
+ *   Admins by permission     `ADMIN_DIRECTORY_PORT`, bound to the real
+ *                           `IdentityFacade` — rebound post-merge,
+ *                           `UnavailableAdminDirectoryProvider` stays in the
+ *                           tree unbound as the kill-switch. See
+ *                           `identity-access.repository.ts
+ *                           #listAdminIdsWithPermission` for the query.
  *
  * ---------------------------------------------------------------------------
  * *** COORDINATOR POST-MERGE UPDATE — READ BEFORE TRUSTING THE PARAGRAPH THIS
@@ -107,13 +111,18 @@ import { UnavailableCareHubProvider } from './unavailable-care-hub.provider';
  * from the owning modules without copying their data").
  */
 @Module({
-  imports: [BookingModule, CatalogueModule, ClinicalModule, IdentityModule, NotificationModule],
+  imports: [BookingModule, CarehubModule, CatalogueModule, ClinicalModule, IdentityModule, NotificationModule],
   controllers: [FollowupController, FollowupPathwayAdminController, FollowupAlertAdminController],
   providers: [
     FollowupRepository,
     FollowupPathwayRepository,
     { provide: FOLLOWUP_NOTIFICATION_PORT, useExisting: NotificationFacade },
-    { provide: CARE_HUB_PORT, useClass: UnavailableCareHubProvider },
+    // Rebound from `UnavailableCareHubProvider` post-merge: `CareHubFacade`
+    // (M-18) satisfies `CareHubPort` structurally with zero field renames,
+    // exactly as that contract file's own header predicted. The provider
+    // class stays in the tree, unbound, as the hard kill-switch every other
+    // port in this codebase keeps for the same reason.
+    { provide: CARE_HUB_PORT, useExisting: CareHubFacade },
     // Rebound from `UnavailableAdminDirectoryProvider` post-merge:
     // `IdentityFacade.listAdminIdsWithPermission` now exists (added for
     // exactly this seam — see `identity.contract.ts`). The provider class
