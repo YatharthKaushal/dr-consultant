@@ -6,6 +6,7 @@ import {
   INSTANT_AUDIT_ENTITY_TYPES,
   INSTANT_NOTIFICATION_TEMPLATES,
   PAYMENT_SWEEP_INTERVAL_MS,
+  STRANDED_REQUEST_GRACE_MS,
   SWEEP_BATCH_SIZE,
 } from './instant.constants';
 
@@ -78,6 +79,7 @@ function buildHarness() {
 
   const bookings: Record<string, Fn> = {
     listExpiredInstantHolds: jest.fn(async () => []),
+    listStaleAwaitingDoctorRequests: jest.fn(async () => []),
     getBooking: jest.fn(async () => makeBooking()),
   };
 
@@ -415,5 +417,121 @@ describe('InstantExpiryService', () => {
     expect(bookings.listExpiredInstantHolds).toHaveBeenCalledTimes(1);
     // Neither sweep reads the other's source, so they cannot fight over a row.
     expect(repo.findExpiredPendingAttempts).not.toBe(bookings.listExpiredInstantHolds);
+  });
+  /* ═══════════════════════════════════════════════════════════════════════
+   * ADVERSARIAL REVIEW — the two defects found by attacking the sweeps.
+   * ═══════════════════════════════════════════════════════════════════════ */
+
+  describe('*** the payment sweep must not free the doctor of a consultation that got paid ***', () => {
+    /**
+     * DEFECT. `releaseUnpaidRequest` read the consultation's status only AFTER
+     * it had already moved the doctor `in_consultation` -> `available_now`.
+     * That write is legal and always succeeded, so the status check below it
+     * stopped nothing that mattered.
+     *
+     * The race is ordinary, not exotic: `listExpiredInstantHolds` runs once
+     * per pass and each candidate costs several more facade round trips, so a
+     * patient who pays a second after the window closes has their
+     * consultation confirmed to `scheduled` by `BookingPaymentListener` while
+     * the sweep is still working through the batch. The doctor of a PAID,
+     * LIVE consultation was then handed back to the routing pool and offered
+     * somebody else's request.
+     */
+    it('leaves the doctor alone when the consultation was confirmed between the candidate query and the release', async () => {
+      const h = buildHarness();
+      h.bookings.listExpiredInstantHolds.mockResolvedValue([
+        { consultationId: CONSULTATION_ID, patientId: PATIENT_ID, doctorId: DOCTOR_ID, holdExpiresAt: new Date() },
+      ]);
+      // The patient paid; M-11 has already taken it live.
+      h.bookings.getBooking.mockResolvedValue(makeBooking({ status: 'scheduled' }));
+
+      const result = await h.service.sweepUnpaidAcceptedRequests();
+
+      expect(h.presence.transition).not.toHaveBeenCalled();
+      expect(h.instant.releaseRequest).not.toHaveBeenCalled();
+      expect(result).toMatchObject({ examined: 1, released: 0, skipped: 1 });
+    });
+
+    it('gives back only a doctor it is actually holding — never one who has put themselves offline or paused', async () => {
+      const h = buildHarness();
+      h.bookings.listExpiredInstantHolds.mockResolvedValue([
+        { consultationId: CONSULTATION_ID, patientId: PATIENT_ID, doctorId: DOCTOR_ID, holdExpiresAt: new Date() },
+      ]);
+
+      await h.service.sweepUnpaidAcceptedRequests();
+
+      expect(h.presence.transition).toHaveBeenCalledWith(
+        expect.objectContaining({ to: 'available_now', onlyFrom: ['in_consultation'] }),
+      );
+    });
+  });
+
+  describe('*** sweep 3: the stranded request ***', () => {
+    /**
+     * DEFECT. A consultation in `awaiting_doctor` whose last offer had been
+     * settled had no pending `instant_consultancy` row (so sweep 1 could not
+     * see it) and no `hold_expires_at` (so sweep 2 and M-11's hold sweep could
+     * not see it either). Every path that settles an offer and then fails to
+     * open the next one — a decline whose re-route threw, a timeout whose
+     * re-route threw, an accept rolled back after `assignDoctor` failed, a
+     * process that died mid-saga — left the request alive on the patient's
+     * screen and untouchable in the database.
+     */
+    it('hands a stale awaiting_doctor consultation back to the router', async () => {
+      const h = buildHarness();
+      h.bookings.listStaleAwaitingDoctorRequests.mockResolvedValue([
+        { consultationId: CONSULTATION_ID, patientId: PATIENT_ID, updatedAt: new Date('2026-03-01T09:00:00.000Z') },
+      ]);
+
+      const result = await h.service.sweepStrandedRequests();
+
+      expect(h.instant.routeNext).toHaveBeenCalledWith(CONSULTATION_ID, 'stranded_request_sweep');
+      expect(result).toMatchObject({ examined: 1, rerouted: 1, released: 0, skipped: 0, failed: 0 });
+    });
+
+    it('only looks at requests that have been sitting there longer than the grace period', async () => {
+      const h = buildHarness();
+      const now = new Date('2026-03-01T10:00:00.000Z');
+
+      await h.service.sweepStrandedRequests(now);
+
+      expect(h.bookings.listStaleAwaitingDoctorRequests).toHaveBeenCalledWith(
+        new Date(now.getTime() - STRANDED_REQUEST_GRACE_MS),
+        SWEEP_BATCH_SIZE,
+      );
+    });
+
+    it('counts a request that still has an offer outstanding as a skip, not a re-route — a false positive costs one read', async () => {
+      const h = buildHarness();
+      h.bookings.listStaleAwaitingDoctorRequests.mockResolvedValue([
+        { consultationId: CONSULTATION_ID, patientId: PATIENT_ID, updatedAt: new Date('2026-03-01T09:00:00.000Z') },
+      ]);
+      h.instant.routeNext.mockResolvedValue({ routed: false, reason: 'already_pending' });
+
+      await expect(h.service.sweepStrandedRequests()).resolves.toMatchObject({ examined: 1, rerouted: 0, skipped: 1 });
+    });
+
+    it('counts an exhausted request as released — the patient is told rather than left waiting', async () => {
+      const h = buildHarness();
+      h.bookings.listStaleAwaitingDoctorRequests.mockResolvedValue([
+        { consultationId: CONSULTATION_ID, patientId: PATIENT_ID, updatedAt: new Date('2026-03-01T09:00:00.000Z') },
+      ]);
+      h.instant.routeNext.mockResolvedValue({ routed: false, reason: 'exhausted' });
+
+      await expect(h.service.sweepStrandedRequests()).resolves.toMatchObject({ examined: 1, released: 1 });
+    });
+
+    it('one failing candidate does not abandon the rest of the batch', async () => {
+      const h = buildHarness();
+      h.bookings.listStaleAwaitingDoctorRequests.mockResolvedValue([
+        { consultationId: CONSULTATION_ID, patientId: PATIENT_ID, updatedAt: new Date('2026-03-01T09:00:00.000Z') },
+        { consultationId: OTHER_CONSULTATION_ID, patientId: PATIENT_ID, updatedAt: new Date('2026-03-01T09:00:00.000Z') },
+      ]);
+      h.instant.routeNext.mockImplementationOnce(async () => {
+        throw new Error('router exploded');
+      });
+
+      await expect(h.service.sweepStrandedRequests()).resolves.toMatchObject({ examined: 2, failed: 1, rerouted: 1 });
+    });
   });
 });
