@@ -15,7 +15,7 @@ describe('VideoFacade', () => {
     // `BookingContract#findById` and `InstantContract#getInstantConsult` state.
     const consultationId = randomUUID();
     const session = { consultationId, connections: [], noShowParties: ['patient', 'doctor'] };
-    const service = { getSession: jest.fn().mockResolvedValue(session) };
+    const service = { getSession: jest.fn().mockResolvedValue(session), countParticipantRowsForConsultations: jest.fn() };
 
     const facade = new VideoFacade(service as never);
 
@@ -23,14 +23,26 @@ describe('VideoFacade', () => {
     expect(service.getSession).toHaveBeenCalledWith(consultationId);
   });
 
+  /** *** M-21 CALLS THIS. *** A pure row count for a patient data-deletion preview — see `video.contract.ts#VideoContract.countParticipantRowsForConsultations`. Nothing here writes. */
+  it('delegates the M-21 data-rights participant-row count', async () => {
+    const consultationId = randomUUID();
+    const service = { getSession: jest.fn(), countParticipantRowsForConsultations: jest.fn().mockResolvedValue(2) };
+
+    const facade = new VideoFacade(service as never);
+
+    await expect(facade.countParticipantRowsForConsultations([consultationId])).resolves.toBe(2);
+    expect(service.countParticipantRowsForConsultations).toHaveBeenCalledWith([consultationId]);
+  });
+
   it('*** EXPOSES NOTHING THAT MINTS A TOKEN ***', () => {
     // FR-8.5's gate is defined in terms of the CALLER — "only the assigned
     // patient and doctor" — so a trusted module-to-module mint would be a way
     // to get into a clinical conversation without being either of them. If
-    // somebody adds one, this fails.
+    // somebody adds one, this fails. The one addition since is M-21's
+    // read-only row count, which cannot open a call — see the test above.
     const methods = Object.getOwnPropertyNames(VideoFacade.prototype).filter((name) => name !== 'constructor');
 
-    expect(methods).toEqual(['getSession']);
+    expect(methods.sort()).toEqual(['countParticipantRowsForConsultations', 'getSession']);
   });
 });
 

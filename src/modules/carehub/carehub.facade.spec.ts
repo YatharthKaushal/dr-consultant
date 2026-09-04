@@ -6,6 +6,7 @@ const CONSULTATION_ID = '11111111-1111-4111-8111-111111111111';
 function createFacade() {
   const carehub = {
     getRecommendedForConsultation: jest.fn().mockResolvedValue([]),
+    countRecommendationsForConsultations: jest.fn().mockResolvedValue(0),
   };
   return { facade: new CareHubFacade(carehub as unknown as CarehubService), carehub };
 }
@@ -19,6 +20,15 @@ describe('CareHubFacade', () => {
     expect(carehub.getRecommendedForConsultation).toHaveBeenCalledWith(CONSULTATION_ID);
   });
 
+  /** *** M-21 CALLS THIS. *** A pure row count for a patient data-deletion preview — see `carehub.contract.ts#CareHubContract.countRecommendationsForConsultations`. Nothing here writes. */
+  it('delegates the M-21 data-rights recommendation count', async () => {
+    const { facade, carehub } = createFacade();
+    carehub.countRecommendationsForConsultations.mockResolvedValue(4);
+
+    await expect(facade.countRecommendationsForConsultations([CONSULTATION_ID])).resolves.toBe(4);
+    expect(carehub.countRecommendationsForConsultations).toHaveBeenCalledWith([CONSULTATION_ID]);
+  });
+
   /**
    * *** THE ABSENCE IS THE CONTRACT. *** Recording a recommendation is the
    * treating doctor's act through this module's own controller — a write
@@ -28,7 +38,7 @@ describe('CareHubFacade', () => {
   it('exposes NO write — the public surface is read-only', () => {
     const { facade } = createFacade();
     const surface = Object.getOwnPropertyNames(Object.getPrototypeOf(facade)).filter((name) => name !== 'constructor');
-    expect(surface).toEqual(['getRecommendedForConsultation']);
+    expect(surface.sort()).toEqual(['countRecommendationsForConsultations', 'getRecommendedForConsultation']);
   });
 
   /**

@@ -22,4 +22,9 @@ export class ClarificationFacade implements ClarificationContract {
   async getCaseSummary(caseId: string): Promise<ClarificationCaseSummaryView | null> {
     return this.clarification.getCaseSummary(caseId);
   }
+
+  /** *** M-21 CALLS THIS. *** See `ClarificationContract#countCasesForConsultations` — a pure, read-only count, nothing here is anonymized or deleted. */
+  async countCasesForConsultations(consultationIds: readonly string[]): Promise<number> {
+    return this.clarification.countCasesForConsultations(consultationIds);
+  }
 }

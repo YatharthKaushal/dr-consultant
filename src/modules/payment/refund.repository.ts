@@ -1,8 +1,9 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { and, desc, eq, gte, inArray, isNull, lte, ne, type SQL } from 'drizzle-orm';
+import { and, count, desc, eq, gte, inArray, isNull, lte, ne, type SQL } from 'drizzle-orm';
 import { DATABASE } from '../../config/db/database.module';
 import type { Database, DatabaseTransaction } from '../../config/db/database.config';
 import type { RefundStatus } from '../../schema/enums.schema';
+import { paymentsTable } from '../../schema/payments.schema';
 import { refundsTable, type RefundRow } from '../../schema/refunds.schema';
 
 type Executor = Database | DatabaseTransaction;
@@ -258,5 +259,27 @@ export class RefundRepository {
       .from(refundsTable)
       .where(inArray(refundsTable.paymentId, [...paymentIds]))
       .orderBy(refundsTable.createdAt);
+  }
+
+  /**
+   * ADDITIVE (M-21/data rights execution): `DataRightsFacade#previewExecution`
+   * needs a READ-ONLY row count of `refunds` for a patient's approved
+   * data-deletion request, without touching a single row — `refunds` is
+   * RETAIN in the M-21 compliance survey (financial/statutory record-keeping
+   * under GST law and reconciliation obligations), so nothing here is ever
+   * anonymized or deleted.
+   *
+   * `refunds` has no `consultation_id` of its own, only `payment_id`, so this
+   * joins to `payments` — this module's OWN table, not a cross-module read —
+   * to filter on `input.consultationIds`.
+   */
+  async countByConsultationIds(consultationIds: readonly string[], executor: Executor = this.db): Promise<number> {
+    if (consultationIds.length === 0) return 0;
+    const [row] = await executor
+      .select({ value: count() })
+      .from(refundsTable)
+      .innerJoin(paymentsTable, eq(paymentsTable.id, refundsTable.paymentId))
+      .where(inArray(paymentsTable.consultationId, [...consultationIds]));
+    return row?.value ?? 0;
   }
 }

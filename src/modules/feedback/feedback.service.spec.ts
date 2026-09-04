@@ -48,7 +48,7 @@ function row(overrides: Partial<FeedbackRow> = {}): FeedbackRow {
 
 /** Hand-rolled deps, `new FeedbackService(...)` — never `Test.createTestingModule`, `clarification.service.spec.ts`'s convention. */
 function createDeps() {
-  const repo = { findByConsultationId: jest.fn(), create: jest.fn(), listForAdmin: jest.fn() };
+  const repo = { findByConsultationId: jest.fn(), create: jest.fn(), listForAdmin: jest.fn(), countByPatientId: jest.fn() };
   const booking = { getBooking: jest.fn() };
   const audit = { write: jest.fn().mockResolvedValue(undefined) };
 
@@ -148,5 +148,15 @@ describe('FeedbackService.listForAdmin', () => {
 
     expect(repo.listForAdmin).toHaveBeenCalledWith(expect.objectContaining({ rating: 5, limit: 10, offset: 0 }));
     expect(result).toHaveLength(1);
+  });
+});
+
+describe('FeedbackService.countByPatientId', () => {
+  it('delegates to the repository', async () => {
+    const { service, repo } = createDeps();
+    repo.countByPatientId.mockResolvedValue(3);
+
+    await expect(service.countByPatientId(PATIENT_ID)).resolves.toBe(3);
+    expect(repo.countByPatientId).toHaveBeenCalledWith(PATIENT_ID);
   });
 });

@@ -33,4 +33,9 @@ export class NotificationFacade implements NotificationContract {
   async notify(request: NotificationRequest): Promise<NotificationResult> {
     return this.notifications.notify(request);
   }
+
+  /** *** M-21 CALLS THIS. *** See `NotificationContract#countNotificationsForPatient` — a pure, read-only count, nothing here is anonymized or deleted. */
+  async countNotificationsForPatient(patientId: string): Promise<number> {
+    return this.notifications.countNotificationsForPatient(patientId);
+  }
 }

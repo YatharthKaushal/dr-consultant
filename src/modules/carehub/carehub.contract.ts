@@ -95,4 +95,15 @@ export interface CareHubContract {
    * rule `ClinicalContract`/`BookingContract.findById` both state.
    */
   getRecommendedForConsultation(consultationId: string): Promise<RecommendedContentItem[]>;
+
+  /**
+   * ADDITIVE (M-21/data rights execution): `DataRightsFacade#previewExecution`
+   * needs a READ-ONLY row count of `content_recommendations` for a patient's
+   * approved data-deletion request, across every consultation the caller has
+   * already resolved for that patient — without touching a single row.
+   * `content_recommendations` is RETAIN in the M-21 compliance survey (SRS
+   * §5.3), so nothing this method reads is ever anonymized or deleted. Empty
+   * `consultationIds` in, `0` out — no query issued.
+   */
+  countRecommendationsForConsultations(consultationIds: readonly string[]): Promise<number>;
 }

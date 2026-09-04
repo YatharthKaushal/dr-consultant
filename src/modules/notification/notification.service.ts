@@ -348,6 +348,11 @@ export class NotificationService {
     return { unread: await this.repo.countUnread(toAudience(auth)) };
   }
 
+  /** ADDITIVE (M-21/data rights execution): see `NotificationContract#countNotificationsForPatient`. No auth check — a trusted module-to-module read. */
+  async countNotificationsForPatient(patientId: string): Promise<number> {
+    return this.repo.countForPatient(patientId);
+  }
+
   /**
    * Marks one notification read. A row that does not exist and a row
    * belonging to someone else are the SAME 404 — telling them apart would

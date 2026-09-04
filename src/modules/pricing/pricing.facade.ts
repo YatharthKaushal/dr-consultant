@@ -94,4 +94,16 @@ export class PricingFacade implements PricingContract {
   async hasCatalogue(): Promise<boolean> {
     return this.pricing.hasCatalogue();
   }
+
+  /** See `PricingContract#countDataRightsRowsForPatient`. Combines `PricingService`'s `price_quotes`/`price_quote_components` counts with `PricingRefundService`'s `refund_components` count. */
+  async countDataRightsRowsForPatient(input: {
+    patientId: string;
+    consultationIds: readonly string[];
+  }): Promise<{ priceQuotes: number; priceQuoteComponents: number; refundComponents: number }> {
+    const [quoteCounts, refundComponents] = await Promise.all([
+      this.pricing.countPriceQuoteRowsForPatient(input.patientId),
+      this.refunds.countRefundComponentsForConsultations(input.consultationIds),
+    ]);
+    return { ...quoteCounts, refundComponents };
+  }
 }

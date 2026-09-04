@@ -749,4 +749,62 @@ export class PromotionRepository {
       .returning({ id: promotionCodeAttemptsTable.id });
     return deleted.length;
   }
+
+  /* ---------------------------------------------------------------------- */
+  /* M-21/data rights execution — see `PromotionContract` for the full account */
+  /* ---------------------------------------------------------------------- */
+
+  /**
+   * READ-ONLY counts for the three tables this repository owns.
+   * `discountInstruments` counts EITHER `assigned_patient_id` OR
+   * `referrer_patient_id` matching — a patient can be a voucher's assignee and
+   * a referral instrument's referrer at once, and both are this patient's data.
+   */
+  async countDataRightsRows(
+    patientId: string,
+    executor: Executor = this.db,
+  ): Promise<{ discountInstruments: number; discountRedemptions: number; promotionCodeAttempts: number }> {
+    const [instrumentsRow] = await executor
+      .select({ value: count() })
+      .from(discountInstrumentsTable)
+      .where(
+        or(
+          eq(discountInstrumentsTable.assignedPatientId, patientId),
+          eq(discountInstrumentsTable.referrerPatientId, patientId),
+        ),
+      );
+    const [redemptionsRow] = await executor
+      .select({ value: count() })
+      .from(discountRedemptionsTable)
+      .where(eq(discountRedemptionsTable.patientId, patientId));
+    const [attemptsRow] = await executor
+      .select({ value: count() })
+      .from(promotionCodeAttemptsTable)
+      .where(eq(promotionCodeAttemptsTable.patientId, patientId));
+
+    return {
+      discountInstruments: instrumentsRow?.value ?? 0,
+      discountRedemptions: redemptionsRow?.value ?? 0,
+      promotionCodeAttempts: attemptsRow?.value ?? 0,
+    };
+  }
+
+  /**
+   * *** THE ONLY WRITE M-21 MAKES AGAINST THIS MODULE'S TABLES. *** Nulls both
+   * `patient_id` and `ip_address` on every `promotion_code_attempts` row for
+   * this patient — see `PromotionContract#anonymizePromotionCodeAttemptsForPatient`
+   * for why. `.returning()` makes the count exact from the write itself, not a
+   * separate `count(*)` that could race it.
+   */
+  async anonymizeCodeAttemptsForPatient(
+    patientId: string,
+    executor: Executor = this.db,
+  ): Promise<{ anonymizedCount: number }> {
+    const rows = await executor
+      .update(promotionCodeAttemptsTable)
+      .set({ patientId: null, ipAddress: null })
+      .where(eq(promotionCodeAttemptsTable.patientId, patientId))
+      .returning({ id: promotionCodeAttemptsTable.id });
+    return { anonymizedCount: rows.length };
+  }
 }

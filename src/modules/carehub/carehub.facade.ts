@@ -20,4 +20,9 @@ export class CareHubFacade implements CareHubContract {
   async getRecommendedForConsultation(consultationId: string): Promise<RecommendedContentItem[]> {
     return this.carehub.getRecommendedForConsultation(consultationId);
   }
+
+  /** *** M-21 CALLS THIS. *** See `CareHubContract#countRecommendationsForConsultations` — a pure, read-only count, nothing here is anonymized or deleted. */
+  async countRecommendationsForConsultations(consultationIds: readonly string[]): Promise<number> {
+    return this.carehub.countRecommendationsForConsultations(consultationIds);
+  }
 }

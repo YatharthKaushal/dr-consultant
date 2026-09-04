@@ -230,4 +230,20 @@ export class VideoRepository {
       );
     return row?.total ?? 0;
   }
+
+  /**
+   * ADDITIVE (M-21/data rights execution): a patient data-deletion preview
+   * needs a row count for `consultation_participants` without touching any of
+   * them — this table is RETAIN in the M-21 compliance survey (SRS §5.3), so
+   * this is a pure `SELECT COUNT`, never a delete. Empty array in, `0` out, no
+   * query issued — `inArray(col, [])` is unsafe SQL otherwise.
+   */
+  async countParticipantRowsForConsultations(consultationIds: readonly string[], executor: Executor = this.db): Promise<number> {
+    if (consultationIds.length === 0) return 0;
+    const [row] = await executor
+      .select({ total: sql<number>`count(*)::int` })
+      .from(consultationParticipantsTable)
+      .where(inArray(consultationParticipantsTable.consultationId, consultationIds as string[]));
+    return row?.total ?? 0;
+  }
 }

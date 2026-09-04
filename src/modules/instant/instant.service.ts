@@ -1040,6 +1040,15 @@ export class InstantService {
     return rows.map(toInstantRequestView);
   }
 
+  /**
+   * ADDITIVE (M-21/data rights execution). See
+   * `InstantContract#countOffersForConsultations` — a pure, read-only count,
+   * nothing here is anonymized or deleted.
+   */
+  async countOffersForConsultations(consultationIds: readonly string[]): Promise<number> {
+    return this.repo.countOffersForConsultations(consultationIds);
+  }
+
   /** One request with its full routing history. `null` when the consultation is unknown or not `mode: 'instant'`. */
   async getInstantConsult(consultationId: string): Promise<InstantConsultView | null> {
     const booking = await this.bookings.getBooking(consultationId);

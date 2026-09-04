@@ -5,6 +5,7 @@ import { ConsentRepository } from './consent.repository';
 import { ConsentService } from './consent.service';
 import { DataDeletionAdminController } from './data-deletion-admin.controller';
 import { DataDeletionController } from './data-deletion.controller';
+import { DataDeletionExecutionFacade } from './data-deletion-execution.facade';
 import { DataDeletionRepository } from './data-deletion.repository';
 import { DataDeletionService } from './data-deletion.service';
 import { LegalDocumentAdminController } from './legal-document-admin.controller';
@@ -36,7 +37,11 @@ import { LegalDocumentService } from './legal-document.service';
     ConsentService,
     DataDeletionService,
     ConsentFacade,
+    // *** ADDITIVE (M-21/data rights execution). *** A second, deliberately
+    // separate facade — see `data-deletion-execution.contract.ts`'s header
+    // for why this is not a widening of `ConsentFacade`/`ConsentContract`.
+    DataDeletionExecutionFacade,
   ],
-  exports: [ConsentFacade],
+  exports: [ConsentFacade, DataDeletionExecutionFacade],
 })
 export class ConsentModule {}

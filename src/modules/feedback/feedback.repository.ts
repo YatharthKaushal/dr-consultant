@@ -1,5 +1,5 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { and, desc, eq, gte, lte } from 'drizzle-orm';
+import { and, count, desc, eq, gte, lte } from 'drizzle-orm';
 import { DATABASE } from '../../config/db/database.module';
 import type { Database, DatabaseTransaction } from '../../config/db/database.config';
 import { feedbackTable, type FeedbackRow, type NewFeedbackRow } from '../../schema/feedback.schema';
@@ -37,6 +37,18 @@ export class FeedbackRepository {
       throw new Error('feedback insert returned no row — should be unreachable.');
     }
     return row;
+  }
+
+  /**
+   * ADDITIVE (M-21/data rights execution). READ-ONLY row count of `feedback`
+   * for one patient — `feedback` is RETAIN in the M-21 survey (M-19's own
+   * done-when: "a complaint can be raised, tracked and closed with its full
+   * history kept", `docs/MODULES.md`), so this exists purely to report a
+   * count in a data-deletion preview; nothing here is ever written.
+   */
+  async countByPatientId(patientId: string, executor: Executor = this.db): Promise<number> {
+    const [row] = await executor.select({ value: count() }).from(feedbackTable).where(eq(feedbackTable.patientId, patientId));
+    return row?.value ?? 0;
   }
 
   /** The admin review surface's list — FR-18.8: filterable by rating and by date. */

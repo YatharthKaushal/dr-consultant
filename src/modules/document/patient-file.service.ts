@@ -350,6 +350,25 @@ export class PatientFileService {
     return toSafePatientFileRow(file);
   }
 
+  /**
+   * ADDITIVE (M-21/data rights execution): see `DocumentContract#countDataRightsRowsForPatient`.
+   * Two independent counts, assembled here rather than by the facade, purely
+   * because this service already holds both repositories (`repo` for
+   * `patient_files`, `reportRequestRepo` for `report_requests` — see
+   * `writePrescriptionPdf`'s idempotency check for the other cross-repo use
+   * of that same pairing). No auth check: a trusted module-to-module read.
+   */
+  async countDataRightsRowsForPatient(input: {
+    patientId: string;
+    consultationIds: readonly string[];
+  }): Promise<{ patientFiles: number; reportRequests: number }> {
+    const [patientFiles, reportRequests] = await Promise.all([
+      this.repo.countByPatient(input.patientId),
+      this.reportRequestRepo.countByConsultations(input.consultationIds),
+    ]);
+    return { patientFiles, reportRequests };
+  }
+
   /* ---------------------------------------------------------------------- */
   /* Validation                                                               */
   /* ---------------------------------------------------------------------- */

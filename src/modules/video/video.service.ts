@@ -229,6 +229,17 @@ export class VideoService {
     return this.getSession(booking.id);
   }
 
+  /**
+   * ADDITIVE (M-21/data rights execution) — see `VideoContract
+   * #countParticipantRowsForConsultations`. Guards the empty-array case here:
+   * `inArray(col, [])` is unsafe/misleading on an empty list, so an empty
+   * `consultationIds` short-circuits to `0` with no query at all.
+   */
+  async countParticipantRowsForConsultations(consultationIds: readonly string[]): Promise<number> {
+    if (consultationIds.length === 0) return 0;
+    return this.repo.countParticipantRowsForConsultations(consultationIds);
+  }
+
   /* ── FR-8.4: the consultation room ────────────────────────────────────── */
 
   /**

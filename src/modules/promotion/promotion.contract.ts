@@ -305,4 +305,50 @@ export interface PromotionContract extends DiscountContract {
 
   /** What a patient may see about their own referral programme, without exposing another patient's identity. */
   listRedeemableInstrumentsForPatient(patientId: string): Promise<ReadonlyArray<{ code: string; label: string; description: string | null; validTo: string | null }>>;
+
+  /**
+   * ADDITIVE (M-21/data rights execution): a READ-ONLY row count, per table,
+   * for everything this module owns that references this patient — so a
+   * data-deletion preview can report every count without writing anything.
+   * `discountInstruments` counts rows where EITHER `assigned_patient_id` OR
+   * `referrer_patient_id` matches (a patient can appear in either role).
+   * `referralEvents` counts rows where EITHER `referrer_patient_id` OR
+   * `referee_patient_id` matches, for the same reason.
+   *
+   * `affiliate_commissions` has no direct `patient_id` column — it references
+   * `consultation_id` — so it is counted via `input.consultationIds` instead;
+   * an empty array counts as `0` with no query run.
+   *
+   * `discountInstruments`, `discountRedemptions`, `affiliateAttributions`,
+   * `affiliateCommissions` and `referralEvents` are RETAINED, never written,
+   * by this module's execution path — see
+   * `anonymizePromotionCodeAttemptsForPatient`'s doc comment for why
+   * `promotion_code_attempts` alone is different.
+   */
+  countDataRightsRowsForPatient(input: { patientId: string; consultationIds: readonly string[] }): Promise<{
+    discountInstruments: number;
+    discountRedemptions: number;
+    affiliateAttributions: number;
+    affiliateCommissions: number;
+    referralEvents: number;
+    promotionCodeAttempts: number;
+  }>;
+
+  /**
+   * ADDITIVE (M-21/data rights execution). *** THE ONLY WRITE M-21 MAKES
+   * AGAINST THIS MODULE'S TABLES. *** `promotion-code-attempts.schema.ts`'s own
+   * header already argues this table is designed to be safely dissociated from
+   * a patient ("the deletion matters, the counter does not"). Nulls BOTH
+   * `patient_id` and `ip_address` (a real identifier of its own) on every row
+   * for this patient — the row's `outcome`/`created_at` stay, so the
+   * enumeration-throttle's own history is untouched, only who made the attempt
+   * is scrubbed. Every other table this module owns (`discount_instruments`,
+   * `discount_redemptions`, `affiliate_attributions`, `affiliate_commissions`,
+   * `referral_events`) is RETAINED untouched — see the coordinator's survey for
+   * the fraud-prevention/financial-ledger reasoning.
+   *
+   * Idempotent: anonymizing an already-empty set returns `{ anonymizedCount: 0 }`,
+   * never throws.
+   */
+  anonymizePromotionCodeAttemptsForPatient(patientId: string): Promise<{ anonymizedCount: number }>;
 }

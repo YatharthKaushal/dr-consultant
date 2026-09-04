@@ -156,4 +156,21 @@ export interface FollowupContract {
 
   /** ADDITIVE (M-20/governance and quality): the dashboard-number companion to `listOpenAlerts` — FR-18.6's "red flags"/"follow-up alerts" figures. See `followup.repository.ts#countOpenAlertsByType`. */
   countOpenAlertsByType(): Promise<Partial<Record<SafetyAlertType, number>>>;
+
+  /**
+   * ADDITIVE (M-21/data rights execution): a READ-ONLY row count of every
+   * table this module owns (`checkin_responses`, `safety_alerts`,
+   * `followup_assignments`) for the given consultation ids, so a patient
+   * data-deletion preview can report what exists here without this module
+   * touching a single row — all three tables are RETAIN under the
+   * coordinator's survey (SRS §5.3/§8's clinical-history retention
+   * justification), and this method's only job is to COUNT.
+   *
+   * `consultationIds` empty -> every field `0`, with no query issued.
+   */
+  countDataRightsRowsForConsultations(consultationIds: readonly string[]): Promise<{
+    checkinResponses: number;
+    safetyAlerts: number;
+    followupAssignments: number;
+  }>;
 }
