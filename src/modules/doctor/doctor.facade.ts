@@ -35,6 +35,11 @@ export class DoctorFacade implements DoctorContract {
     return this.doctorService.isVerifiedAndListed(doctorId);
   }
 
+  /** ADDITIVE (M-17/case clarification) — see `doctor.contract.ts`. */
+  async isExpertDoctor(doctorId: string): Promise<boolean> {
+    return this.doctorService.isExpertDoctor(doctorId);
+  }
+
   async getPrescribingEligibility(doctorId: string): Promise<boolean> {
     return this.specialtyService.getPrescribingEligibility(doctorId);
   }
