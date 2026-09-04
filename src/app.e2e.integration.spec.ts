@@ -60,20 +60,27 @@
  *                  that has NEVER RUN END TO END ANYWHERE — flips a real
  *                  `referral_events` row from `qualifying` to `qualified`.
  *
- * ── WHAT IT FOUND ON ITS FIRST RUN ─────────────────────────────────────────
+ * ── WHAT IT FOUND ON ITS FIRST RUN, AND WHAT IS FIXED NOW ──────────────────
  *
  * The chain completes. Four things it turned up on the way, each pinned by a
  * test below rather than left to be rediscovered:
  *
- *   1. *** NO HTTP ROUTE CARRIES A DISCOUNT CODE INTO A BOOKING. ***
- *      `CreateBookingDto` has no field for one and `BookingPaymentPort` has no
- *      parameter for one, so `ValidationPipe({ whitelist: true })` STRIPS a
- *      `discountCode` SILENTLY and answers 201. The whole discount, referral
- *      and affiliate mechanism is unreachable from the patient app.
- *   2. *** THE QUOTE A BOOKING CREATES HAS NO PATIENT, DOCTOR OR SPECIALTY. ***
- *      All three columns are NULL on every real booking, which is also what
- *      `tryReserveForPinned` would hand the promotion module (as
- *      `patientId: ''`) the day (1) is fixed.
+ *   1. *** FIXED. NO HTTP ROUTE CARRIED A DISCOUNT CODE INTO A BOOKING. ***
+ *      `CreateBookingDto` had no field for one and `BookingPaymentPort` had no
+ *      parameter for one, so `ValidationPipe({ whitelist: true })` STRIPPED a
+ *      `discountCode` SILENTLY and answered 201. `CreateBookingDto
+ *      #discountCode`, `BookingQuoteQueryDto#code`, both ports' widened
+ *      signatures, and `payment.service.ts#createOrderForConsultation`'s
+ *      forwarding into `materialiseAndPin` close this — see LINK 4c below,
+ *      which redeems a real coupon through the actual HTTP routes rather than
+ *      through `PromotionFacade` directly (LINK 4b still has to, for the
+ *      referral leg — see its own comment for why that one case remains).
+ *   2. *** FIXED. THE QUOTE A BOOKING CREATED HAD NO PATIENT, DOCTOR OR
+ *      SPECIALTY. *** All three columns were NULL on every real booking, which
+ *      would also have handed the promotion module `patientId: ''` the day (1)
+ *      was fixed — the per-user cap would have counted against no one in
+ *      particular. LINK 4c's `price_quotes` assertions prove all three are now
+ *      populated on every booking, discounted or not.
  *   3. *** THE CAPTURE SEAM IS IN-PROCESS BUT NOT SYNCHRONOUS. *** The webhook
  *      answers 2xx before the booking has moved, so a client that navigates on
  *      payment success can still see `pending_payment`.
@@ -187,6 +194,7 @@ import { createConfiguredApp } from './app.bootstrap';
 import { getDb, type Database } from './config/db/database.config';
 import { loadEnvFiles } from './config/env/env.validation';
 import { consultationsTable } from './schema/consultations.schema';
+import { discountInstrumentsTable } from './schema/discount-instruments.schema';
 import { doctorAvailabilityTable } from './schema/doctor-availability.schema';
 import { doctorSpecialtiesTable } from './schema/doctor-specialties.schema';
 import { doctorsTable } from './schema/doctors.schema';
@@ -424,6 +432,16 @@ function pgArray(values: readonly string[], type: 'uuid' | 'varchar') {
  */
 const postedWebhookEventIds: string[] = [];
 
+/**
+ * A coupon inserted directly for LINK 4c, exactly as every other fixture in
+ * this file is created — the ADMIN side of minting a code is not what that
+ * test exercises, only the PATIENT-facing redemption over HTTP is. It has
+ * neither `referrer_patient_id` nor `referral_event_id`, so the generic
+ * referral-shaped teardown clauses below do not catch it; tracked here and
+ * deleted by id instead.
+ */
+const createdDiscountInstrumentIds: string[] = [];
+
 async function teardown(db: Database, fixtures: Fixtures): Promise<void> {
   const patientIds = [fixtures.patientId, fixtures.referrerPatientId];
 
@@ -460,6 +478,10 @@ async function teardown(db: Database, fixtures: Fixtures): Promise<void> {
   );
   await db.execute(sql`delete from discount_redemptions where patient_id = any(${patientList})`);
   await db.execute(sql`delete from discount_instruments where referrer_patient_id = any(${patientList})`);
+  // LINK 4c's coupon — no referrer, no referral event, so neither clause above catches it.
+  await db.execute(
+    sql`delete from discount_instruments where id = any(${pgArray(createdDiscountInstrumentIds, 'uuid')})`,
+  );
   await db.execute(sql`delete from promotion_code_attempts where patient_id = any(${patientList})`);
   await db.execute(sql`delete from affiliate_attributions where patient_id = any(${patientList})`);
 
@@ -497,7 +519,7 @@ async function teardown(db: Database, fixtures: Fixtures): Promise<void> {
   await db.execute(sql`delete from audit_log where consultation_id = any(${consultationList})`);
   await db.execute(sql`delete from audit_log where actor_id = any(${patientList}) or actor_id = ${fixtures.doctorId}`);
   await db.execute(
-    sql`delete from audit_log where entity_id = any(${pgArray([...patientIds, fixtures.doctorId, ...consultationIds, ...postedWebhookEventIds], 'varchar')})`,
+    sql`delete from audit_log where entity_id = any(${pgArray([...patientIds, fixtures.doctorId, ...consultationIds, ...postedWebhookEventIds, ...createdDiscountInstrumentIds], 'varchar')})`,
   );
 
   await db.execute(sql`delete from consultations where id = any(${consultationList})`);
@@ -774,8 +796,17 @@ describe('*** END TO END: sign-in -> consent -> booking -> payment -> video -> c
         doctorId: fixtures.doctorId,
         specialtyId: fixtures.specialtyId,
         scheduledStartAt: chain.slotStartsAt,
-        // *** SILENTLY STRIPPED. *** See the dedicated test below — this is a
-        // finding, not a typo.
+        // *** NO LONGER STRIPPED. *** `ANYTHING` is a well-formed code (passes
+        // `CreateBookingDto#discountCode`'s shape check) that names no real
+        // instrument, so the discount port refuses it as `CODE_NOT_USABLE` —
+        // proved not to have applied below (`discount_code` stays null,
+        // `total_payable` stays undiscounted). The refusal REASON specifically
+        // does not survive onto THIS response — see the comment on
+        // `discount` below for why that is a pre-existing, separate fact
+        // about `pin()`, not something this round of fixes changed — but the
+        // patient sees it where it actually matters: the PREVIEW, before ever
+        // committing to a slot. See "an unknown code is refused loudly at
+        // preview" below.
         discountCode: 'ANYTHING',
       },
     });
@@ -783,9 +814,35 @@ describe('*** END TO END: sign-in -> consent -> booking -> payment -> video -> c
 
     const body = payload<{
       booking: { id: string; status: string; referenceCode: string };
-      payment: { paymentId: string; gatewayOrderId: string; breakdown: { totalPayable: string; consultationFee: string } };
+      payment: {
+        paymentId: string;
+        gatewayOrderId: string;
+        breakdown: {
+          totalPayable: string;
+          consultationFee: string;
+          discount?: { applied: boolean; code: string; amount: string; cappedAmount: string; reason: string | null; message: string | null } | null;
+        };
+      };
       isFirstConsultation: boolean;
     }>(response);
+
+    /**
+     * *** `discount` IS `null` HERE, AND THAT IS A SEPARATE, PRE-EXISTING FACT
+     * ABOUT `pin()` — NOT THIS ROUND'S BUG COMING BACK. ***
+     *
+     * `createOrderForConsultation` -> `materialiseAndPin` -> `pin()` re-reads
+     * the FROZEN row and rebuilds the view with `toQuoteViewFromRows(pinned,
+     * components)` — no `discount` argument — which falls back to
+     * reconstructing it from `price_quotes.discount_code` alone
+     * (`pricing.mapper.ts#toQuoteViewFromRows`). A REFUSED code writes no
+     * columns (`writeQuote` only sets `discountCode` when
+     * `resolved.discount?.applied`), so a booking-creation response cannot
+     * tell "refused" apart from "no code offered" — both reconstruct as
+     * `discount: null`. `preview()`/`createQuote()` themselves return the
+     * live-computed view WITH the reason, which is exactly what
+     * `quoteForDoctor` hands back untouched — see the preview test below.
+     */
+    expect(body.payment.breakdown.discount ?? null).toBeNull();
 
     expect(body.booking.status).toBe('pending_payment');
     expect(body.payment.gatewayOrderId).toMatch(/^order_/);
@@ -836,25 +893,24 @@ describe('*** END TO END: sign-in -> consent -> booking -> payment -> video -> c
   });
 
   /**
-   * *** A FINDING, RECORDED AS A TEST. ***
+   * *** THE FIX, PINNED. *** This used to be titled "FINDING" and asserted
+   * the opposite of every line below: `discount_code` null (because the field
+   * was stripped before it ever reached pricing), and `patient_id`/
+   * `doctor_id`/`specialty_id` all null on EVERY booking, discounted or not.
    *
-   * `CreateBookingDto` has no discount-code field, and `BookingPaymentPort
-   * #createOrderForConsultation` takes no `quoteId` and no `discountCode`. The
-   * global `ValidationPipe({ whitelist: true })` therefore STRIPS a
-   * `discountCode` a client sends, SILENTLY and with a 201 — the patient is
-   * charged the undiscounted amount and told nothing.
-   *
-   * So there is NO ROUTE by which a promo, referral or affiliate code reaches a
-   * scheduled booking. `POST /api/promotions/codes/preview` can price a code and
-   * `POST /api/bookings/quote/:doctorId` can price a consultation, but neither
-   * result can be carried into `POST /api/bookings`. The entire discount,
-   * referral-reward and affiliate-commission mechanism is unreachable from the
-   * patient app today.
-   *
-   * This test pins the CURRENT behaviour so the day it changes, it changes
-   * loudly. It is not an endorsement of it.
+   * `ANYTHING` is a well-formed but unusable code, so `discount_code` staying
+   * null here is the CORRECT outcome of a refusal, not a symptom of the field
+   * never arriving — the previous `it` above already proved the refusal is
+   * visible in the response. What changed is the second, sharper claim: the
+   * quote's attribution columns are populated on THIS booking even though its
+   * code did not apply, because `booking.service.ts#createBooking` now
+   * forwards `patientId`/`doctorId`/`specialtyId` to `createOrderForConsultation`
+   * unconditionally — not only when a discount happens to be offered. Without
+   * that, `pricing.service.ts#tryReserveForPinned` would key its per-user cap
+   * on `patientId: quote.patientId ?? ''`, an empty string shared by every
+   * patient, the moment a code COULD reach a booking.
    */
-  it('FINDING — a discountCode sent with a booking is silently stripped, and the quote carries no patient, doctor or specialty', async () => {
+  it('the quote a booking creates carries its patient, doctor and specialty — refused or not', async () => {
     const quote = await db.execute(
       sql`select discount_code, discount_total, total_payable, patient_id, doctor_id, specialty_id from price_quotes where consultation_id = ${chain.consultationId!}`,
     );
@@ -870,35 +926,17 @@ describe('*** END TO END: sign-in -> consent -> booking -> payment -> video -> c
       }>
     )[0];
 
+    // `ANYTHING` was refused (`CODE_NOT_USABLE`), so nothing was actually
+    // applied — a refused code is never written to `discount_code`.
     expect(quoteRow.discount_code).toBeNull();
     expect(quoteRow.discount_total).toBe('0.00');
     expect(quoteRow.total_payable).toBe(chain.totalPayable);
 
-    /**
-     * *** AND A SECOND, SHARPER FINDING ON THE SAME SEAM. ***
-     *
-     * The quote a booking creates carries NO patient, NO doctor and NO
-     * specialty. `booking.service.ts` calls
-     * `createOrderForConsultation({ consultationId, consultationFeeInr })`,
-     * which falls through to `pricing.service.ts#materialiseAndPin` with a
-     * request that has none of those three fields, so all three columns land
-     * NULL — on every real booking this application takes.
-     *
-     * That is not only lost reporting. `pricing.service.ts#tryReserveForPinned`
-     * builds its `DiscountOrderContext` from exactly these columns and passes
-     * `patientId: quote.patientId ?? ''`. So on the day a discount code CAN
-     * reach a booking, the reservation would be attempted for the empty-string
-     * patient — a per-user cap that counts nothing, and an attribution that
-     * names nobody.
-     *
-     * It is latent today only because nothing can carry a code into a booking
-     * (the finding above). The two defects are the same seam seen from two
-     * sides, and fixing one without the other turns a dead path into a wrong
-     * one.
-     */
-    expect(quoteRow.patient_id).toBeNull();
-    expect(quoteRow.doctor_id).toBeNull();
-    expect(quoteRow.specialty_id).toBeNull();
+    // *** THE FIX. *** Every real booking now carries its own attribution,
+    // whether or not a discount code was offered or applied.
+    expect(quoteRow.patient_id).toBe(fixtures.patientId);
+    expect(quoteRow.doctor_id).toBe(fixtures.doctorId);
+    expect(quoteRow.specialty_id).toBe(fixtures.specialtyId);
   });
 
   /* ====================================================================== */
@@ -978,6 +1016,183 @@ describe('*** END TO END: sign-in -> consent -> booking -> payment -> video -> c
     expect(event.status).toBe('qualifying');
     expect(event.qualified_at).toBeNull();
     chain.referralEventId = event.id;
+  });
+
+  /* ====================================================================== */
+  /* 4c. A coupon, reserved through the ACTUAL HTTP ROUTES                   */
+  /* ====================================================================== */
+
+  /**
+   * *** THE FIX, PROVEN OVER HTTP — NOT THROUGH THE DI CONTAINER. ***
+   *
+   * LINK 4b's referral had to call `PromotionFacade` directly, because no
+   * route could carry a code into a booking — that was the gap this whole
+   * round closed. This coupon goes in through `POST /api/bookings` exactly as
+   * a patient's app sends it, proving `CreateBookingDto#discountCode`,
+   * `BookingQuoteQueryDto#code`, both ports' widened signatures and
+   * `payment.service.ts#createOrderForConsultation`'s forwarding into
+   * `materialiseAndPin` all actually work TOGETHER, not just in isolation
+   * against a mock.
+   *
+   * The coupon INSTRUMENT itself is inserted directly, exactly as every other
+   * fixture in this file is (the doctor, the specialty, the availability
+   * rules) — creating one is an admin action this leg is not exercising, only
+   * the patient-facing redemption needs to be real HTTP. `createdByAdminId`
+   * stays null ("system-minted"), same as a referral reward.
+   *
+   * A FLAT 50.00 coupon against the FR-7.3 catalogue: the doctor's fee never
+   * bears a discount (`pricing.constants.ts`'s `discountBearer: null` on
+   * `doctor_fee` — FR-7.4's payout protection), so the whole 50.00 lands on
+   * the 100.00 convenience fee, well under it, so nothing is capped. Taxable
+   * value on that line drops from 100.00 to 50.00, so its GST drops from
+   * 18.00 to 9.00 (both at 18%). 500.00 (untouched) + 50.00 (net convenience)
+   * + 9.00 (its tax) = 559.00, against LINK 4's undiscounted 618.00.
+   */
+  const COUPON_CODE = `E2ECPN${randomUUID().replace(/-/g, '').slice(0, 10).toUpperCase()}`;
+  let couponConsultationId: string;
+
+  /**
+   * *** POINT 7's PROOF: A BAD CODE IS REFUSED LOUDLY, NOT SILENTLY DROPPED
+   * TO A FULL-PRICE QUOTE. *** Over the real `GET quote/:doctorId?code=`
+   * route — no `PromotionFacade` shortcut. Unlike `POST /bookings` (see LINK
+   * 4's comment on why `pin()`'s reconstruction loses a refusal reason),
+   * `quoteForDoctor` -> `payments.quote()` -> `pricing.preview()` returns the
+   * LIVE-COMPUTED view directly, reason and message intact — this is the
+   * moment a patient actually sees "that code didn't work", before ever
+   * committing to a slot.
+   */
+  it('an unknown code is refused loudly at preview, never silently collapsed to a full-price quote', async () => {
+    const response = await app.inject({
+      method: 'GET',
+      url: `/api/bookings/quote/${fixtures.doctorId}?code=NOSUCHCODE99`,
+      headers: { authorization: `Bearer ${chain.patientToken}` },
+    });
+    expect(response.statusCode).toBe(200);
+
+    const breakdown = payload<{
+      totalPayable: string;
+      discount?: { applied: boolean; code: string; amount: string; cappedAmount: string; reason: string | null; message: string | null } | null;
+    }>(response);
+
+    expect(breakdown.discount).toEqual({
+      applied: false,
+      code: 'NOSUCHCODE99',
+      amount: '0.00',
+      cappedAmount: '0.00',
+      reason: 'CODE_NOT_USABLE',
+      message: expect.any(String) as unknown as string,
+    });
+    // Undiscounted — the refusal did not silently take a cut anyway.
+    expect(breakdown.totalPayable).toBe('618.00');
+  });
+
+  it('LINK 4c — GET quote/:doctorId?code= previews the coupon before booking, unreserved', async () => {
+    const [instrument] = await db
+      .insert(discountInstrumentsTable)
+      .values({
+        code: COUPON_CODE,
+        kind: 'coupon',
+        status: 'active',
+        label: `E2E flat coupon ${fixtures.runId}`,
+        isPubliclyListed: true,
+        valueKind: 'flat',
+        flatAmount: '50.00',
+        minOrderAmount: '0',
+        maxRedemptionsPerUser: 5,
+      })
+      .returning({ id: discountInstrumentsTable.id });
+    createdDiscountInstrumentIds.push(instrument.id);
+
+    const response = await app.inject({
+      method: 'GET',
+      url: `/api/bookings/quote/${fixtures.doctorId}?code=${COUPON_CODE}`,
+      headers: { authorization: `Bearer ${chain.patientToken}` },
+    });
+    expect(response.statusCode).toBe(200);
+
+    const breakdown = payload<{
+      totalPayable: string;
+      discount?: { applied: boolean; code: string; amount: string } | null;
+    }>(response);
+    expect(breakdown.discount).toMatchObject({ applied: true, code: COUPON_CODE, amount: '50.00' });
+    expect(breakdown.totalPayable).toBe('559.00');
+
+    // *** A PREVIEW MUST NEVER RESERVE. *** Nothing is redeemed by looking.
+    const redemptions = await db.execute(
+      sql`select count(*)::int as n from discount_redemptions where instrument_id = ${instrument.id}`,
+    );
+    expect((redemptions.rows as Array<{ n: number }>)[0].n).toBe(0);
+  });
+
+  it('LINK 4c — POST /api/bookings with the coupon code actually reserves it, and the price_quotes row is discounted and attributed', async () => {
+    // A fresh slot — LINK 4's own slot is already taken.
+    const from = new Date();
+    const to = new Date(from.getTime() + 4 * 24 * 60 * 60 * 1000);
+    const slotsResponse = await app.inject({
+      method: 'GET',
+      url: `/api/doctors/${fixtures.doctorId}/slots?from=${from.toISOString()}&to=${to.toISOString()}`,
+      headers: { authorization: `Bearer ${chain.patientToken}` },
+    });
+    const slots = payload<Array<{ startsAt: string }>>(slotsResponse);
+    const chosen = slots.find(
+      (slot) =>
+        slot.startsAt !== chain.slotStartsAt &&
+        new Date(slot.startsAt).getTime() > from.getTime() + (MIN_NOTICE_MINUTES + 30) * 60_000,
+    );
+    expect(chosen).toBeDefined();
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/bookings',
+      headers: { authorization: `Bearer ${chain.patientToken}` },
+      payload: {
+        doctorId: fixtures.doctorId,
+        specialtyId: fixtures.specialtyId,
+        scheduledStartAt: chosen!.startsAt,
+        discountCode: COUPON_CODE,
+      },
+    });
+    expect(response.statusCode).toBe(201);
+
+    const body = payload<{
+      booking: { id: string };
+      payment: { breakdown: { totalPayable: string; discount?: { applied: boolean; code: string; amount: string } | null } };
+    }>(response);
+    couponConsultationId = body.booking.id;
+
+    expect(body.payment.breakdown.discount).toMatchObject({ applied: true, code: COUPON_CODE, amount: '50.00' });
+    expect(body.payment.breakdown.totalPayable).toBe('559.00');
+
+    // *** FRESH SQL, NOT THE SERVICE'S OWN RETURN VALUE. ***
+    const quote = await db.execute(
+      sql`select discount_code, discount_total, total_payable, patient_id, doctor_id, specialty_id from price_quotes where consultation_id = ${couponConsultationId}`,
+    );
+    expect(quote.rows).toHaveLength(1);
+    const quoteRow = (
+      quote.rows as Array<{
+        discount_code: string | null;
+        discount_total: string;
+        total_payable: string;
+        patient_id: string | null;
+        doctor_id: string | null;
+        specialty_id: string | null;
+      }>
+    )[0];
+    expect(quoteRow.discount_code).toBe(COUPON_CODE);
+    expect(quoteRow.discount_total).toBe('50.00');
+    expect(quoteRow.total_payable).toBe('559.00');
+    expect(quoteRow.patient_id).toBe(fixtures.patientId);
+    expect(quoteRow.doctor_id).toBe(fixtures.doctorId);
+    expect(quoteRow.specialty_id).toBe(fixtures.specialtyId);
+
+    // *** RESERVED, NOT JUST PRICED. *** `DiscountPort#getForConsultation`,
+    // through the REAL `PromotionFacade` — the same instrument the HTTP call
+    // above reached, now genuinely holding a reservation against it.
+    const promotions = app.get(PromotionFacade);
+    const reservation = await promotions.getForConsultation(couponConsultationId);
+    expect(reservation).not.toBeNull();
+    expect(reservation?.code).toBe(COUPON_CODE);
+    expect(reservation?.discountAmount).toBe('50.00');
   });
 
   /* ====================================================================== */
