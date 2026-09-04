@@ -100,6 +100,8 @@ function createService() {
   const repo = {
     create: jest.fn(),
     findById: jest.fn(),
+    // ADDITIVE (M-15): the idempotency check behind `writePrescriptionPdf`.
+    findByConsultationAndCategory: jest.fn().mockResolvedValue(null),
     listByPatient: jest.fn().mockResolvedValue([]),
     listForDoctorHistory: jest.fn().mockResolvedValue([]),
     softDelete: jest.fn(),
@@ -708,5 +710,132 @@ describe('PatientFileService.getPatientFileById', () => {
     const { service, repo } = createService();
     repo.findById.mockResolvedValue(null);
     expect(await service.getPatientFileById('missing')).toBeNull();
+  });
+});
+
+/* ========================================================================== */
+/* ADDITIVE (M-15): the generated-prescription write path.                    */
+/* ========================================================================== */
+
+/**
+ * *** THE COUNTERPART TO `validateCategory`'S BY-NAME REJECTION. ***
+ *
+ * `PatientFileService.upload` refuses `prescription_pdf` from a patient by
+ * name, and there is already a test above for that. These cover the OTHER half
+ * of the same rule: the one door such a row may come through, which is
+ * `DocumentFacade.writePrescriptionPdf`, called by M-15 from a finalised
+ * clinical record.
+ *
+ * If either half is removed the module's promise breaks — a patient could
+ * upload their own "prescription", or the platform could not issue one at all
+ * — so both are tested in the same file.
+ */
+describe('PatientFileService.writePrescriptionPdf', () => {
+  const PDF = Buffer.from('%PDF-1.7 generated');
+
+  function input(overrides: Record<string, unknown> = {}) {
+    return {
+      consultationId: CONSULTATION_ID,
+      patientId: PATIENT_ID,
+      doctorId: DOCTOR_ID,
+      fileName: 'prescription-DC-2026-000123.pdf',
+      pdf: PDF,
+      ...overrides,
+    };
+  }
+
+  it('stores the bytes and creates a prescription_pdf row for the patient', async () => {
+    const { service, repo, storage } = createService();
+    storage.store.mockResolvedValue({ storageKey: 'prescriptions/abc', sizeBytes: PDF.length });
+    repo.create.mockResolvedValue(fileRow({ fileCategory: 'prescription_pdf', storageKey: 'prescriptions/abc' }));
+
+    const result = await service.writePrescriptionPdf(input());
+
+    expect(storage.store).toHaveBeenCalledWith({
+      buffer: PDF,
+      fileName: 'prescription-DC-2026-000123.pdf',
+      contentType: 'application/pdf',
+      category: 'prescription_pdf',
+    });
+    expect(repo.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        fileCategory: 'prescription_pdf',
+        patientId: PATIENT_ID,
+        consultationId: CONSULTATION_ID,
+        storageKey: 'prescriptions/abc',
+      }),
+    );
+    expect(result).not.toHaveProperty('storageKey');
+  });
+
+  it('*** IS IDEMPOTENT ON THE CONSULTATION *** — a retried finalise cannot fork one consult into two prescriptions', async () => {
+    const { service, repo, storage } = createService();
+    repo.findByConsultationAndCategory.mockResolvedValue(fileRow({ id: 'existing-pdf', fileCategory: 'prescription_pdf' }));
+
+    const result = await service.writePrescriptionPdf(input());
+
+    expect(result.id).toBe('existing-pdf');
+    // The check runs BEFORE any storage call, so a retry costs one indexed
+    // SELECT and stores nothing.
+    expect(storage.store).not.toHaveBeenCalled();
+    expect(repo.create).not.toHaveBeenCalled();
+  });
+
+  it('looks the existing prescription up by consultation and category', async () => {
+    const { service, repo, storage } = createService();
+    storage.store.mockResolvedValue({ storageKey: 'prescriptions/abc', sizeBytes: 10 });
+    repo.create.mockResolvedValue(fileRow({ fileCategory: 'prescription_pdf' }));
+
+    await service.writePrescriptionPdf(input());
+
+    expect(repo.findByConsultationAndCategory).toHaveBeenCalledWith(CONSULTATION_ID, 'prescription_pdf');
+  });
+
+  it('*** SETS uploadedByDoctorId, WHICH IS WHAT STOPS A PATIENT DELETING THEIR OWN PRESCRIPTION ***', async () => {
+    const { service, repo, storage } = createService();
+    storage.store.mockResolvedValue({ storageKey: 'prescriptions/abc', sizeBytes: 10 });
+    repo.create.mockResolvedValue(fileRow({ fileCategory: 'prescription_pdf' }));
+
+    await service.writePrescriptionPdf(input());
+
+    // `deleteOwn` already refuses any file whose `uploadedByDoctorId` is set;
+    // this write deliberately relies on that rule rather than adding a new one.
+    expect(repo.create).toHaveBeenCalledWith(expect.objectContaining({ uploadedByDoctorId: DOCTOR_ID }));
+  });
+
+  it('audits the write against the consultation', async () => {
+    const { service, repo, storage, audit } = createService();
+    storage.store.mockResolvedValue({ storageKey: 'prescriptions/abc', sizeBytes: 10 });
+    repo.create.mockResolvedValue(fileRow({ id: 'file-9', fileCategory: 'prescription_pdf' }));
+
+    await service.writePrescriptionPdf(input());
+
+    expect(audit.write).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'create',
+        entityId: 'file-9',
+        consultationId: CONSULTATION_ID,
+        metadata: expect.objectContaining({ fileCategory: 'prescription_pdf', generated: true }),
+      }),
+    );
+  });
+
+  it("wraps a storage failure in this module's own error, never the provider's", async () => {
+    const { service, storage } = createService();
+    storage.store.mockRejectedValue(new Error('STORAGE_PORT_UNAVAILABLE'));
+
+    await expect(service.writePrescriptionPdf(input())).rejects.toMatchObject({
+      response: { code: 'DOCUMENT_STORAGE_UNAVAILABLE' },
+    });
+  });
+
+  it("applies NO size cap — an admin lowering the patient upload limit must not block a doctor's prescription", async () => {
+    const { service, repo, storage, appConfig } = createService();
+    appConfig.getNumber.mockResolvedValue(0);
+    storage.store.mockResolvedValue({ storageKey: 'prescriptions/abc', sizeBytes: 10 });
+    repo.create.mockResolvedValue(fileRow({ fileCategory: 'prescription_pdf' }));
+
+    await expect(service.writePrescriptionPdf(input())).resolves.toBeDefined();
+    expect(appConfig.getNumber).not.toHaveBeenCalled();
   });
 });
