@@ -186,6 +186,46 @@ describe('DoctorService', () => {
     });
   });
 
+  /** ADDITIVE (M-17/case clarification) — see `doctor.contract.ts#DoctorContract.isExpertDoctor`. */
+  describe('isExpertDoctor', () => {
+    it('is false when the doctor does not exist', async () => {
+      const { service, repo } = createDeps();
+      repo.findById.mockResolvedValue(null);
+
+      await expect(service.isExpertDoctor('missing')).resolves.toBe(false);
+    });
+
+    it('is false when verified but seniorityLevel is standard', async () => {
+      const { service, repo } = createDeps();
+      repo.findById.mockResolvedValue(baseDoctor({ verificationStatus: 'verified', seniorityLevel: 'standard' }));
+
+      await expect(service.isExpertDoctor('doctor-1')).resolves.toBe(false);
+    });
+
+    it('is false when seniorityLevel is expert but not verified', async () => {
+      const { service, repo } = createDeps();
+      repo.findById.mockResolvedValue(baseDoctor({ verificationStatus: 'pending', seniorityLevel: 'expert' }));
+
+      await expect(service.isExpertDoctor('doctor-1')).resolves.toBe(false);
+    });
+
+    it('does not require isListed — an expert reviewer need not be a bookable, publicly-listed doctor', async () => {
+      const { service, repo } = createDeps();
+      repo.findById.mockResolvedValue(
+        baseDoctor({ verificationStatus: 'verified', seniorityLevel: 'expert', isListed: false }),
+      );
+
+      await expect(service.isExpertDoctor('doctor-1')).resolves.toBe(true);
+    });
+
+    it('is true when both verified and seniorityLevel is expert', async () => {
+      const { service, repo } = createDeps();
+      repo.findById.mockResolvedValue(baseDoctor({ verificationStatus: 'verified', seniorityLevel: 'expert' }));
+
+      await expect(service.isExpertDoctor('doctor-1')).resolves.toBe(true);
+    });
+  });
+
   describe('admin: adminList / adminGetDetail / requireDoctor', () => {
     it('adminList strips tokenVersion/pushToken/deviceId/presence from every row', async () => {
       const { service, repo } = createDeps();
