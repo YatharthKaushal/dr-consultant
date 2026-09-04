@@ -192,6 +192,91 @@ describe('refund apportionment — partial refunds', () => {
     expect(sgst.toFixed(2)).toBe('9.00');
   });
 
+  /**
+   * *** REGRESSION: THE HEADS DRIFTED WHEN A LINE WAS REFUNDED IN UNEVEN STEPS. ***
+   *
+   * The reversal used to be backed out of each SLICE independently, so N partial
+   * refunds of one line reversed `sum(backOut(slice_i))` where the invoice had
+   * charged `backOut(sum(slice_i))`. Round-then-sum is not sum-then-round, and
+   * the CGST/SGST error is SYSTEMATIC rather than random: `halveHalfUp` hands the
+   * odd paise to CGST on every slice.
+   *
+   * The 300.00-then-the-rest case above splits evenly and happens to come out
+   * right, which is exactly why it never caught this. 100.00 then the rest does
+   * not: the convenience line goes 19.09 + 98.91, and the old code reversed
+   * CGST 1.46 + 7.55 = 9.01 against SGST 1.45 + 7.54 = 8.99 — on an invoice that
+   * charged 9.00 and 9.00.
+   *
+   * The refunded RUPEES were always right; it is the credit note's head split
+   * that disagreed with the invoice it credits, which is a GSTR-1 reconciliation
+   * problem rather than a rounding curiosity.
+   */
+  it('reverses exactly the heads that were charged when the steps are uneven', () => {
+    const first = apportion({
+      components: SEEDED_618,
+      placeOfSupplyKind: 'intra_state',
+      requestedPaise: 10_000n,
+      alreadyRefundedByCode: {},
+    });
+
+    const convenienceFirst = first.components.find((line) => line.code === 'convenience_fee');
+    expect(convenienceFirst?.amount).toBe('19.09');
+    expect(convenienceFirst?.cgstAmount).toBe('1.46');
+    expect(convenienceFirst?.sgstAmount).toBe('1.45');
+
+    const second = apportion({
+      components: SEEDED_618,
+      placeOfSupplyKind: 'intra_state',
+      requestedPaise: 51_800n,
+      alreadyRefundedByCode: Object.fromEntries(first.components.map((line) => [line.code, line.amount])),
+    });
+
+    // The closing slice of the line reverses the SNAPSHOT less what already went
+    // back, so the series lands on the invoice rather than near it.
+    const convenienceSecond = second.components.find((line) => line.code === 'convenience_fee');
+    expect(convenienceSecond?.amount).toBe('98.91');
+    expect(convenienceSecond?.cgstAmount).toBe('7.54');
+    expect(convenienceSecond?.sgstAmount).toBe('7.55');
+
+    expect(Number(first.amount) + Number(second.amount)).toBeCloseTo(618, 5);
+    // *** THE ASSERTION THAT WAS RED BEFORE THE FIX: 9.01 / 8.99. ***
+    expect((Number(first.cgstAmount) + Number(second.cgstAmount)).toFixed(2)).toBe('9.00');
+    expect((Number(first.sgstAmount) + Number(second.sgstAmount)).toFixed(2)).toBe('9.00');
+    expect((Number(first.taxableValue) + Number(second.taxableValue)).toFixed(2)).toBe('600.00');
+  });
+
+  /**
+   * The same statement as a property, over every way of cutting the taxable line
+   * in two. Half of the 11 799 split points drifted before the fix.
+   */
+  it('closes on the invoice for EVERY two-step split of the taxable line', () => {
+    const drifted: string[] = [];
+
+    for (let firstPaise = 1; firstPaise < 11_800; firstPaise += 1) {
+      const first = apportion({
+        components: [SEEDED_618[1]],
+        placeOfSupplyKind: 'intra_state',
+        requestedPaise: BigInt(firstPaise),
+        alreadyRefundedByCode: {},
+      });
+      const second = apportion({
+        components: [SEEDED_618[1]],
+        placeOfSupplyKind: 'intra_state',
+        requestedPaise: BigInt(11_800 - firstPaise),
+        alreadyRefundedByCode: { convenience_fee: first.amount },
+      });
+
+      const cgst = (Number(first.cgstAmount) + Number(second.cgstAmount)).toFixed(2);
+      const sgst = (Number(first.sgstAmount) + Number(second.sgstAmount)).toFixed(2);
+      const taxable = (Number(first.taxableValue) + Number(second.taxableValue)).toFixed(2);
+      if (cgst !== '9.00' || sgst !== '9.00' || taxable !== '100.00') {
+        drifted.push(`${firstPaise}: cgst=${cgst} sgst=${sgst} taxable=${taxable}`);
+      }
+    }
+
+    expect(drifted).toEqual([]);
+  });
+
   it('never takes more from a line than that line still has', () => {
     const result = apportion({
       components: SEEDED_618,
