@@ -114,6 +114,10 @@ interface Fixtures {
   otherConsultationId: string;
   /** A consultation under the NON-prescribing specialty, for the medicine gate. */
   nonPrescribingConsultationId: string;
+  /** Untouched by every other test — the concurrency section needs a consultation with NO record on it. */
+  raceConsultationId: string;
+  /** A second one, so the forced interleaving also starts from no record at all. */
+  forcedRaceConsultationId: string;
 }
 
 async function seedFixtures(db: Database): Promise<Fixtures> {
@@ -183,6 +187,8 @@ async function seedFixtures(db: Database): Promise<Fixtures> {
   const consultationId = await makeConsultation(prescribing.id, doctorId);
   const otherConsultationId = await makeConsultation(prescribing.id, otherDoctorId);
   const nonPrescribingConsultationId = await makeConsultation(nonPrescribing.id, doctorId);
+  const raceConsultationId = await makeConsultation(prescribing.id, doctorId);
+  const forcedRaceConsultationId = await makeConsultation(prescribing.id, doctorId);
 
   // *** THE COMPLETION GATE, SET. *** This is the state FR-10.5 leaves a doctor
   // in when a consult ends and the notes are still owed.
@@ -205,6 +211,8 @@ async function seedFixtures(db: Database): Promise<Fixtures> {
     consultationId,
     otherConsultationId,
     nonPrescribingConsultationId,
+    raceConsultationId,
+    forcedRaceConsultationId,
   };
 }
 
@@ -214,6 +222,8 @@ async function teardown(db: Database, fixtures: Fixtures): Promise<void> {
     fixtures.consultationId,
     fixtures.otherConsultationId,
     fixtures.nonPrescribingConsultationId,
+    fixtures.raceConsultationId,
+    fixtures.forcedRaceConsultationId,
   ];
   const doctorIds = [fixtures.doctorId, fixtures.otherDoctorId];
 
@@ -249,6 +259,7 @@ describe('M-15 finalisation, against a real database', () => {
   let fixtures: Fixtures;
 
   let clinical: ClinicalService;
+  let clinicalRepo: ClinicalRepository;
   let sweep: ClinicalGateSweepService;
   let presence: DoctorPresenceService;
   let instant: InstantFacade;
@@ -260,7 +271,7 @@ describe('M-15 finalisation, against a real database', () => {
     fixtures = await seedFixtures(db);
 
     const audit = new AuditService(db);
-    const clinicalRepo = new ClinicalRepository(db);
+    clinicalRepo = new ClinicalRepository(db);
     const bookingRepo = new BookingRepository(db);
     const doctorRepo = new DoctorRepository(db);
     presence = new DoctorPresenceService(db, doctorRepo, audit);
@@ -620,6 +631,112 @@ describe('M-15 finalisation, against a real database', () => {
       const result = await sweep.sweepFinalisedRecords(new Date(), 1);
 
       expect(result.examined).toBe(0);
+    });
+  });
+
+  /* ═══════════════════════════════════════════════════════════════════════ */
+  /* 4b. TWO SAVES OF THE *FIRST* DRAFT, AT THE SAME INSTANT.                */
+  /*                                                                         */
+  /* `writeDraft` opens a transaction, reads FOR UPDATE, and INSERTS when it */
+  /* finds nothing. *** `SELECT ... FOR UPDATE` THAT MATCHES ZERO ROWS LOCKS */
+  /* NOTHING *** — there is no row yet to lock — so two requests that arrive */
+  /* before either has committed both read null and both insert against      */
+  /* `clinical_records.consultation_id`, which is UNIQUE.                    */
+  /*                                                                         */
+  /* That is a doctor double-tapping "save" on a notes form they have not    */
+  /* saved before: the single most ordinary thing a user does. Every other   */
+  /* check-then-insert in this codebase carries a `23505` safety net for     */
+  /* exactly this (`consent.service.ts`, `legal-document.service.ts`,        */
+  /* `clinical-template.service.ts`, `booking.service.ts`); this one did     */
+  /* not, and the loser got a raw driver error — a 500, not a saved record.  */
+  /*                                                                         */
+  /* Only a real database can show it. The `db.transaction` fake in          */
+  /* `clinical.service.spec.ts` has no unique index and no rollback.         */
+  /* ═══════════════════════════════════════════════════════════════════════ */
+
+  describe('two concurrent saves of the very first draft', () => {
+    const draft = (summary: string) => ({
+      chiefComplaint: 'Panic attacks on the commute.',
+      riskCategory: 'low' as const,
+      caseSummary: summary,
+    });
+
+    it('*** THREE CONCURRENT FIRST SAVES, UNFORCED — none of them is a 500 ***', async () => {
+      const results = await Promise.allSettled([
+        clinical.saveDraft(fixtures.raceConsultationId, fixtures.doctorId, draft('First writer.')),
+        clinical.saveDraft(fixtures.raceConsultationId, fixtures.doctorId, draft('Second writer.')),
+        clinical.saveDraft(fixtures.raceConsultationId, fixtures.doctorId, draft('Third writer.')),
+      ]);
+
+      const rejected = results.filter((result) => result.status === 'rejected');
+      expect(rejected.map((result) => String((result as PromiseRejectedResult).reason))).toEqual([]);
+
+      const rows = await db
+        .select({ id: clinicalRecordsTable.id })
+        .from(clinicalRecordsTable)
+        .where(eq(clinicalRecordsTable.consultationId, fixtures.raceConsultationId));
+
+      expect(rows).toHaveLength(1);
+    });
+
+    /**
+     * *** THE INTERLEAVING, FORCED — NOT LEFT TO A COIN FLIP. ***
+     *
+     * A plain `Promise.all` of concurrent saves reproduces this most of the
+     * time (measured against this database before the fix: 48 failures in 75
+     * three-way races) but not every time, and a regression test that is red
+     * two runs in three is not a regression test. So the competing request is
+     * committed AT the one instant that matters — after this transaction's
+     * `SELECT ... FOR UPDATE` has found nothing and locked nothing, and
+     * before its INSERT — from a different pooled connection, which is
+     * exactly the state the loser of the real race observes.
+     *
+     * `mockImplementationOnce`: only the FIRST attempt is sabotaged, so the
+     * retry runs entirely against the real repository.
+     */
+    it('*** THE LOSER OF THE INSERT RACE STILL SAVES ITS RECORD *** — a double-tapped save is not a 500', async () => {
+      const findForUpdate = clinicalRepo.findByConsultationIdForUpdate.bind(clinicalRepo);
+      const spy = jest
+        .spyOn(clinicalRepo, 'findByConsultationIdForUpdate')
+        .mockImplementationOnce(async (consultationId, tx) => {
+          const found = await findForUpdate(consultationId, tx);
+          await db.insert(clinicalRecordsTable).values({
+            consultationId,
+            chiefComplaint: 'Competing writer got there first.',
+            riskCategory: 'low',
+          });
+          return found;
+        });
+
+      try {
+        await expect(
+          clinical.saveDraft(fixtures.forcedRaceConsultationId, fixtures.doctorId, draft('Loser writes anyway.')),
+        ).resolves.toMatchObject({ caseSummary: 'Loser writes anyway.' });
+      } finally {
+        spy.mockRestore();
+      }
+
+      const rows = await db
+        .select({ id: clinicalRecordsTable.id, caseSummary: clinicalRecordsTable.caseSummary })
+        .from(clinicalRecordsTable)
+        .where(eq(clinicalRecordsTable.consultationId, fixtures.forcedRaceConsultationId));
+
+      // One row, carrying the loser's content: the retry took the UPDATE
+      // branch against the winner's row rather than inserting a second.
+      expect(rows).toHaveLength(1);
+      expect(rows[0]?.caseSummary).toBe('Loser writes anyway.');
+    });
+
+    it('POSITIVE CONTROL: the second, sequential save still updates rather than inserting', async () => {
+      await clinical.saveDraft(fixtures.raceConsultationId, fixtures.doctorId, draft('Fourth writer.'));
+
+      const rows = await db
+        .select({ caseSummary: clinicalRecordsTable.caseSummary })
+        .from(clinicalRecordsTable)
+        .where(eq(clinicalRecordsTable.consultationId, fixtures.raceConsultationId));
+
+      expect(rows).toHaveLength(1);
+      expect(rows[0]?.caseSummary).toBe('Fourth writer.');
     });
   });
 
