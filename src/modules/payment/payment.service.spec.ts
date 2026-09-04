@@ -492,6 +492,54 @@ describe('PaymentService', () => {
       expect(await service.reconcileWithGateway(PAYMENT_ID)).toEqual({ status: 'failed', changed: true });
     });
 
+    /**
+     * *** THE PINNED QUOTE MUST BE RELEASED HERE TOO. ***
+     *
+     * `payment-webhook.service.ts#handlePaymentFailed` releases the quote on a
+     * definitive failure; this path did not, and it is the path that exists
+     * BECAUSE THE WEBHOOK NEVER ARRIVED. The stale-draft sweep deliberately
+     * skips pinned quotes, so nothing else would ever have freed the discount
+     * reservation behind a checkout that died without a `payment.failed`.
+     */
+    it('releases the pinned quote when every attempt at the gateway failed', async () => {
+      payments.findById.mockResolvedValue(
+        paymentRow({ gatewayOrderId: 'order_test_1', status: 'pending', priceQuoteId: QUOTE_ID }),
+      );
+      pricing.getQuoteTotals.mockResolvedValue({ [QUOTE_ID]: '708.00' });
+      gateway.fetchOrderPayments.mockResolvedValue([{ id: 'pay_1', status: 'failed', amount: 70_800 } as never]);
+
+      expect(await service.reconcileWithGateway(PAYMENT_ID)).toEqual({ status: 'failed', changed: true });
+      expect(pricing.abandon).toHaveBeenCalledWith({
+        quoteId: QUOTE_ID,
+        consultationId: CONSULTATION_ID,
+        reason: 'payment_failed',
+      });
+    });
+
+    /** A legacy row has no quote to release, so pricing is not consulted at all. */
+    it('releases nothing for a legacy payment with no quote', async () => {
+      payments.findById.mockResolvedValue(
+        paymentRow({ gatewayOrderId: 'order_test_1', status: 'pending', priceQuoteId: null }),
+      );
+      gateway.fetchOrderPayments.mockResolvedValue([{ id: 'pay_1', status: 'failed', amount: 70_800 } as never]);
+
+      expect(await service.reconcileWithGateway(PAYMENT_ID)).toEqual({ status: 'failed', changed: true });
+      expect(pricing.abandon).not.toHaveBeenCalled();
+    });
+
+    /** A capture that beat us to the row leaves the price alone — it is about to be consumed, not abandoned. */
+    it('does not release the quote when the failure update matched no row', async () => {
+      payments.findById.mockResolvedValue(
+        paymentRow({ gatewayOrderId: 'order_test_1', status: 'pending', priceQuoteId: QUOTE_ID }),
+      );
+      pricing.getQuoteTotals.mockResolvedValue({ [QUOTE_ID]: '708.00' });
+      payments.markFailedIfNotPaid.mockResolvedValue(0);
+      gateway.fetchOrderPayments.mockResolvedValue([{ id: 'pay_1', status: 'failed', amount: 70_800 } as never]);
+
+      expect(await service.reconcileWithGateway(PAYMENT_ID)).toEqual({ status: 'pending', changed: false });
+      expect(pricing.abandon).not.toHaveBeenCalled();
+    });
+
     it('does NOT mark failed while an attempt is still in flight alongside a failed one', async () => {
       payments.findById.mockResolvedValue(paymentRow({ gatewayOrderId: 'order_test_1', status: 'pending' }));
       gateway.fetchOrderPayments.mockResolvedValue([
