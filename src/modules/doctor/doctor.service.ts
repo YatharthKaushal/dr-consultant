@@ -167,6 +167,12 @@ export class DoctorService {
     return doctor !== null && doctor.verificationStatus === 'verified' && doctor.isListed;
   }
 
+  /** ADDITIVE (M-17/case clarification) — see `doctor.contract.ts#DoctorContract.isExpertDoctor`. */
+  async isExpertDoctor(doctorId: string): Promise<boolean> {
+    const doctor = await this.repo.findById(doctorId);
+    return doctor !== null && doctor.verificationStatus === 'verified' && doctor.seniorityLevel === 'expert';
+  }
+
   /**
    * ADDITIVE (M-07/availability) — see `doctor.contract.ts#DoctorContract
    * .getSchedulingParameters`'s doc comment. No repository change needed:
