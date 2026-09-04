@@ -8,6 +8,7 @@ import { AiModule } from './modules/ai/ai.module';
 import { AvailabilityModule } from './modules/availability/availability.module';
 import { BookingModule } from './modules/booking/booking.module';
 import { CatalogueModule } from './modules/catalogue/catalogue.module';
+import { ConsentModule } from './modules/consent/consent.module';
 import { DoctorModule } from './modules/doctor/doctor.module';
 import { DocumentModule } from './modules/document/document.module';
 import { IdentityModule } from './modules/identity/identity.module';
@@ -49,6 +50,11 @@ import { ErrorsModule } from './shared/errors/errors.module';
     // providers regardless of import order).
     IdentityModule,
     AuthModule,
+    // M-03: consent and legal documents. Depends on M-01/M-02 only
+    // (`docs/MODULES.md`), so it imports no feature module — M-14 (video)
+    // consumes `ConsentFacade` to gate joining a consultation, never the other
+    // way round.
+    ConsentModule,
     PatientModule,
     DoctorModule,
     CatalogueModule,
