@@ -109,13 +109,33 @@ export function renderTemplate(
   template: NotificationTemplate,
   variables: Record<string, string | number> = {},
 ): RenderedNotification {
+  /* --- A DEFAULT PARAMETER ONLY COVERS `undefined` ----------------------- *
+   * `notify` is documented as reaching this code with whatever a caller
+   * passed, and `renderTemplate(template, null)` raised "Cannot convert
+   * undefined or null to object" out of `Object.keys` below. Inside `notify`
+   * that was swallowed as `provider_unavailable` — so a caller who passed
+   * `variables: null` silently lost the notification entirely, when the
+   * documented behaviour for a value that is not there is an unresolved
+   * placeholder and a warning. */
+  const values: Record<string, unknown> =
+    typeof variables === 'object' && variables !== null ? (variables as Record<string, unknown>) : {};
+
   const declared = declaredVariables(template);
-  const supplied = Object.keys(variables);
+  const supplied = Object.keys(values);
   const unresolved: string[] = [];
 
   const substitute = (text: string): string =>
     text.replace(placeholderPattern(), (_match, name: string) => {
-      const value = variables[name];
+      /* --- OWN PROPERTIES ONLY --------------------------------------- *
+       * `values[name]` walks the prototype chain, and `constructor`,
+       * `toString`, `valueOf` and `hasOwnProperty` all match
+       * `PLACEHOLDER_SOURCE`. A template reading `{{constructor}}` rendered
+       * "function Object() { [native code] }" into the body that is stored,
+       * pushed to a lock screen and read back by the app — and reported
+       * NOTHING in `unresolved`, so the drift signal the service logs never
+       * fired. `lookupTemplate` below guards the identical hazard for
+       * template CODES; the same guard belongs on variable names. */
+      const value = Object.prototype.hasOwnProperty.call(values, name) ? values[name] : undefined;
       if (value === undefined || value === null) {
         if (!unresolved.includes(name)) unresolved.push(name);
         return '';

@@ -119,19 +119,26 @@ export class NotificationRepository {
    * notification read again must be a no-op that still reports success (a
    * client re-opening a screen does this constantly), while the FIRST read is
    * the timestamp worth keeping. One statement does both.
+   *
+   * *** IT RETURNS THE STORED TIMESTAMP, NOT THE ONE IT WAS HANDED. *** The
+   * whole point of the `coalesce` is that a second call KEEPS the first
+   * read's time, so reporting `readAt` back from the caller's own `new Date()`
+   * would tell a client the notification was read now when the row says it
+   * was read yesterday. `returning` reads the post-update value, which is the
+   * only timestamp that is true.
    */
   async markRead(
     audience: NotificationAudience,
     id: number,
     readAt: Date,
     executor: Executor = this.db,
-  ): Promise<boolean> {
-    const updated = await executor
+  ): Promise<Date | null> {
+    const [updated] = await executor
       .update(notificationsTable)
       .set({ readAt: sql`coalesce(${notificationsTable.readAt}, ${readAt.toISOString()}::timestamptz)` })
       .where(and(eq(notificationsTable.id, id), ownerCondition(audience)))
-      .returning({ id: notificationsTable.id });
-    return updated.length > 0;
+      .returning({ readAt: notificationsTable.readAt });
+    return updated?.readAt ?? null;
   }
 
   /** Marks every unread notification for this audience read. Returns how many rows moved. */

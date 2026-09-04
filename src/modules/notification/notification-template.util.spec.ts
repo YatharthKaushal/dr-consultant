@@ -188,6 +188,52 @@ describe('renderTemplate', () => {
     expect(rendered.body).toHaveLength(BODY_MAX_LENGTH);
     expect(rendered.body).not.toContain('diabetes');
   });
+
+  /* ---------------------------------------------------------------------- *
+   * A PLACEHOLDER MUST NOT RESOLVE OFF Object.prototype.
+   *
+   * `variables[name]` walked the prototype chain, and `constructor`,
+   * `toString`, `valueOf` and `hasOwnProperty` all match the placeholder
+   * grammar. `{{constructor}}` rendered "function Object() { [native code] }"
+   * into the body that is stored, pushed to a lock screen and read back by
+   * the app — and reported nothing in `unresolved`, so the service's drift
+   * warning never fired. `lookupTemplate` guards the identical hazard for
+   * template codes and always did.
+   * ---------------------------------------------------------------------- */
+  it.each([['constructor'], ['toString'], ['valueOf'], ['hasOwnProperty'], ['isPrototypeOf']])(
+    'treats {{%s}} as unresolved rather than reading it off Object.prototype',
+    (name) => {
+      const rendered = renderTemplate({ title: `T {{${name}}} end`, body: `B {{${name}}} end` }, {});
+
+      expect(rendered.title).toBe('T end');
+      expect(rendered.body).toBe('B end');
+      expect(rendered.unresolved).toEqual([name]);
+      expect(rendered.body).not.toContain('native code');
+    },
+  );
+
+  it('still substitutes a prototype-named variable the caller genuinely supplied', () => {
+    const rendered = renderTemplate({ title: 't', body: 'B {{constructor}}' }, { constructor: 'Dr Rao' });
+    expect(rendered.body).toBe('B Dr Rao');
+    expect(rendered.unresolved).toEqual([]);
+  });
+
+  /**
+   * A default parameter only covers `undefined`. `Object.keys(null)` raised
+   * "Cannot convert undefined or null to object", which inside `notify` was
+   * swallowed as `provider_unavailable` — so a caller who passed
+   * `variables: null` lost the notification entirely instead of getting the
+   * documented unresolved-placeholder behaviour.
+   */
+  it.each([[null], [undefined], ['not an object'], [42]])(
+    'renders with no variables at all when the caller passes %s',
+    (variables) => {
+      const rendered = renderTemplate(BOOKING, variables as never);
+      expect(rendered.body).toBe('Your consultation with is confirmed for.');
+      expect(rendered.unresolved).toEqual(['doctorName', 'scheduledAt']);
+      expect(rendered.ignored).toEqual([]);
+    },
+  );
 });
 
 /* ========================================================================= */
