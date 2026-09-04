@@ -52,6 +52,12 @@ export interface VideoSessionEndResult {
   refusal?: 'not_found' | 'illegal_transition';
   /** For an instant consult, whether the completion gate was set on the doctor (M-13's `markInstantConsultEnded`). */
   completionGateSet?: boolean;
+  /**
+   * For a SCHEDULED consult, whether the doctor was actually returned to the
+   * routing pool (M-13's `markConsultEnded`) — the other half of the
+   * `markConsultInProgress` this module makes when the call starts.
+   */
+  presenceReleased?: boolean;
 }
 
 /**
@@ -105,13 +111,23 @@ export interface VideoSessionEndResult {
  * It does not move `doctors.presence`. That column is M-05's and its transition
  * table is M-13's (`LEGAL_PRESENCE_TRANSITIONS`, in `instant.constants.ts` and
  * NOT on `InstantContract`), so reaching it from here would be the deep import
- * `backend/README.md` §2 forbids. For an instant consult M-13 already sets
- * `in_consultation` at ACCEPT time, which is before any of this runs; ending
- * one goes through `InstantFacade.markInstantConsultEnded`, which is on the
- * contract precisely for this module. The residual gap — a doctor left
- * `available_now` during a SCHEDULED call, and therefore still routable — is
- * real, is M-13's to close with a `markConsultInProgress` sibling on its own
- * contract, and is reported rather than worked around here.
+ * `backend/README.md` §2 forbids. Every presence move this module needs is a
+ * method on `InstantContract`, and they come in PAIRS:
+ *
+ *   the call started  `markConsultInProgress`   both modes. An instant consult
+ *                                               is already `in_consultation`
+ *                                               from its accept, so it no-ops.
+ *   the call ended     instant  -> `markInstantConsultEnded` (FR-10.5's gate,
+ *                                then `completing_notes`)
+ *                      scheduled-> `markConsultEnded` (straight back to
+ *                                `available_now`)
+ *
+ * *** THE PAIRING IS NOT DECORATION. *** `in_consultation` is a state nothing
+ * else in the platform ever leaves — the boot sweep skips it on purpose, a
+ * dropped socket skips it on purpose, and `offline` is not reachable from it at
+ * all. An unpaired `markConsultInProgress` therefore took every doctor who
+ * finished a booked video call out of instant routing permanently. If a third
+ * mode ever appears, it needs its own way back before it may use the way in.
  */
 @Injectable()
 export class VideoService {
@@ -289,12 +305,15 @@ export class VideoService {
       reason: 'video_participant_joined',
     });
 
-    if (result.refusal === 'illegal_transition') {
+    if (result.refusal) {
       // Ordinary, not alarming: a redelivered join for a consultation that has
-      // since ended, or one an admin cancelled mid-call. Logged so an operator
-      // reading a support case can see the sequence.
+      // since ended, one an admin cancelled mid-call, or a room whose
+      // consultation has been deleted. Logged so an operator reading a support
+      // case can see the sequence. Nothing moves the doctor either — there is
+      // no call to take them out of the pool for.
       this.logger.log(
-        `Consultation ${consultationId} did not move to in_progress from ${result.booking?.status ?? 'unknown'}.`,
+        `Consultation ${consultationId} did not move to in_progress from ${result.booking?.status ?? 'unknown'} ` +
+          `(${result.refusal}).`,
       );
       return;
     }
@@ -312,9 +331,22 @@ export class VideoService {
     // fact FR-8.6 hangs off, and a presence write that fails must not cost us
     // it. A failure here is bounded — the doctor is offered one request they
     // must decline, and M-13's acceptance window re-routes it.
+    //
+    // *** `illegal_transition` IS THE ORDINARY ANSWER, NOT AN ALARM. *** M-13
+    // narrows this move to `onlyFrom: ['available_now']`, because that is the
+    // only state an instant offer can land on and therefore the only one it is
+    // safe to take away and give back. Every doctor who is `offline`, `paused`
+    // or `scheduled_only` when their booked call starts is refused here and
+    // left exactly where they are — which is correct, and would be a warning
+    // per consultation if it were logged as one.
     try {
       const presence = await this.instant.markConsultInProgress(consultationId);
-      if (presence.refusal) {
+      if (presence.refusal === 'illegal_transition') {
+        this.logger.debug(
+          `Consultation ${consultationId} started; the doctor was not moved to in_consultation ` +
+            `(they were not in the routing pool). Nothing to take away, and nothing to give back.`,
+        );
+      } else if (presence.refusal) {
         this.logger.warn(
           `Consultation ${consultationId} started but the doctor was not moved to in_consultation ` +
             `(${presence.refusal}); they may be offered an instant request mid-call.`,
@@ -329,8 +361,12 @@ export class VideoService {
   }
 
   /**
-   * *** THE CALL ENDED. *** `in_progress` -> `awaiting_documentation`, and for
-   * an INSTANT consult, the doctor's completion gate.
+   * *** THE CALL ENDED. *** `in_progress` -> `awaiting_documentation`, and then
+   * the doctor's presence, whichever way this consultation's mode goes out:
+   * an INSTANT consult gets FR-10.5's completion gate
+   * (`markInstantConsultEnded`), a SCHEDULED one goes straight back into the
+   * routing pool (`markConsultEnded`). *** EVERY MODE HAS A WAY BACK, BECAUSE
+   * `markCallStarted` TOOK EVERY MODE OUT. ***
    *
    * Two callers, both legitimate and both idempotent:
    *   - the `room_finished` webhook, which is LiveKit saying the room emptied
@@ -368,7 +404,11 @@ export class VideoService {
     };
 
     if (!result.changed || result.booking === null) return outcome;
-    if (result.booking.mode !== 'instant') return outcome;
+
+    if (result.booking.mode !== 'instant') {
+      await this.releaseDoctorToRoutingPool(consultationId, outcome);
+      return outcome;
+    }
 
     try {
       const gate = await this.instant.markInstantConsultEnded(consultationId);
@@ -385,6 +425,40 @@ export class VideoService {
     }
 
     return outcome;
+  }
+
+  /**
+   * *** THE OTHER HALF OF `markCallStarted`'s PRESENCE MOVE, FOR A SCHEDULED
+   * CONSULT. ***
+   *
+   * `markCallStarted` takes the doctor out of the routing pool for EVERY call.
+   * The instant flow has a documented way back — gate, `completing_notes`, then
+   * M-15 clears the gate and M-13 returns them to `available_now`. A SCHEDULED
+   * consult had none, and `in_consultation` is a state nothing else ever leaves:
+   * the boot sweep skips it on purpose, a dropped socket skips it on purpose,
+   * and `offline` is not reachable from it at all. So every doctor who finished
+   * a booked video call was quietly out of instant routing from then on.
+   *
+   * Best-effort and last, exactly like the completion gate: the status move is
+   * the fact FR-8.6 hangs off, the webhook must answer 2xx, and a doctor who was
+   * not put back can put themselves back from the app.
+   */
+  private async releaseDoctorToRoutingPool(consultationId: string, outcome: VideoSessionEndResult): Promise<void> {
+    try {
+      const released = await this.instant.markConsultEnded(consultationId);
+      outcome.presenceReleased = released.changed;
+      if (released.refusal) {
+        this.logger.log(
+          `Consultation ${consultationId} ended; the doctor was not returned to the routing pool ` +
+            `(${released.refusal}). They were not in it when the call started.`,
+        );
+      }
+    } catch (error) {
+      this.logger.error(
+        `Consultation ${consultationId} ended, but returning the doctor to the routing pool threw: ` +
+          `${describeError(error)}`,
+      );
+    }
   }
 
   /** The doctor's explicit End Consultation. Ownership first, then the same `endSession` the webhook uses. */

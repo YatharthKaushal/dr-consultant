@@ -901,6 +901,97 @@ describe('InstantService', () => {
         refusal: 'illegal_transition',
       });
     });
+
+    /**
+     * *** IT MAY ONLY TAKE A DOCTOR OUT OF THE POOL, NEVER OUT OF A STATE THEY
+     * CHOSE. ***
+     *
+     * `LEGAL_PRESENCE_TRANSITIONS.in_consultation` answers "may a doctor EVER
+     * get here", which is the right question for ACCEPTING an instant request
+     * and the wrong one for a scheduled call starting. Unnarrowed it dragged
+     * `offline`, `paused` and — worst — `scheduled_only` doctors into
+     * `in_consultation`, a state `offline` is not even reachable from, so the
+     * doctors who take the most scheduled calls lost their standing FR-10.3
+     * preference on their first one and could not get it back.
+     *
+     * `available_now` is the ONLY state an instant request can land on
+     * (`request_pending` is reachable from nothing else), so it is the only
+     * state this needs to protect — and the only one it can put back.
+     */
+    it('*** ONLY EVER MOVES A DOCTOR OUT OF `available_now` ***', async () => {
+      const h = buildHarness();
+      h.bookings.getBooking.mockResolvedValue(makeBooking({ mode: 'scheduled', doctorId: DOCTOR_ID, status: 'scheduled' }));
+
+      await h.service.markConsultInProgress(CONSULTATION_ID);
+
+      expect(h.presence.transition).toHaveBeenCalledWith(
+        expect.objectContaining({ to: 'in_consultation', onlyFrom: ['available_now'] }),
+      );
+    });
+  });
+
+  describe('markConsultEnded', () => {
+    /**
+     * *** THE OTHER HALF OF `markConsultInProgress`, AND IT DID NOT EXIST. ***
+     * Without it every doctor who finished a booked video call stayed
+     * `in_consultation` for good: the boot sweep does not reset that state, a
+     * dropped socket does not reset it, `offline` is not reachable from it, and
+     * M-15 finalising a SCHEDULED record clears no gate because none was set.
+     */
+    it('*** PUTS THE DOCTOR BACK IN THE ROUTING POOL, AND ONLY FROM `in_consultation` ***', async () => {
+      const h = buildHarness();
+      h.bookings.getBooking.mockResolvedValue(makeBooking({ mode: 'scheduled', doctorId: DOCTOR_ID, status: 'awaiting_documentation' }));
+      h.presence.transition.mockResolvedValue({ changed: true, before: 'in_consultation', after: 'available_now' });
+
+      const result = await h.service.markConsultEnded(CONSULTATION_ID);
+
+      expect(h.presence.transition).toHaveBeenCalledWith(
+        expect.objectContaining({ to: 'available_now', onlyFrom: ['in_consultation'] }),
+      );
+      expect(result).toMatchObject({ changed: true, doctorId: DOCTOR_ID, presence: 'available_now' });
+    });
+
+    /** The instant flow ends at `completing_notes` with a gate, and that path is `markInstantConsultEnded`'s. */
+    it('*** REFUSES AN INSTANT CONSULT *** rather than skipping FR-10.5\'s completion gate', async () => {
+      const h = buildHarness();
+      h.bookings.getBooking.mockResolvedValue(makeBooking({ mode: 'instant', doctorId: DOCTOR_ID, status: 'awaiting_documentation' }));
+
+      const result = await h.service.markConsultEnded(CONSULTATION_ID);
+
+      expect(result.refusal).toBe('instant_consult');
+      expect(h.presence.transition).not.toHaveBeenCalled();
+    });
+
+    /* Never throws — the caller is a webhook handler that must answer 2xx. */
+
+    it('reports not_found rather than throwing', async () => {
+      const h = buildHarness();
+      h.bookings.getBooking.mockResolvedValue(null);
+
+      await expect(h.service.markConsultEnded(CONSULTATION_ID)).resolves.toEqual({
+        changed: false,
+        doctorId: null,
+        presence: null,
+        refusal: 'not_found',
+      });
+    });
+
+    it('leaves a doctor who is NOT `in_consultation` exactly where they are', async () => {
+      const h = buildHarness();
+      h.bookings.getBooking.mockResolvedValue(makeBooking({ mode: 'scheduled', doctorId: DOCTOR_ID, status: 'awaiting_documentation' }));
+      h.presence.transition.mockResolvedValue({
+        changed: false,
+        before: 'offline',
+        after: 'offline',
+        refusal: 'illegal_transition',
+      });
+
+      await expect(h.service.markConsultEnded(CONSULTATION_ID)).resolves.toMatchObject({
+        changed: false,
+        presence: 'offline',
+        refusal: 'illegal_transition',
+      });
+    });
   });
 
   describe('markInstantConsultEnded', () => {

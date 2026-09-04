@@ -251,6 +251,17 @@ export class VideoWebhookService {
    * reconnect as often as it is a goodbye, and treating the first drop as the
    * end of a consultation would move it to `awaiting_documentation` while the
    * other side is still sitting in the room. `room_finished` is the end.
+   *
+   * *** BUT IT CAN START ONE. *** The upsert exists because a leave can
+   * overtake its own join; when it does, it CREATES the row, and the late join
+   * then arrives as a `duplicate` and does nothing. The status move used to
+   * live only on that path, so a consultation whose join deliveries lost the
+   * race stayed `scheduled` for ever — never `in_progress`, the doctor never
+   * taken out of the routing pool, and the `room_finished` that followed
+   * refused, because `awaiting_documentation` is legal only from
+   * `in_progress`. A leave that had to create its own row is LiveKit telling us
+   * a connection we never recorded existed, which is the same fact
+   * `participant_joined` carries, so it starts the call too.
    */
   private async handleParticipantLeft(
     delivery: LivekitWebhookDelivery,
@@ -259,6 +270,15 @@ export class VideoWebhookService {
   ): Promise<VideoWebhookResult> {
     const participant = await this.resolveParticipant(delivery, consultationId);
     if (participant === null) return { received: true, handled: false, outcome: 'ignored' };
+
+    // *** DID WE EVER SEE THE JOIN? *** Read BEFORE the upsert, because after
+    // it the row exists either way. A miss means this leave is about to CREATE
+    // the row — the out-of-order case `closeConnection` is an upsert for — and
+    // therefore that a connection this platform never recorded has just been
+    // proved to have existed. Only a hint, never a guard: two concurrent leaves
+    // for one sid can both miss, and `markCallStarted` is idempotent, so the
+    // worst that costs is a second no-op transaction.
+    const alreadyRecorded = (await this.repo.findConnection(participant.sid)) !== undefined;
 
     const written = await this.repo.closeConnection({
       livekitParticipantSid: participant.sid,
@@ -290,6 +310,12 @@ export class VideoWebhookService {
         disconnectReason: delivery.participant?.disconnectReason ?? null,
       },
     });
+
+    // *** THE CALL STARTED, AND WE ARE ONLY LEARNING IT NOW. *** See the header
+    // for the failure this closes. Idempotent, and refused cleanly for a
+    // consultation that is past `scheduled`, so the ordinary path — where the
+    // join was recorded first and already moved the status — costs nothing.
+    if (!alreadyRecorded) await this.video.markCallStarted(consultationId);
 
     return { received: true, handled: true, outcome: 'processed' };
   }

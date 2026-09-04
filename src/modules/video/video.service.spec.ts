@@ -86,6 +86,9 @@ function build(overrides: {
     markConsultInProgress: jest
       .fn()
       .mockResolvedValue({ changed: true, doctorId: DOCTOR_ID, presence: 'in_consultation' }),
+    markConsultEnded: jest
+      .fn()
+      .mockResolvedValue({ changed: true, doctorId: DOCTOR_ID, presence: 'available_now' }),
   };
 
   const consent = {
@@ -505,6 +508,20 @@ describe('VideoService', () => {
       expect(instant.markConsultInProgress).not.toHaveBeenCalled();
     });
 
+    /** A room whose consultation has been deleted. No call, so nothing to take a doctor out of. */
+    it('does not touch presence when the consultation does not exist either', async () => {
+      const { service, bookings, instant } = build();
+      bookings.transitionConsultationStatus.mockResolvedValue({
+        changed: false,
+        booking: null,
+        refusal: 'not_found',
+      });
+
+      await service.markCallStarted(CONSULTATION_ID);
+
+      expect(instant.markConsultInProgress).not.toHaveBeenCalled();
+    });
+
     /** Bounded failure: the doctor is offered one request they must decline, and M-13 re-routes it. */
     it('still succeeds when the presence move throws — the caller is a webhook', async () => {
       const { service, instant } = build();
@@ -556,6 +573,63 @@ describe('VideoService', () => {
       await service.endSession(CONSULTATION_ID, 'video_room_finished');
 
       expect(instant.markInstantConsultEnded).not.toHaveBeenCalled();
+    });
+
+    /**
+     * *** THE OTHER HALF OF `markConsultInProgress`, AND IT WAS MISSING. ***
+     *
+     * `markCallStarted` moves the doctor to `in_consultation` for EVERY call,
+     * scheduled included. For an instant consult the way back exists
+     * (`markInstantConsultEnded` -> `completing_notes` -> M-15 clears the gate
+     * -> `available_now`). For a SCHEDULED one nothing ever moved them back:
+     * `in_consultation` is not reset by the boot sweep, not reset when the
+     * socket drops, and `offline` is not even reachable from it. Every doctor
+     * who took a booked video call was left silently out of the instant
+     * routing pool for good.
+     */
+    it('*** RETURNS THE DOCTOR TO THE ROUTING POOL WHEN A SCHEDULED CALL ENDS ***', async () => {
+      const { service, instant } = build();
+
+      const result = await service.endSession(CONSULTATION_ID, 'video_room_finished');
+
+      expect(instant.markConsultEnded).toHaveBeenCalledWith(CONSULTATION_ID);
+      expect(result.presenceReleased).toBe(true);
+    });
+
+    /** The instant path owns its own way out — gate first, then `completing_notes`. */
+    it('does NOT release presence for an INSTANT consult — `markInstantConsultEnded` owns that move', async () => {
+      const { service, bookings, instant } = build();
+      bookings.transitionConsultationStatus.mockResolvedValue({
+        changed: true,
+        booking: bookingView({ mode: 'instant', status: 'awaiting_documentation' }),
+      });
+
+      await service.endSession(CONSULTATION_ID, 'video_room_finished');
+
+      expect(instant.markConsultEnded).not.toHaveBeenCalled();
+      expect(instant.markInstantConsultEnded).toHaveBeenCalledWith(CONSULTATION_ID);
+    });
+
+    it('does not release presence when the status did not actually move', async () => {
+      const { service, bookings, instant } = build();
+      bookings.transitionConsultationStatus.mockResolvedValue({
+        changed: false,
+        booking: bookingView({ status: 'awaiting_documentation' }),
+      });
+
+      await service.endSession(CONSULTATION_ID, 'video_room_finished');
+
+      expect(instant.markConsultEnded).not.toHaveBeenCalled();
+    });
+
+    it('*** SURVIVES A THROWING PRESENCE RELEASE: the call already ended ***', async () => {
+      const { service, instant } = build();
+      instant.markConsultEnded.mockRejectedValue(new Error('instant module unreachable'));
+
+      const result = await service.endSession(CONSULTATION_ID, 'video_room_finished');
+
+      expect(result.changed).toBe(true);
+      expect(result.presenceReleased).toBeUndefined();
     });
 
     it('does NOT re-gate when the status did not actually move — a redelivered room_finished', async () => {
