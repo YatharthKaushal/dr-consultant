@@ -101,6 +101,20 @@ export class DataDeletionRepository {
    * #recordExecutionOutcome` is what enforces "only from `approved`" before
    * calling this.
    */
+  /**
+   * *** GUARDED ON `status = 'approved'` IN THE WHERE CLAUSE ITSELF. *** This
+   * is what actually makes two concurrent `executeForRequest` calls on the
+   * SAME request safe, not the plain `existing.status !== 'approved'` read
+   * `DataDeletionService#recordExecutionOutcome` does before calling this —
+   * that earlier read is a TOCTOU check on its own (two callers can both
+   * read `approved` before either commits). Postgres serializes two
+   * concurrent `UPDATE ... WHERE id = ? AND status = 'approved'` statements
+   * against the same row via the row lock: the first to commit wins, and
+   * the second's WHERE no longer matches once the winner's new `status` has
+   * committed, so it affects zero rows and this returns `null` — the caller
+   * turns that into an honest `ConflictException`, never a silent second
+   * "success".
+   */
   async recordExecutionOutcome(
     id: string,
     data: { status: DeletionStatus; executionOutcome: unknown; executedAt: Date },
@@ -109,7 +123,7 @@ export class DataDeletionRepository {
     const [row] = await executor
       .update(dataDeletionRequestsTable)
       .set(data)
-      .where(eq(dataDeletionRequestsTable.id, id))
+      .where(and(eq(dataDeletionRequestsTable.id, id), eq(dataDeletionRequestsTable.status, 'approved')))
       .returning();
     return row ?? null;
   }
