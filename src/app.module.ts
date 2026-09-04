@@ -8,6 +8,7 @@ import { AiModule } from './modules/ai/ai.module';
 import { AvailabilityModule } from './modules/availability/availability.module';
 import { BookingModule } from './modules/booking/booking.module';
 import { CatalogueModule } from './modules/catalogue/catalogue.module';
+import { ClinicalModule } from './modules/clinical/clinical.module';
 import { DoctorModule } from './modules/doctor/doctor.module';
 import { DocumentModule } from './modules/document/document.module';
 import { IdentityModule } from './modules/identity/identity.module';
@@ -107,6 +108,19 @@ import { ErrorsModule } from './shared/errors/errors.module';
     // `affiliate-partners.schema.ts` for the NMC 2023 reasoning — enabling it is
     // the client's legal advisor's call, not a developer's.
     PromotionModule,
+    // M-15: clinical records. Listed after BookingModule, InstantModule,
+    // DocumentModule, CatalogueModule, DoctorModule and PatientModule because
+    // it consumes all six facades — ordering is for readability, not
+    // correctness, since Nest resolves the provider graph regardless.
+    //
+    // *** THIS IS THE MODULE THAT SWITCHES ON MACHINERY ALREADY SHIPPED. ***
+    // `InstantFacade.clearCompletionGate` had no caller until now, and
+    // `promotion.referral_qualifying_statuses` defaults to
+    // `['awaiting_documentation','completed']` — statuses NOTHING in this
+    // codebase set until finalising a clinical record started moving a
+    // consultation to `completed`. Both are consequences of
+    // `ClinicalService#finalise`, not of anything added to those modules.
+    ClinicalModule,
     HealthModule,
   ],
 })

@@ -37,6 +37,36 @@ export class PatientFileRepository {
     return row ?? null;
   }
 
+  /**
+   * ADDITIVE (M-15): the newest non-deleted file of one category on one
+   * consultation.
+   *
+   * *** THIS IS `writePrescriptionPdf`'S IDEMPOTENCY CHECK. *** A consultation
+   * has at most one live `prescription_pdf`, and this is the query that makes
+   * that true: the service consults it BEFORE storing bytes, so a retried
+   * finalise cannot leave a patient holding two prescriptions for one consult.
+   * Indexed — `patient_files` already carries `index().on(consultationId)`.
+   */
+  async findByConsultationAndCategory(
+    consultationId: string,
+    category: PatientFileCategory,
+    executor: Executor = this.db,
+  ): Promise<PatientFileRow | null> {
+    const [row] = await executor
+      .select()
+      .from(patientFilesTable)
+      .where(
+        and(
+          eq(patientFilesTable.consultationId, consultationId),
+          eq(patientFilesTable.fileCategory, category),
+          isNull(patientFilesTable.deletedAt),
+        ),
+      )
+      .orderBy(desc(patientFilesTable.createdAt))
+      .limit(1);
+    return row ?? null;
+  }
+
   /** Own non-deleted files, newest first, optionally narrowed to one category. */
   async listByPatient(
     patientId: string,
