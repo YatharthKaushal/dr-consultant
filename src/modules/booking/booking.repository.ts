@@ -238,6 +238,53 @@ export class BookingRepository {
   }
 
   /**
+   * ADDITIVE (M-13): instant consultations that have been sitting in
+   * `awaiting_doctor` since before `staleBefore` — the candidate query behind
+   * M-13's STRANDED-REQUEST sweep.
+   *
+   * *** WHY A THIRD CANDIDATE QUERY EXISTS AT ALL. *** `awaiting_doctor` is
+   * the one live instant status that carries NO `hold_expires_at` (M-13 clears
+   * it on purpose: while a request is routing there is no doctor, no slot and
+   * nothing to pay for). That makes such a row invisible to
+   * `findExpiredHoldCandidates` AND to `listExpiredInstantHolds`, both of
+   * which are driven off a hold. M-13's own acceptance sweep only ever sees
+   * `instant_consultancy` rows whose outcome is still `pending`. So a request
+   * whose last attempt was settled — declined, timed out, accepted-then-rolled
+   * back — and whose re-route then failed or never ran was reachable by
+   * NOTHING, and sat on the patient's screen forever.
+   *
+   * Self-limiting for the same reason `listExpiredInstantHolds` is: acting on
+   * a candidate either routes it (which opens a pending attempt, and M-13
+   * skips it next pass) or releases it to `expired`. Either way it leaves the
+   * set. `updated_at` is what M-13 stamps when it moves a row INTO
+   * `awaiting_doctor`, so "older than one acceptance window" is exactly "no
+   * longer plausibly mid-route"; the `(status, scheduled_start_at)` index
+   * drives the scan on its leading column.
+   */
+  async listStaleAwaitingDoctorRequests(
+    staleBefore: Date,
+    limit: number,
+    executor: Executor = this.db,
+  ): Promise<Array<{ consultationId: string; patientId: string; updatedAt: Date }>> {
+    return executor
+      .select({
+        consultationId: consultationsTable.id,
+        patientId: consultationsTable.patientId,
+        updatedAt: consultationsTable.updatedAt,
+      })
+      .from(consultationsTable)
+      .where(
+        and(
+          eq(consultationsTable.mode, 'instant'),
+          eq(consultationsTable.status, 'awaiting_doctor'),
+          lte(consultationsTable.updatedAt, staleBefore),
+        ),
+      )
+      .orderBy(asc(consultationsTable.updatedAt))
+      .limit(limit);
+  }
+
+  /**
    * The consultation fee THIS consultation was actually billed at, read off its
    * own `payments` row.
    *

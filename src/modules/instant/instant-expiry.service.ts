@@ -7,6 +7,7 @@ import {
   INSTANT_AUDIT_ENTITY_TYPES,
   INSTANT_NOTIFICATION_TEMPLATES,
   PAYMENT_SWEEP_INTERVAL_MS,
+  STRANDED_REQUEST_GRACE_MS,
   SWEEP_BATCH_SIZE,
   SWEEP_SCHEDULING,
 } from './instant.constants';
@@ -29,8 +30,19 @@ export interface PaymentSweepResult {
   failed: number;
 }
 
+export interface StrandedSweepResult {
+  examined: number;
+  /** Consultations that had genuinely stopped and were given another doctor. */
+  rerouted: number;
+  /** Consultations that had genuinely stopped and had nobody left, so were released. */
+  released: number;
+  /** Candidates that turned out to be fine — an offer was still outstanding, or they had already moved on. */
+  skipped: number;
+  failed: number;
+}
+
 /**
- * *** THE TWO THINGS THAT MOVE AN INSTANT REQUEST WITHOUT ANYONE ASKING. ***
+ * *** THE THREE THINGS THAT MOVE AN INSTANT REQUEST WITHOUT ANYONE ASKING. ***
  *
  * Both are plain `setInterval`s owned by this service, started in
  * `onModuleInit`, cleared in `onApplicationShutdown`, `.unref()`'d and
@@ -99,6 +111,37 @@ export interface PaymentSweepResult {
  * an operator already watches, and it is bounded by
  * `instant.payment_window_seconds` — which is in `app_config` precisely so an
  * operator can retune this trade without a release.
+ *
+ * ═══════════════════════════════════════════════════════════════════════════
+ * SWEEP 3 — THE STRANDED REQUEST
+ *
+ * *** THE HOLE THE OTHER TWO LEAVE, AND THE ONLY ONE WITH NO OWNER AT ALL. ***
+ * ═══════════════════════════════════════════════════════════════════════════
+ *
+ * Sweep 1 reads `instant_consultancy` WHERE `outcome = 'pending'`. Sweep 2 and
+ * M-11's own hold sweep both read `consultations` WHERE there is a
+ * `hold_expires_at` in the past. A consultation in `awaiting_doctor` has
+ * NEITHER once its last offer has been settled: M-13 clears the hold on
+ * purpose when routing starts (there is no doctor, no slot and nothing to pay
+ * for), and a settled attempt is not `pending`.
+ *
+ * So every path that settles an offer and then fails to open the next one left
+ * the request alive on the patient's screen and dead in the database, forever:
+ *
+ *   `decline` -> `routeNextQuietly` throws (the router's candidate query, the
+ *   presence write or the attempt insert failed);
+ *   the acceptance sweep times an offer out and its `routeNext` throws;
+ *   `accept` rolls back after `assignDoctor` fails and the re-route throws;
+ *   the process dies between `requestInstantConsult`'s step 2 and step 3.
+ *
+ * `InstantService#routeNextQuietly` now releases on a failed re-route, which
+ * closes the first three IN PROCESS. This sweep is the DURABLE backstop —
+ * the one that also covers a process that simply stopped existing mid-saga —
+ * and it is deliberately the dumbest of the three: hand every stale
+ * `awaiting_doctor` request straight back to `routeNext`, which already knows
+ * how to refuse one that has an offer outstanding (`already_pending`), how to
+ * find the next doctor, and how to release one that has run out
+ * (`exhausted`). No new decision is made here.
  */
 @Injectable()
 export class InstantExpiryService implements OnModuleInit, OnApplicationShutdown {
@@ -162,6 +205,14 @@ export class InstantExpiryService implements OnModuleInit, OnApplicationShutdown
       if (result.timedOut > 0 || result.failed > 0) {
         this.logger.log(
           `Acceptance sweep: ${result.timedOut} timed out, ${result.rerouted} re-routed, ${result.exhausted} exhausted, ${result.failed} failed.`,
+        );
+      }
+
+      // Same tick, same question. See SWEEP 3 in the class header.
+      const stranded = await this.sweepStrandedRequests();
+      if (stranded.rerouted > 0 || stranded.released > 0 || stranded.failed > 0) {
+        this.logger.log(
+          `Stranded-request sweep: ${stranded.rerouted} re-routed, ${stranded.released} released, ${stranded.skipped} skipped, ${stranded.failed} failed.`,
         );
       }
     } catch (error) {
@@ -259,6 +310,43 @@ export class InstantExpiryService implements OnModuleInit, OnApplicationShutdown
     return result;
   }
 
+  /* ── Sweep 3: the stranded request ─────────────────────────────────────── */
+
+  /**
+   * One stranded-request pass. Shares the acceptance sweep's tick — it answers
+   * the same question ("is this request still moving?") and its candidate
+   * query is an indexed lookup that returns nothing at all in the ordinary
+   * case.
+   *
+   * `routeNext` makes every decision: `already_pending` means the request was
+   * never stranded (a false positive, and free), `not_routable` means it has
+   * already moved on, `exhausted` means it was released, and a routed one is
+   * back on its way to a doctor.
+   */
+  async sweepStrandedRequests(now: Date = new Date()): Promise<StrandedSweepResult> {
+    const candidates = await this.bookings.listStaleAwaitingDoctorRequests(
+      new Date(now.getTime() - STRANDED_REQUEST_GRACE_MS),
+      SWEEP_BATCH_SIZE,
+    );
+    const result: StrandedSweepResult = { examined: candidates.length, rerouted: 0, released: 0, skipped: 0, failed: 0 };
+
+    for (const candidate of candidates) {
+      try {
+        const routed = await this.instant.routeNext(candidate.consultationId, 'stranded_request_sweep');
+        if (routed.routed) result.rerouted += 1;
+        else if (routed.reason === 'exhausted') result.released += 1;
+        else result.skipped += 1;
+      } catch (error) {
+        result.failed += 1;
+        this.logger.error(
+          `Re-routing stranded instant consultation ${candidate.consultationId} failed: ${describeError(error)}`,
+        );
+      }
+    }
+
+    return result;
+  }
+
   /**
    * *** RELEASE THE DOCTOR, THEN THE REQUEST. ***
    *
@@ -277,9 +365,37 @@ export class InstantExpiryService implements OnModuleInit, OnApplicationShutdown
    * a stuck gate is the one state a doctor cannot get themselves out of.
    */
   private async releaseUnpaidRequest(consultationId: string, doctorId: string | null): Promise<boolean> {
+    // The un-gate stays UNCONDITIONAL and stays FIRST — see the header. It is
+    // addressed by consultation, so it is a no-op unless this consultation is
+    // the one gating this doctor, and a stuck gate is the one state a doctor
+    // cannot get out of on their own.
     if (doctorId) {
       await this.doctors.clearCompletionGate({ consultationId, actor: SYSTEM_ACTOR });
+    }
 
+    // *** RE-READ THE STATUS BEFORE FREEING THE DOCTOR, NOT AFTER. ***
+    //
+    // `listExpiredInstantHolds` ran before this loop started and every
+    // candidate costs several more round trips, so a `pending_payment` row can
+    // easily become `scheduled` in between — which is exactly what happens
+    // when the patient pays a second after the window closed and
+    // `BookingPaymentListener` confirms it.
+    //
+    // This read used to sit BELOW the presence write, and that ordering was
+    // the bug: `in_consultation` -> `available_now` is legal, so the write
+    // succeeded unconditionally, and the status check only stopped the
+    // *release* — which by then was moot. A patient who had just PAID lost
+    // their doctor, who went straight back into the routing pool and was
+    // offered somebody else's request while still holding this consultation.
+    //
+    // A payment landing inside the few milliseconds between this read and the
+    // presence write is still possible, and is still M-11's `confirmLateCapture`
+    // problem rather than this sweep's; the exposure went from "the whole
+    // batch, plus two facade round trips per candidate" to "two statements".
+    const candidate = await this.bookings.getBooking(consultationId);
+    if (!candidate || candidate.status !== 'pending_payment') return false;
+
+    if (doctorId) {
       // `in_consultation` -> `available_now` is the whole point of this sweep.
       // A refusal is fine and is not retried: the doctor may have gone offline
       // in the meantime, and dragging them back into the routing pool would be
@@ -288,6 +404,12 @@ export class InstantExpiryService implements OnModuleInit, OnApplicationShutdown
         doctorId,
         to: 'available_now',
         actor: SYSTEM_ACTOR,
+        // Only out of the state this sweep is undoing. `available_now`'s legal
+        // `from` set also contains `offline`, `paused` and `scheduled_only`,
+        // and a doctor who put themselves in one of those must be left there —
+        // this sweep gives back a doctor it is holding, it does not decide
+        // that a doctor is available.
+        onlyFrom: ['in_consultation'],
         reason: 'instant_payment_window_expired',
       });
       if (!freed.changed && freed.refusal) {
@@ -296,9 +418,6 @@ export class InstantExpiryService implements OnModuleInit, OnApplicationShutdown
         );
       }
     }
-
-    const before = await this.bookings.getBooking(consultationId);
-    if (!before || before.status !== 'pending_payment') return false;
 
     await this.instant.releaseRequest(
       consultationId,

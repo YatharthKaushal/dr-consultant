@@ -469,7 +469,12 @@ describe('InstantService', () => {
    * ═══════════════════════════════════════════════════════════════════════ */
 
   describe('accept', () => {
-    it('runs FR-10.2s inverted order: order first, then the doctor, then pending_payment', async () => {
+    // *** REVERSED BY THE ADVERSARIAL REVIEW. *** The doctor is attached
+    // BEFORE the order is minted, so that the `assignDoctor`-failed
+    // compensation (which re-routes) does not leave a `payments` row that
+    // makes the next doctor's accept impossible. See the "accept saga,
+    // re-ordered" block at the bottom of this file.
+    it('runs FR-10.2s inverted order: the doctor first, then the order, then pending_payment', async () => {
       const h = buildHarness();
       const order: string[] = [];
       h.payments.createOrderForConsultation.mockImplementation(async () => {
@@ -487,7 +492,7 @@ describe('InstantService', () => {
 
       await h.service.accept(ATTEMPT_ID, DOCTOR_ID);
 
-      expect(order).toEqual(['order', 'assign', 'status:pending_payment']);
+      expect(order).toEqual(['assign', 'order', 'status:pending_payment']);
     });
 
     it('prices the order off the doctors own fee and stamps the payment window on the hold', async () => {
@@ -1057,6 +1062,169 @@ describe('InstantService', () => {
 
       expect(h.audit.write).not.toHaveBeenCalled();
       expect(h.notifications.notify).not.toHaveBeenCalled();
+    });
+  });
+  /* ═══════════════════════════════════════════════════════════════════════
+   * ADVERSARIAL REVIEW — the defects found by attacking this file.
+   * Every test below fails without its fix; the comment on each says how.
+   * ═══════════════════════════════════════════════════════════════════════ */
+
+  describe('*** a system release must never override a doctor own choice ***', () => {
+    /**
+     * DEFECT. `InstantPresenceService#transition` computed its `from` set as
+     * `LEGAL_PRESENCE_TRANSITIONS[to]`, which for `available_now` includes
+     * `offline`, `paused` and `scheduled_only`. So the acceptance sweep giving
+     * back a doctor whose offer had lapsed did not release THIS offer's
+     * reservation — it force-wrote `available_now` over whatever the doctor
+     * had chosen since.
+     *
+     * Reachable with two ordinary API calls: the doctor is offered a request
+     * (`request_pending`), taps Paused (legal, and self-settable, FROM
+     * `request_pending`), and 60 seconds later the sweep drags them back into
+     * the routing pool and the router hands them the next request.
+     */
+    it('a timed-out offer releases the reservation ONLY out of request_pending — a doctor who tapped Paused stays paused', async () => {
+      const h = buildHarness();
+      h.repo.findAttemptByIdForUpdate.mockResolvedValue(makeAttempt({ expiresAt: new Date(Date.now() - 1_000) }));
+      h.repo.updateOutcomeIfIn.mockResolvedValue(makeAttempt({ outcome: 'timed_out' }));
+
+      await h.service.timeOutAttempt(ATTEMPT_ID);
+
+      expect(h.presence.transition).toHaveBeenCalledWith(
+        expect.objectContaining({ to: 'available_now', onlyFrom: ['request_pending'] }),
+      );
+    });
+
+    it('a decline releases the reservation ONLY out of request_pending', async () => {
+      const h = buildHarness();
+
+      await h.service.decline(ATTEMPT_ID, DOCTOR_ID);
+
+      expect(h.presence.transition).toHaveBeenCalledWith(
+        expect.objectContaining({ to: 'available_now', onlyFrom: ['request_pending'] }),
+      );
+    });
+
+    /**
+     * DEFECT. `clearCompletionGate`'s own doc comment says "a doctor who
+     * finished their notes at midnight and closed the app is `offline`, and
+     * dragging them back into the routing pool because they filed some
+     * paperwork would be exactly wrong". The code did exactly that: `offline`,
+     * `paused` and `scheduled_only` are all in `available_now`'s legal `from`
+     * set.
+     */
+    it('clearing the completion gate moves a doctor ONLY out of completing_notes — never out of offline or paused', async () => {
+      const h = buildHarness();
+
+      await h.service.clearCompletionGate(CONSULTATION_ID);
+
+      expect(h.presence.transition).toHaveBeenCalledWith(
+        expect.objectContaining({ to: 'available_now', onlyFrom: ['completing_notes'] }),
+      );
+    });
+  });
+
+  describe('*** the accept saga, re-ordered ***', () => {
+    /**
+     * DEFECT. The order was: mint the gateway order, THEN assign the doctor.
+     * `assignDoctor` throws whenever the doctor stopped being listable between
+     * the offer and the answer (an admin unlisting them mid-window is enough),
+     * and the compensation re-routed to the next doctor — leaving the
+     * `payments` row behind. `payments.consultation_id` is UNIQUE and
+     * `PaymentService#createOrderForConsultation` refuses outright when a row
+     * already exists, so the NEXT doctor's accept died on
+     * `PAYMENT_ALREADY_EXISTS` and the patient's request was released as "no
+     * doctor available" — with a live gateway order and a pinned quote
+     * stranded behind it.
+     */
+    it('assigns the doctor BEFORE minting the order', async () => {
+      const h = buildHarness();
+      const order: string[] = [];
+      h.bookings.assignDoctor.mockImplementation(async () => {
+        order.push('assignDoctor');
+        return makeBooking({ doctorId: DOCTOR_ID });
+      });
+      h.payments.createOrderForConsultation.mockImplementation(async () => {
+        order.push('createOrder');
+        return { paymentId: PAYMENT_ID, gatewayOrderId: 'order_test_1', gatewayKeyId: 'rzp_test_key', breakdown: {} };
+      });
+
+      await h.service.accept(ATTEMPT_ID, DOCTOR_ID);
+
+      expect(order).toEqual(['assignDoctor', 'createOrder']);
+    });
+
+    it('a doctor who stopped being listable mid-offer leaves NO payments row behind for the next doctor to trip over', async () => {
+      const h = buildHarness();
+      h.bookings.assignDoctor.mockRejectedValue(new Error('doctor is not bookable'));
+
+      await expect(h.service.accept(ATTEMPT_ID, DOCTOR_ID)).rejects.toThrow(ConflictException);
+
+      // The whole point: nothing was minted, so the re-route the compensation
+      // just fired is genuinely free for the next doctor.
+      expect(h.payments.createOrderForConsultation).not.toHaveBeenCalled();
+      expect(h.presence.transition).toHaveBeenCalledWith(
+        expect.objectContaining({ to: 'available_now', reason: 'accept_rolled_back_assign_doctor_failed' }),
+      );
+    });
+
+    /**
+     * DEFECT. Step (e)'s presence write was fire-and-forget, and
+     * `in_consultation` was reachable ONLY from `request_pending`. A doctor
+     * whose stream dropped (the disconnect handler writes `offline`) or who
+     * tapped Paused while the offer was open answered from a state the table
+     * refused; the refusal was discarded, and the doctor stayed ROUTABLE while
+     * holding a consultation — free to be offered a second one.
+     */
+    it('refuses to leave a doctor ROUTABLE after they accepted — a refused presence commit releases the request', async () => {
+      const h = buildHarness();
+      h.presence.transition.mockImplementation(async (input: { to: string }) =>
+        input.to === 'in_consultation'
+          ? { changed: false, before: 'completing_notes', after: 'completing_notes', refusal: 'illegal_transition' }
+          : { changed: true, before: 'available_now', after: input.to },
+      );
+
+      await expect(h.service.accept(ATTEMPT_ID, DOCTOR_ID)).rejects.toThrow(ConflictException);
+
+      expect(h.repo.supersedePendingAttempts).toHaveBeenCalledWith(CONSULTATION_ID);
+      expect(h.bookings.transitionInstantConsultation).toHaveBeenCalledWith(
+        expect.objectContaining({ to: 'expired', reason: 'presence_commit_failed' }),
+      );
+    });
+  });
+
+  describe('*** a failed re-route must not strand the request ***', () => {
+    /**
+     * DEFECT. `routeNextQuietly` swallowed the throw and its comment claimed
+     * "the acceptance sweep will try again". It cannot:
+     * `findExpiredPendingAttempts` only ever returns offers whose outcome is
+     * still `pending`, and the attempt that triggered the re-route is
+     * `declined` by then. `awaiting_doctor` carries no `hold_expires_at`, so
+     * M-11's hold sweep and this module's payment sweep cannot see it either.
+     * The consultation sat in `awaiting_doctor` forever, alive on the
+     * patient's screen and dead in the database.
+     */
+    it('releases the consultation when the re-route after a decline throws', async () => {
+      const h = buildHarness();
+      // The decline itself succeeds; the NEXT routing pass blows up.
+      h.doctors.listInstantRoutingCandidates.mockRejectedValue(new Error('candidate query failed'));
+
+      await h.service.decline(ATTEMPT_ID, DOCTOR_ID);
+
+      expect(h.bookings.transitionInstantConsultation).toHaveBeenCalledWith(
+        expect.objectContaining({ to: 'expired', from: ['awaiting_doctor', 'pending_payment'] }),
+      );
+      expect(h.notifications.notify).toHaveBeenCalledWith(
+        expect.objectContaining({ templateCode: INSTANT_NOTIFICATION_TEMPLATES.INSTANT_NO_DOCTOR_AVAILABLE }),
+      );
+    });
+
+    it('still does not throw at the caller when even the release fails', async () => {
+      const h = buildHarness();
+      h.doctors.listInstantRoutingCandidates.mockRejectedValue(new Error('candidate query failed'));
+      h.repo.supersedePendingAttempts.mockRejectedValue(new Error('database is gone'));
+
+      await expect(h.service.decline(ATTEMPT_ID, DOCTOR_ID)).resolves.toMatchObject({ outcome: 'declined' });
     });
   });
 });

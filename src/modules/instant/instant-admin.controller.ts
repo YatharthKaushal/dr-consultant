@@ -115,6 +115,7 @@ export class InstantAdminController {
   async sweep() {
     return {
       acceptanceWindow: await this.expiry.sweepExpiredOffers(),
+      strandedRequests: await this.expiry.sweepStrandedRequests(),
       paymentWindow: await this.expiry.sweepUnpaidAcceptedRequests(),
     };
   }

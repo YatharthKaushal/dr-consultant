@@ -103,10 +103,21 @@ export type InstantErrorCode = (typeof INSTANT_ERROR_CODES)[keyof typeof INSTANT
  *     only ever land on a doctor who is live and free; every other guard in
  *     the router is a second line of defence behind this one.
  *
- *   `in_consultation` is reachable ONLY from `request_pending` — you get
- *     there by accepting. (M-14 will need to widen this when a SCHEDULED
- *     consult starts a call; that is a one-line change here and nowhere else,
- *     which is the point of keeping the table as data.)
+ *   `in_consultation` is reachable from every state a doctor can be sitting
+ *     in AT THE MOMENT THEY ACCEPT — you get there by accepting, and the
+ *     table's job is to make sure that lands. It used to read
+ *     `['request_pending']` alone, on the assumption that a doctor holding an
+ *     offer is still `request_pending` when they answer it. THEY NEED NOT BE:
+ *     `offline` and `paused` are both legal (and self-settable) FROM
+ *     `request_pending`, and a dropped socket writes `offline` on its own, so
+ *     a doctor who backgrounds the app for ten seconds and then taps Accept
+ *     answers from `offline`. `InstantService#accept` did not check this
+ *     write's result, so the refusal was silent and the doctor was left
+ *     ROUTABLE while committed to a consult — free to be offered a second one.
+ *     The only states deliberately still excluded are `completing_notes` (they
+ *     owe documentation; FR-10.5 outranks a new consult) and `in_consultation`
+ *     itself (the no-op M-05 already short-circuits). M-14 needs no further
+ *     widening when a SCHEDULED consult starts a call.
  *
  *   `completing_notes` is reachable ONLY from `in_consultation`, and the same
  *     transaction sets the completion gate.
@@ -121,7 +132,7 @@ export const LEGAL_PRESENCE_TRANSITIONS: Record<DoctorPresence, readonly DoctorP
   offline: ['available_now', 'request_pending', 'paused', 'scheduled_only'],
   available_now: ['offline', 'request_pending', 'in_consultation', 'completing_notes', 'paused', 'scheduled_only'],
   request_pending: ['available_now'],
-  in_consultation: ['request_pending'],
+  in_consultation: ['request_pending', 'available_now', 'offline', 'paused', 'scheduled_only'],
   completing_notes: ['in_consultation'],
   paused: ['offline', 'available_now', 'request_pending', 'scheduled_only'],
   scheduled_only: ['offline', 'available_now', 'paused'],
@@ -340,6 +351,27 @@ export const PAYMENT_SWEEP_INTERVAL_MS = 30_000;
 
 /** Candidates examined per pass, per sweep. Bounds one pass's work so a backlog drains steadily instead of in one spike — `booking-slot-hold.service.ts`'s `SWEEP_BATCH_SIZE`, same value. */
 export const SWEEP_BATCH_SIZE = 100;
+
+/**
+ * *** SWEEP 3's GRACE PERIOD: how long a consultation may sit in
+ * `awaiting_doctor` before the stranded-request sweep looks at it. ***
+ *
+ * `awaiting_doctor` is the one live instant status with no `hold_expires_at`,
+ * so nothing driven off a hold can see it, and the acceptance sweep only ever
+ * sees offers whose outcome is still `pending`. A request whose re-route threw
+ * after a decline, a timeout or a rolled-back accept — or a process that died
+ * between opening the request and offering it — therefore had NO pending
+ * attempt, NO hold, and no sweep that would ever touch it again.
+ *
+ * Deliberately a constant rather than an `app_config` key: it is not a
+ * business trade an operator retunes, it is how long a request may look stuck
+ * before being treated as stuck. Two minutes is comfortably longer than one
+ * default acceptance window (60s) plus a re-route, so a request that is merely
+ * BETWEEN two offers is never mistaken for a stranded one — and even if it
+ * were, `routeNext` refuses a consultation that already has a pending offer,
+ * so a false positive costs one no-op read.
+ */
+export const STRANDED_REQUEST_GRACE_MS = 120_000;
 
 /** How often the SSE stream emits a keep-alive comment event. Well under the 60s idle timeout most proxies and mobile networks apply to an idle response body. */
 export const STREAM_KEEPALIVE_MS = 20_000;
