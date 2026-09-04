@@ -1,4 +1,5 @@
 import { ConflictException, NotFoundException } from '@nestjs/common';
+import type { EventEmitter2 } from '@nestjs/event-emitter';
 import type { Database } from '../../config/db/database.config';
 import type { ClinicalRecordRow } from '../../schema/clinical-records.schema';
 import type { DoctorClinicalTemplateRow } from '../../schema/doctor-clinical-templates.schema';
@@ -7,6 +8,7 @@ import type { CatalogueFacade } from '../catalogue/catalogue.facade';
 import type { InstantFacade } from '../instant/instant.facade';
 import type { ClinicalBookingPort, ClinicalConsultationView } from './clinical-booking.contract';
 import { CLINICAL_ERROR_CODES } from './clinical.constants';
+import { CLINICAL_RECORD_FINALISED_EVENT } from './clinical.contract';
 import type { SaveClinicalRecordDto } from './clinical.dto';
 import type { ClinicalPdfService } from './clinical-pdf.service';
 import type { ClinicalRepository } from './clinical.repository';
@@ -125,6 +127,7 @@ function createDeps() {
   const templates = { requireOwnTemplateRow: jest.fn() };
   const pdf = { generateForConsultation: jest.fn().mockResolvedValue({ id: 'file-1' }) };
   const audit = { write: jest.fn().mockResolvedValue(undefined) };
+  const events = { emit: jest.fn() };
 
   const service = new ClinicalService(
     db as unknown as Database,
@@ -135,9 +138,10 @@ function createDeps() {
     templates as unknown as ClinicalTemplateService,
     pdf as unknown as ClinicalPdfService,
     audit as unknown as AuditService,
+    events as unknown as EventEmitter2,
   );
 
-  return { service, db, repo, bookings, catalogue, instant, templates, pdf, audit };
+  return { service, db, repo, bookings, catalogue, instant, templates, pdf, audit, events };
 }
 
 /** The happy path every gate test then breaks in exactly one place. */
@@ -227,6 +231,15 @@ describe('ClinicalService', () => {
 
       expect(deps.repo.finalise).toHaveBeenCalledTimes(1);
       expect(result.record.medicines).toHaveLength(1);
+    });
+
+    it('emits CLINICAL_RECORD_FINALISED_EVENT with the consultation id — the M-16 seam `followup-clinical.listener.ts` listens for', async () => {
+      const deps = createDeps();
+      arrangeFinalisable(deps, record({ ...FULL_ADVICE, caseSummary: 'Stable. Continue plan.' }));
+
+      await deps.service.finalise(CONSULTATION_ID, DOCTOR_ID);
+
+      expect(deps.events.emit).toHaveBeenCalledWith(CLINICAL_RECORD_FINALISED_EVENT, { consultationId: CONSULTATION_ID });
     });
 
     it('*** ROUTING AROUND IT: *** re-checks the gate against the LOCKED row, so a draft save that blanks the summary mid-flight cannot slip through', async () => {

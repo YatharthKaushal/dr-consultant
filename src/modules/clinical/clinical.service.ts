@@ -1,4 +1,5 @@
 import { ConflictException, Inject, Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { EventEmitter2 } from '@nestjs/event-emitter';
 import { DATABASE } from '../../config/db/database.module';
 import type { Database } from '../../config/db/database.config';
 import type { ClinicalRecordRow, NewClinicalRecordRow } from '../../schema/clinical-records.schema';
@@ -15,11 +16,12 @@ import {
   CLINICAL_ERROR_CODES,
   CLINICAL_RECORD_WRITABLE_STATUSES,
 } from './clinical.constants';
-import type {
-  ClinicalAuditEntryView,
-  ClinicalCarePlanView,
-  ClinicalMedicine,
-  ClinicalRecordView,
+import {
+  CLINICAL_RECORD_FINALISED_EVENT,
+  type ClinicalAuditEntryView,
+  type ClinicalCarePlanView,
+  type ClinicalMedicine,
+  type ClinicalRecordView,
 } from './clinical.contract';
 import type { SaveClinicalRecordDto } from './clinical.dto';
 import { normaliseText, parseMedicineLines } from './clinical-medicine.util';
@@ -121,6 +123,7 @@ export class ClinicalService {
     private readonly templates: ClinicalTemplateService,
     private readonly pdf: ClinicalPdfService,
     private readonly audit: AuditService,
+    private readonly events: EventEmitter2,
   ) {}
 
   /* ══════════════════════════════════════════════════════════════════════ */
@@ -281,6 +284,13 @@ export class ClinicalService {
     const consultationStatus = await this.moveConsultationToCompleted(consultationId);
     const completionGateCleared = await this.clearCompletionGate(consultationId);
     const prescription = await this.pdf.generateForConsultation(finalised, consultation);
+
+    // *** STEP 4. *** Fire-and-forget, deliberately: see
+    // `CLINICAL_RECORD_FINALISED_EVENT`'s own header for why this has no
+    // reconciling sweep behind it yet. `emit` never throws on a listener
+    // error (nestjs/event-emitter's `suppressErrors` defaults to true), so
+    // this cannot fail `finalise` itself.
+    this.events.emit(CLINICAL_RECORD_FINALISED_EVENT, { consultationId });
 
     return {
       record: toClinicalRecordView(finalised),

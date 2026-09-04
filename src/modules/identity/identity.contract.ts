@@ -31,6 +31,14 @@ export interface IdentityContract {
   getEffectivePermissions(adminId: string): Promise<string[]>;
   hasPermission(adminId: string, key: string): Promise<boolean>;
   /**
+   * ADDITIVE (M-16): every ACTIVE admin holding `key`, by role or direct
+   * grant — the reverse of `hasPermission`. Built for `followup`'s
+   * `ADMIN_DIRECTORY_PORT` (FR-13.4's red-alert fan-out to
+   * `governance.act_alerts` holders); shaped generally, not follow-up
+   * specific. See `identity-access.repository.ts#listAdminIdsWithPermission`.
+   */
+  listAdminIdsWithPermission(key: string): Promise<string[]>;
+  /**
    * Revokes every live session for `(accountType, id)`. The resulting
    * `audit_log` entry is attributed to `actor` when given (e.g. the admin
    * who suspended this account); it defaults to self-attribution
