@@ -53,12 +53,25 @@ export class PaymentFacade implements PaymentContract {
     return this.payments.reconcileWithGateway(paymentId);
   }
 
+  /**
+   * *** `refundPct` IS DECLARED HERE ON PURPOSE. ***
+   *
+   * It was absent, and booking's calls carrying it worked only because this
+   * method forwards its argument OBJECT BY REFERENCE — a property the parameter
+   * type did not mention reached `RefundService` regardless. Rewriting this body
+   * as an explicit destructure, which reads like a tidy-up, would have dropped
+   * the field that redefines the refund base and silently reverted live
+   * cancellations to a percentage of the consultation fee. See
+   * `PaymentContract.createRefund`.
+   */
   async createRefund(input: {
     paymentId: string;
     amount: string;
     reason: string;
     initiatedByAdminId: string | null;
     isAutomatic: boolean;
+    /** Percent of the CAPTURED TOTAL. Commercial change — see `PaymentContract.createRefund`. */
+    refundPct?: number;
   }): Promise<{ refundId: string; status: string }> {
     return this.refunds.createRefund(input);
   }
