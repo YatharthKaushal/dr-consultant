@@ -8,6 +8,7 @@ import { AiModule } from './modules/ai/ai.module';
 import { AvailabilityModule } from './modules/availability/availability.module';
 import { BookingModule } from './modules/booking/booking.module';
 import { CatalogueModule } from './modules/catalogue/catalogue.module';
+import { ClarificationModule } from './modules/clarification/clarification.module';
 import { ClinicalModule } from './modules/clinical/clinical.module';
 import { ConsentModule } from './modules/consent/consent.module';
 import { DoctorModule } from './modules/doctor/doctor.module';
@@ -140,6 +141,15 @@ import { ErrorsModule } from './shared/errors/errors.module';
     // consultation to `completed`. Both are consequences of
     // `ClinicalService#finalise`, not of anything added to those modules.
     ClinicalModule,
+    // M-17: case clarification. After DoctorModule and ClinicalModule
+    // because it consumes both facades — ordering is for readability, not
+    // correctness, since Nest resolves the provider graph regardless.
+    // Deliberately does NOT import BookingModule: `docs/MODULES.md` lists
+    // M-17 depending on M-02/M-05/M-15 only, so `sourceConsultationId` is
+    // recorded on the treating doctor's own word rather than ownership-
+    // verified against a booking — see
+    // `clarification.service.ts#assertSourceConsultationExists`.
+    ClarificationModule,
     HealthModule,
   ],
 })

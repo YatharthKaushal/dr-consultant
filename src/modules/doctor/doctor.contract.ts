@@ -51,6 +51,21 @@ export interface DoctorContract {
   isVerifiedAndListed(doctorId: string): Promise<boolean>;
 
   /**
+   * ADDITIVE (M-17/case clarification): `true` only if the doctor exists,
+   * `verificationStatus === 'verified'` AND `seniorityLevel === 'expert'` —
+   * the "WHO MAY BE ASKED" gate `clarification-cases.schema.ts` names
+   * ("`seniority_level = expert` says WHO MAY BE ASKED. `expert_doctor_id`
+   * says WHAT THEY MAY SEE."). This method answers only the first of those
+   * two independent checks; M-17 itself is what enforces the second, by
+   * never running a query that is not already scoped to `expertDoctorId`.
+   *
+   * `isListed` is deliberately NOT part of this gate, unlike
+   * `isVerifiedAndListed`: an expert reviewer does not need to be a bookable,
+   * publicly-listed doctor to be asked for a clinical opinion.
+   */
+  isExpertDoctor(doctorId: string): Promise<boolean>;
+
+  /**
    * Derived from this doctor's PRIMARY specialty's `specialties.canPrescribe`
    * (`false` if the doctor has no primary specialty or does not exist).
    *
