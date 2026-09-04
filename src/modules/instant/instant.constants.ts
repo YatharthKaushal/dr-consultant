@@ -162,17 +162,6 @@ export type SelfSettablePresence = (typeof SELF_SETTABLE_PRESENCE)[number];
 export const PRESENCE_REQUIRING_NO_GATE = ['available_now', 'request_pending'] as const satisfies readonly DoctorPresence[];
 
 /**
- * States a doctor may be moved OUT OF when their realtime channel closes.
- *
- * Identical to `LEGAL_PRESENCE_TRANSITIONS.offline`, and referenced through
- * that rather than repeated, so the disconnect handler and the transition
- * table cannot disagree. `docs/erd.sql` on `doctors`: "presence is carried on
- * the realtime channel (M-13), so the socket already knows who is live — its
- * disconnect handler, and a sweep at boot, write `presence = offline`."
- */
-export const DISCONNECT_CLEARS_PRESENCE = LEGAL_PRESENCE_TRANSITIONS.offline;
-
-/**
  * What the BOOT SWEEP resets to `offline`.
  *
  * After a restart no stream exists, so a doctor the previous process left
@@ -189,6 +178,36 @@ export const DISCONNECT_CLEARS_PRESENCE = LEGAL_PRESENCE_TRANSITIONS.offline;
  * doctors re-set it after every deploy would buy nothing.
  */
 export const BOOT_STALE_PRESENCE = ['available_now', 'request_pending', 'paused'] as const satisfies readonly DoctorPresence[];
+
+/**
+ * States a doctor may be moved OUT OF when their realtime channel closes.
+ *
+ * `docs/erd.sql` on `doctors`: "presence is carried on the realtime channel
+ * (M-13), so the socket already knows who is live — its disconnect handler,
+ * and a sweep at boot, write `presence = offline`."
+ *
+ * *** THIS IS `BOOT_STALE_PRESENCE`, NOT `LEGAL_PRESENCE_TRANSITIONS.offline`,
+ * AND THE DIFFERENCE IS `scheduled_only`. *** It used to be the latter, on the
+ * argument that "the disconnect handler and the transition table cannot
+ * disagree". But the two answer different questions. The table answers "may a
+ * doctor EVER go offline from here" — and yes, a doctor in `scheduled_only`
+ * may tap Offline. This list answers "which of these states is a claim about a
+ * LIVE SOCKET, and therefore a lie once the socket is gone" — the same
+ * question `BOOT_STALE_PRESENCE` answers, and it gives `scheduled_only` the
+ * same answer it does there: *** NO. *** Its own comment says so ("it is a
+ * standing preference rather than a live-socket fact ... making doctors re-set
+ * it after every deploy would buy nothing"), and every word of that holds for
+ * a dropped mobile connection too. Before this, a doctor who chose Scheduled
+ * Only and then closed the app came back to find the choice silently erased —
+ * and their listing card, which reads `getPresence`, showed `offline` instead
+ * of the FR-10.3 state they had asked for.
+ *
+ * `in_consultation` and `completing_notes` are excluded for the reason they
+ * always were, and it is the one that matters most: if `completing_notes` were
+ * reset here, FR-10.5 would be bypassable by locking the phone.
+ */
+export const DISCONNECT_CLEARS_PRESENCE = BOOT_STALE_PRESENCE;
+
 
 /* -------------------------------------------------------------------------- */
 /* Configuration                                                               */

@@ -501,4 +501,85 @@ describe('InstantPresenceService', () => {
       ).toThrow(ConflictException);
     });
   });
+  /* ═══════════════════════════════════════════════════════════════════════
+   * ADVERSARIAL REVIEW — the two defects found by attacking the state table.
+   * ═══════════════════════════════════════════════════════════════════════ */
+
+  describe('*** onlyFrom narrows, and can only ever narrow ***', () => {
+    /**
+     * DEFECT. Every system "give the doctor back" call used
+     * `LEGAL_PRESENCE_TRANSITIONS[to]` as its `from` set, so releasing a
+     * reservation was in practice a force-write of `available_now` over
+     * whatever the doctor had chosen since. `onlyFrom` exists so a caller can
+     * say "out of THIS state and no other"; it is INTERSECTED with the table
+     * so it can never invent a transition FR-10.4 forbids.
+     */
+    it('passes the intersection of the table and onlyFrom down to M-05', async () => {
+      const { service, facade } = buildHarness({ presence: 'request_pending' });
+
+      await service.transition({
+        doctorId: DOCTOR_ID,
+        to: 'available_now',
+        actor: { actorType: 'system', actorId: null },
+        onlyFrom: ['request_pending'],
+      });
+
+      expect(facade.transitionPresence).toHaveBeenCalledWith(
+        expect.objectContaining({ to: 'available_now', from: ['request_pending'] }),
+      );
+    });
+
+    it('CANNOT widen the table — an illegal source passed in onlyFrom is dropped, not honoured', async () => {
+      const { service, facade } = buildHarness({ presence: 'available_now' });
+
+      await service.transition({
+        doctorId: DOCTOR_ID,
+        to: 'request_pending',
+        actor: { actorType: 'system', actorId: null },
+        // `request_pending` is legal ONLY from `available_now`. Asking for
+        // `completing_notes` as well must change nothing.
+        onlyFrom: ['available_now', 'completing_notes'],
+      });
+
+      expect(facade.transitionPresence).toHaveBeenCalledWith(
+        expect.objectContaining({ from: ['available_now'] }),
+      );
+    });
+
+    it('falls back to the whole legal set when no narrowing is asked for', async () => {
+      const { service, facade } = buildHarness({ presence: 'offline' });
+
+      await service.transition({ doctorId: DOCTOR_ID, to: 'available_now', actor: { actorType: 'system', actorId: null } });
+
+      expect(facade.transitionPresence).toHaveBeenCalledWith(
+        expect.objectContaining({ from: LEGAL_PRESENCE_TRANSITIONS.available_now }),
+      );
+    });
+  });
+
+  describe('*** a dropped socket must not erase a standing preference ***', () => {
+    /**
+     * DEFECT. `DISCONNECT_CLEARS_PRESENCE` was `LEGAL_PRESENCE_TRANSITIONS
+     * .offline`, which contains `scheduled_only`. `BOOT_STALE_PRESENCE`
+     * deliberately excludes it, with the reasoning spelled out in
+     * `instant.constants.ts`: "it is a standing preference rather than a
+     * live-socket fact ... making doctors re-set it after every deploy would
+     * buy nothing". Every word of that holds for a dropped mobile connection,
+     * and the two lists disagreed anyway — so a doctor who chose Scheduled
+     * Only and closed the app came back to find the choice erased.
+     */
+    it('a closed stream does NOT reset a doctor who chose scheduled_only', () => {
+      expect(DISCONNECT_CLEARS_PRESENCE).not.toContain('scheduled_only');
+    });
+
+    it('the disconnect handler and the boot sweep answer the same question the same way', () => {
+      expect([...DISCONNECT_CLEARS_PRESENCE].sort()).toEqual([...BOOT_STALE_PRESENCE].sort());
+    });
+
+    it('POSITIVE CONTROL: it still clears every state that IS a claim about a live socket', () => {
+      expect(DISCONNECT_CLEARS_PRESENCE).toContain('available_now');
+      expect(DISCONNECT_CLEARS_PRESENCE).toContain('request_pending');
+      expect(DISCONNECT_CLEARS_PRESENCE).toContain('paused');
+    });
+  });
 });
