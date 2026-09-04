@@ -226,7 +226,21 @@ export class DataDeletionService {
         { status: input.status, executionOutcome: input.executionOutcome, executedAt },
         tx,
       );
-      if (!row) throw this.notFound();
+      if (!row) {
+        // *** THE RACE LOSER. *** The row exists (we just read it above) but
+        // the guarded `UPDATE ... WHERE status = 'approved'` in the
+        // repository affected zero rows — a concurrent call on the SAME
+        // request already flipped its status to `executed`/`failed` between
+        // our read and our write. Report this exactly like any other
+        // not-currently-approved attempt, never as a silent success and
+        // never as a 404 (the request is very much still there).
+        const current = await this.repo.findById(requestId, tx);
+        throw new ConflictException({
+          code: DATA_DELETION_ERROR_CODES.DATA_DELETION_NOT_APPROVED,
+          message: `A request in "${current?.status ?? 'unknown'}" may not be executed — only an "approved" request may.`,
+          currentStatus: current?.status ?? 'unknown',
+        });
+      }
 
       await this.audit.write(
         {

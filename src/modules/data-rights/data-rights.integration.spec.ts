@@ -47,6 +47,7 @@
  * exactly as the seed scripts do, and fails loudly rather than skipping.
  */
 import { randomUUID } from 'node:crypto';
+import { ConflictException } from '@nestjs/common';
 import { eq, inArray } from 'drizzle-orm';
 import { connectDatabase, disconnectDatabase, type Database } from '../../config/db/database.config';
 import { loadEnvFiles } from '../../config/env/env.validation';
@@ -412,6 +413,41 @@ describe('M-21 data-rights execution, against a real database', () => {
         expect(patientAfter.status).toBe('active');
         const remainingQueries = await db.select().from(searchQueriesTable).where(eq(searchQueriesTable.patientId, patient.id));
         expect(remainingQueries).toHaveLength(2);
+      } finally {
+        await teardownPatientScenario(db, patient.id, request.id, consultation.id);
+      }
+    });
+  });
+
+  describe('executeForRequest — concurrency race', () => {
+    it('*** TWO SIMULTANEOUS execute CALLS ON THE SAME approved REQUEST *** — only one may actually run the mutating steps; the loser must be refused, not double-run hard-delete/anonymize', async () => {
+      const { patient, consultation, request } = await seedPatientScenario(db, shared, 'rc');
+      try {
+        const results = await Promise.allSettled([
+          service.executeForRequest(request.id, shared.adminId),
+          service.executeForRequest(request.id, shared.adminId),
+        ]);
+
+        const fulfilled = results.filter((r) => r.status === 'fulfilled');
+        const rejected = results.filter((r) => r.status === 'rejected');
+
+        // Exactly one caller may actually execute; the other must be refused
+        // — a real ConflictException, never a silent second "success" whose
+        // execution_outcome nondeterministically overwrites the winner's.
+        expect(fulfilled).toHaveLength(1);
+        expect(rejected).toHaveLength(1);
+        const loser = rejected[0] as PromiseRejectedResult;
+        expect(loser.reason).toBeInstanceOf(ConflictException);
+        expect(loser.reason.response.code).toBe('DATA_DELETION_NOT_APPROVED');
+
+        // search_queries hard-delete must have run exactly once — if both
+        // callers ran it concurrently this still reads back empty (delete is
+        // idempotent), so the REAL proof is the request row below.
+        const remainingQueries = await db.select().from(searchQueriesTable).where(eq(searchQueriesTable.patientId, patient.id));
+        expect(remainingQueries).toHaveLength(0);
+
+        const [requestAfter] = await db.select().from(dataDeletionRequestsTable).where(eq(dataDeletionRequestsTable.id, request.id));
+        expect(requestAfter.status).toBe('executed');
       } finally {
         await teardownPatientScenario(db, patient.id, request.id, consultation.id);
       }

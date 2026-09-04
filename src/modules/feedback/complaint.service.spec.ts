@@ -126,6 +126,22 @@ describe('ComplaintService.raiseComplaint', () => {
     expect(result.referenceCode).toMatch(/^CMP-/);
   });
 
+  it('*** AT THE RETRY LIMIT, FAILS LOUDLY *** — every attempt colliding raises a real ServiceUnavailableException, never a silent wrong-but-successful complaint', async () => {
+    const { service, repo } = createDeps();
+    repo.referenceCodeExists.mockResolvedValue(true); // every single attempt "collides"
+    repo.create.mockImplementation(async (data) => row({ ...data }));
+
+    await expect(
+      service.raiseComplaint(PATIENT_ID, { category: 'other', subject: 'S', description: 'D' }),
+    ).rejects.toMatchObject({
+      status: 503,
+      response: { code: COMPLAINT_ERROR_CODES.REFERENCE_ALLOCATION_FAILED },
+    });
+
+    // Never falls through to actually inserting a row with an unverified/colliding code.
+    expect(repo.create).not.toHaveBeenCalled();
+  });
+
   it('inserts status open, from the row default, never as a client-controlled field', async () => {
     const { service, repo } = createDeps();
     repo.create.mockImplementation(async (data) => row({ ...data }));
