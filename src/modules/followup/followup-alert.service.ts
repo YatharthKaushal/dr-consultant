@@ -102,6 +102,11 @@ export class FollowupAlertService {
     return rows.map(toSafetyAlertView);
   }
 
+  /** ADDITIVE (M-20/governance and quality) — see `followup.repository.ts#countOpenAlertsByType`. */
+  async countOpenAlertsByType(): Promise<Partial<Record<SafetyAlertType, number>>> {
+    return this.repo.countOpenAlertsByType();
+  }
+
   async acknowledgeAlert(alertId: string, actor: { adminId?: string; doctorId?: string }): Promise<SafetyAlertView> {
     const existing = await this.repo.findAlertById(alertId);
     if (!existing) throw this.alertNotFound();

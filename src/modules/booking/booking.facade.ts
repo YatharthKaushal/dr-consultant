@@ -174,4 +174,9 @@ export class BookingFacade implements BookingContract {
   async listStaleAwaitingDoctorRequests(staleBefore: Date, limit: number) {
     return this.service.listStaleAwaitingDoctorRequests(staleBefore, limit);
   }
+
+  /** ADDITIVE (M-20/governance and quality) — see `BookingContract#countByStatus`. */
+  async countByStatus(): Promise<Partial<Record<ConsultationStatus, number>>> {
+    return this.service.countByStatus();
+  }
 }
