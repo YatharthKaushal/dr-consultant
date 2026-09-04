@@ -143,4 +143,9 @@ export class BookingFacade implements BookingContract {
   async listExpiredInstantHolds(now: Date, limit: number) {
     return this.service.listExpiredInstantHolds(now, limit);
   }
+
+  /** See `BookingContract#listStaleAwaitingDoctorRequests`. */
+  async listStaleAwaitingDoctorRequests(staleBefore: Date, limit: number) {
+    return this.service.listStaleAwaitingDoctorRequests(staleBefore, limit);
+  }
 }

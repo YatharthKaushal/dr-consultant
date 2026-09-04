@@ -53,7 +53,16 @@ type Executor = Database | DatabaseTransaction;
 export class NotificationDeviceRepository {
   constructor(@Inject(DATABASE) private readonly db: Database) {}
 
-  /** The account's current FCM registration token, or `null` if it has none (or does not exist). */
+  /**
+   * The account's current FCM registration token, or `null` if it has none
+   * (or does not exist).
+   *
+   * The `doctors` branch is guarded by `app === 'doctor'` rather than reached
+   * by falling off the end of the `patient` branch. This method decides WHICH
+   * TABLE an account id is looked up in, and an id that is not a doctor's
+   * must not be able to read a doctor's push token because the key it
+   * arrived under was neither of the two.
+   */
   async findPushToken(app: PushAppKey, accountId: string, executor: Executor = this.db): Promise<string | null> {
     if (app === 'patient') {
       const [row] = await executor
@@ -63,6 +72,7 @@ export class NotificationDeviceRepository {
         .limit(1);
       return row?.pushToken ?? null;
     }
+    if (app !== 'doctor') return null;
 
     const [row] = await executor
       .select({ pushToken: doctorsTable.pushToken })

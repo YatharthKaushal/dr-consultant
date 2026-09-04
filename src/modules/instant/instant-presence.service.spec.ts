@@ -33,6 +33,7 @@ import {
 
 const DOCTOR_ID = '11111111-1111-4111-8111-111111111111';
 const CONSULTATION_ID = '22222222-2222-4222-8222-222222222222';
+const ADMIN_ID = '99999999-9999-4999-8999-999999999999';
 
 type Fn = jest.Mock;
 
@@ -499,6 +500,129 @@ describe('InstantPresenceService', () => {
           refusal: 'completion_gated',
         }),
       ).toThrow(ConflictException);
+    });
+  });
+  /* ═══════════════════════════════════════════════════════════════════════
+   * ADVERSARIAL REVIEW — the two defects found by attacking the state table.
+   * ═══════════════════════════════════════════════════════════════════════ */
+
+  describe('*** onlyFrom narrows, and can only ever narrow ***', () => {
+    /**
+     * DEFECT. Every system "give the doctor back" call used
+     * `LEGAL_PRESENCE_TRANSITIONS[to]` as its `from` set, so releasing a
+     * reservation was in practice a force-write of `available_now` over
+     * whatever the doctor had chosen since. `onlyFrom` exists so a caller can
+     * say "out of THIS state and no other"; it is INTERSECTED with the table
+     * so it can never invent a transition FR-10.4 forbids.
+     */
+    it('passes the intersection of the table and onlyFrom down to M-05', async () => {
+      const { service, facade } = buildHarness({ presence: 'request_pending' });
+
+      await service.transition({
+        doctorId: DOCTOR_ID,
+        to: 'available_now',
+        actor: { actorType: 'system', actorId: null },
+        onlyFrom: ['request_pending'],
+      });
+
+      expect(facade.transitionPresence).toHaveBeenCalledWith(
+        expect.objectContaining({ to: 'available_now', from: ['request_pending'] }),
+      );
+    });
+
+    it('CANNOT widen the table — an illegal source passed in onlyFrom is dropped, not honoured', async () => {
+      const { service, facade } = buildHarness({ presence: 'available_now' });
+
+      await service.transition({
+        doctorId: DOCTOR_ID,
+        to: 'request_pending',
+        actor: { actorType: 'system', actorId: null },
+        // `request_pending` is legal ONLY from `available_now`. Asking for
+        // `completing_notes` as well must change nothing.
+        onlyFrom: ['available_now', 'completing_notes'],
+      });
+
+      expect(facade.transitionPresence).toHaveBeenCalledWith(
+        expect.objectContaining({ from: ['available_now'] }),
+      );
+    });
+
+    it('falls back to the whole legal set when no narrowing is asked for', async () => {
+      const { service, facade } = buildHarness({ presence: 'offline' });
+
+      await service.transition({ doctorId: DOCTOR_ID, to: 'available_now', actor: { actorType: 'system', actorId: null } });
+
+      expect(facade.transitionPresence).toHaveBeenCalledWith(
+        expect.objectContaining({ from: LEGAL_PRESENCE_TRANSITIONS.available_now }),
+      );
+    });
+  });
+
+  describe('*** a dropped socket must not erase a standing preference ***', () => {
+    /**
+     * DEFECT. `DISCONNECT_CLEARS_PRESENCE` was `LEGAL_PRESENCE_TRANSITIONS
+     * .offline`, which contains `scheduled_only`. `BOOT_STALE_PRESENCE`
+     * deliberately excludes it, with the reasoning spelled out in
+     * `instant.constants.ts`: "it is a standing preference rather than a
+     * live-socket fact ... making doctors re-set it after every deploy would
+     * buy nothing". Every word of that holds for a dropped mobile connection,
+     * and the two lists disagreed anyway — so a doctor who chose Scheduled
+     * Only and closed the app came back to find the choice erased.
+     */
+    it('a closed stream does NOT reset a doctor who chose scheduled_only', () => {
+      expect(DISCONNECT_CLEARS_PRESENCE).not.toContain('scheduled_only');
+    });
+
+    it('the disconnect handler and the boot sweep answer the same question the same way', () => {
+      expect([...DISCONNECT_CLEARS_PRESENCE].sort()).toEqual([...BOOT_STALE_PRESENCE].sort());
+    });
+
+    it('POSITIVE CONTROL: it still clears every state that IS a claim about a live socket', () => {
+      expect(DISCONNECT_CLEARS_PRESENCE).toContain('available_now');
+      expect(DISCONNECT_CLEARS_PRESENCE).toContain('request_pending');
+      expect(DISCONNECT_CLEARS_PRESENCE).toContain('paused');
+    });
+  });
+  describe('*** the operator override goes through the same rule the doctor does ***', () => {
+    /**
+     * DEFECT. `InstantAdminController#setDoctorPresence` called
+     * `presence.transition` DIRECTLY, so the `SELF_SETTABLE_PRESENCE`
+     * restriction its own comment claims ("restricted to the same set a doctor
+     * gets — an admin does not get to assert work in flight either, and in
+     * particular cannot put a doctor into or out of `completing_notes`,
+     * because that would be an admin signing off clinical documentation")
+     * lived in `AdminSetPresenceDto`'s `@IsIn` decorator and nowhere else.
+     * `instant.dto.ts` states the rule that breaks, on the doctor's own DTO:
+     * "The service re-checks this — the DTO is the first line, not the rule."
+     */
+    it('refuses an admin a state only the system may set — the check is in the service, not only in the DTO', async () => {
+      const { service, facade } = buildHarness({ presence: 'in_consultation' });
+
+      await expect(
+        service.setPresenceAsAdmin(DOCTOR_ID, 'completing_notes' as SelfSettablePresence, ADMIN_ID),
+      ).rejects.toMatchObject({
+        response: expect.objectContaining({ code: INSTANT_ERROR_CODES.PRESENCE_NOT_SELF_SETTABLE }),
+      });
+      expect(facade.transitionPresence).not.toHaveBeenCalled();
+    });
+
+    it('POSITIVE CONTROL: an admin can still force a doctor offline, and it is audited as an admin action', async () => {
+      const { service, facade, state } = buildHarness({ presence: 'available_now' });
+
+      await service.setPresenceAsAdmin(DOCTOR_ID, 'offline', ADMIN_ID);
+
+      expect(state.presence).toBe('offline');
+      expect(facade.transitionPresence).toHaveBeenCalledWith(
+        expect.objectContaining({ actor: { actorType: 'admin', actorId: ADMIN_ID }, reason: 'admin_override' }),
+      );
+    });
+
+    it('*** AN ADMIN CANNOT CLEAR THE COMPLETION GATE EITHER *** — requireNotGated applies to their path too', async () => {
+      const { service } = buildHarness({ presence: 'paused', blockedByConsultationId: CONSULTATION_ID });
+
+      await expect(service.setPresenceAsAdmin(DOCTOR_ID, 'available_now', ADMIN_ID)).rejects.toMatchObject({
+        response: expect.objectContaining({ code: INSTANT_ERROR_CODES.COMPLETION_GATE_ACTIVE }),
+      });
     });
   });
 });

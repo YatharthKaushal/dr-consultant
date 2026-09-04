@@ -354,25 +354,34 @@ export class InstantService {
    * ORDER OF THE POST-COMMIT STEPS, AND WHAT EACH FAILURE LEAVES BEHIND:
    *
    *   a. read the fee            read-only.
-   *   b. create the order        THROWS -> the consultation is untouched and
-   *                              still `awaiting_doctor`. Compensated by
-   *                              RELEASING the request, not by re-routing: a
-   *                              gateway that just failed will fail for the
-   *                              next doctor too, and marching five doctors
-   *                              through an accept that cannot complete is
-   *                              worse for them than telling the patient to
-   *                              try again.
-   *   c. assign the doctor       THROWS (the doctor stopped being listable
-   *                              between the offer and the answer) -> the
-   *                              consultation is untouched. Compensated by
-   *                              re-routing to the NEXT doctor, which is
-   *                              exactly FR-10.6's behaviour and costs the
-   *                              patient nothing.
+   *   b. assign the doctor       THROWS (the doctor stopped being listable
+   *                              between the offer and the answer) -> NOTHING
+   *                              HAS BEEN MINTED. Compensated by re-routing to
+   *                              the NEXT doctor, which is exactly FR-10.6's
+   *                              behaviour and genuinely costs the patient
+   *                              nothing.
+   *   c. create the order        THROWS -> compensated by RELEASING the
+   *                              request, not by re-routing: a gateway that
+   *                              just failed will fail for the next doctor
+   *                              too, and `assignDoctor` refuses a
+   *                              consultation that already has a doctor
+   *                              anyway.
    *   d. move to pending_payment REFUSED (the patient cancelled mid-accept)
    *                              -> compensated, and the doctor is freed.
    *   e. presence                the doctor is committed to this consult.
+   *                              REFUSED -> compensated, because a doctor who
+   *                              accepted but is still routable is the one
+   *                              outcome this step exists to prevent.
    *
-   * Steps c and d both run against a consultation this module verified one
+   * *** b BEFORE c IS THE FIX FOR A REAL FAILURE, NOT A STYLE PREFERENCE. ***
+   * With the order minted first, b's compensation re-routed a consultation
+   * that already had a `payments` row, and `payments.consultation_id` is
+   * UNIQUE — so the next doctor's accept died on `PAYMENT_ALREADY_EXISTS` and
+   * the patient's request was released as "no doctor available", with a live
+   * gateway order and a pinned quote stranded behind it. See step (b) in the
+   * body.
+   *
+   * Steps b and d both run against a consultation this module verified one
    * step earlier, so a THROW from either is an infrastructure failure rather
    * than a business one; the compensation frees the doctor either way, and
    * the payment sweep is the backstop if a payment row was already created.
@@ -392,7 +401,7 @@ export class InstantService {
     // and this module deliberately has no cancel path of its own, so that
     // window is real and ordinary rather than exotic.
     //
-    // Step (d) below would refuse the transition anyway, but by then step (b)
+    // Step (d) below would refuse the transition anyway, but by then step (c)
     // has already minted a gateway order — a `payments` row against a
     // consultation nobody is going to hold, which is a money-shaped mess to
     // unpick and one the patient never asked for. So the status is re-read
@@ -417,8 +426,41 @@ export class InstantService {
       throw instantConsultNotFound();
     }
 
-    // (b) The order. Any throw is compensated and rewrapped — a raw gateway
-    // error must never reach a doctor or a patient.
+    // (b) Attach the doctor. *** THIS RUNS BEFORE THE ORDER IS MINTED, AND
+    // THE ORDER MATTERS — it used to be the other way round. ***
+    //
+    // Assigning is cheap, reversible and touches no money; minting is neither.
+    // With the order first, a doctor who stopped being listable between the
+    // offer and the answer (an admin unlisting them mid-window is enough)
+    // failed HERE, and the compensation re-routed to the next doctor — but
+    // left the `payments` row behind. `payments.consultation_id` is UNIQUE and
+    // `PaymentService#createOrderForConsultation` refuses outright when a row
+    // already exists, so the NEXT doctor's accept died on
+    // `PAYMENT_ALREADY_EXISTS` and the patient's request was released as "no
+    // doctor available" — with a live gateway order and a pinned quote (a
+    // burnt coupon reservation) stranded against a consultation nobody would
+    // ever pay for. The old comment claimed this path "costs the patient
+    // nothing"; it cost them the whole request.
+    //
+    // Assigning first, the re-route is genuinely free: nothing was minted, and
+    // the next doctor's accept mints against a clean consultation.
+    try {
+      await this.bookings.assignDoctor(attempt.consultationId, doctorId);
+    } catch (error) {
+      this.logger.error(`Could not assign doctor ${doctorId} to ${attempt.consultationId}: ${describeError(error)}`);
+      await this.rollbackAccept(attempt, 'assign_doctor_failed');
+      await this.routeNextQuietly(attempt.consultationId, 'assign_doctor_failed');
+      throw new ConflictException({
+        code: INSTANT_ERROR_CODES.INVALID_STATE_TRANSITION,
+        message: 'This request could not be assigned to you. It has been offered to another doctor.',
+      });
+    }
+
+    // (c) The order. Any throw is compensated and rewrapped — a raw gateway
+    // error must never reach a doctor or a patient. Compensated by RELEASING
+    // rather than re-routing: a gateway that just failed will fail for the
+    // next doctor too, and `assignDoctor` refuses a consultation that already
+    // has a doctor, so re-routing could not succeed even if it were wanted.
     try {
       await this.payments.createOrderForConsultation({
         consultationId: attempt.consultationId,
@@ -435,19 +477,6 @@ export class InstantService {
       throw new ConflictException({
         code: INSTANT_ERROR_CODES.PAYMENT_SETUP_FAILED,
         message: 'We could not start payment for this consultation. The request has been released.',
-      });
-    }
-
-    // (c) Attach the doctor.
-    try {
-      await this.bookings.assignDoctor(attempt.consultationId, doctorId);
-    } catch (error) {
-      this.logger.error(`Could not assign doctor ${doctorId} to ${attempt.consultationId}: ${describeError(error)}`);
-      await this.rollbackAccept(attempt, 'assign_doctor_failed');
-      await this.routeNextQuietly(attempt.consultationId, 'assign_doctor_failed');
-      throw new ConflictException({
-        code: INSTANT_ERROR_CODES.INVALID_STATE_TRANSITION,
-        message: 'This request could not be assigned to you. It has been offered to another doctor.',
       });
     }
 
@@ -468,13 +497,44 @@ export class InstantService {
       });
     }
 
-    // (e) The doctor is committed.
-    await this.presence.transition({
+    // (e) *** THE DOCTOR IS COMMITTED, AND THIS WRITE IS CHECKED. ***
+    //
+    // It used to be fire-and-forget, and `in_consultation` was reachable only
+    // from `request_pending`, which together made the following silent: a
+    // doctor whose stream dropped (the disconnect handler writes `offline`) or
+    // who tapped Pause while the offer was open — both legal from
+    // `request_pending` — accepted from a state the table refused, the
+    // refusal was discarded, and the doctor stayed ROUTABLE while holding a
+    // consultation. The router would then offer them a SECOND request.
+    //
+    // The table now admits every state a doctor can answer an offer from
+    // (`instant.constants.ts`), so the only refusals left are a doctor who
+    // owes documentation and a doctor row that vanished — neither of which may
+    // be allowed to stand as "accepted but still in the pool". Both compensate
+    // the whole accept: the consultation goes back out to another doctor, the
+    // patient keeps their request, and nothing is left half-held.
+    const committed = await this.presence.transition({
       doctorId,
       to: 'in_consultation',
       actor: { actorType: 'doctor', actorId: doctorId },
       reason: 'instant_request_accepted',
     });
+    if (!committed.changed && committed.refusal) {
+      this.logger.error(
+        `Doctor ${doctorId} accepted ${attempt.consultationId} but could not be moved to in_consultation ` +
+          `(${committed.refusal} from ${String(committed.before)}); releasing the request rather than leaving them routable.`,
+      );
+      await this.rollbackAccept(attempt, `presence_commit_${committed.refusal}`);
+      await this.releaseRequest(
+        attempt.consultationId,
+        'presence_commit_failed',
+        INSTANT_NOTIFICATION_TEMPLATES.INSTANT_NO_DOCTOR_AVAILABLE,
+      );
+      throw new ConflictException({
+        code: INSTANT_ERROR_CODES.INVALID_STATE_TRANSITION,
+        message: 'We could not start this consultation for you. The request has been released.',
+      });
+    }
 
     this.presence.publish({
       doctorId,
@@ -520,6 +580,11 @@ export class InstantService {
       to: 'available_now',
       actor: { actorType: 'doctor', actorId: doctorId },
       reason: 'instant_request_declined',
+      // Only if they are still HOLDING this offer. A doctor who tapped Pause
+      // or Offline while the offer was open (both legal from
+      // `request_pending`, both self-settable) and only then declined has
+      // asked for two things, and declining must not silently undo the other.
+      onlyFrom: ['request_pending'],
     });
 
     this.presence.publish({
@@ -621,6 +686,11 @@ export class InstantService {
       doctorId: attempt.doctorId,
       to: 'available_now',
       actor: SYSTEM_ACTOR,
+      // Every caller reaches here BEFORE step (e), so the doctor is still
+      // holding the offer this accept opened. Narrowed for the reason
+      // `InstantPresenceService#transition` gives: undoing our own reservation
+      // must not also undo a Pause the doctor asked for themselves.
+      onlyFrom: ['request_pending'],
       reason: `accept_rolled_back_${reason}`,
     });
 
@@ -647,12 +717,35 @@ export class InstantService {
    * re-routes once.
    */
   async timeOutAttempt(attemptId: string): Promise<boolean> {
+    const existing = await this.repo.findAttemptById(attemptId);
+    if (!existing || existing.outcome !== 'pending') return false;
+
+    // *** WHY THE OFFER LAPSED DECIDES WHAT IT IS CALLED. ***
+    //
+    // A doctor whose offer runs out has `timed_out` written against them, and
+    // FR-18.6's acceptance rate is computed straight off these rows
+    // (`doctor-reliability.service.ts`). But an offer also runs out when the
+    // request stopped being routable — the ordinary case is a patient
+    // cancelling through M-11's `POST /bookings/:id/cancel`, which accepts
+    // `awaiting_doctor` and, correctly, knows nothing about this module. The
+    // pending offer is left on a doctor's screen until this sweep reaches it,
+    // and calling that a timeout writes a patient's change of mind into a
+    // doctor's reliability figures.
+    //
+    // `superseded` is the outcome that already means exactly this — see
+    // `instant.repository.ts#supersedePendingAttempts`, which uses it for the
+    // same situation when this module notices first. One extra read per
+    // expiring offer, on a path that already does several.
+    const booking = await this.bookings.getBooking(existing.consultationId);
+    const outcome: 'timed_out' | 'superseded' =
+      booking && booking.status === 'awaiting_doctor' ? 'timed_out' : 'superseded';
+
     const timedOut = await this.db.transaction(async (tx) => {
       const attempt = await this.repo.findAttemptByIdForUpdate(attemptId, tx);
       if (!attempt || attempt.outcome !== 'pending') return null;
       if (attempt.expiresAt.getTime() > Date.now()) return null;
 
-      const settled = await this.repo.updateOutcomeIfIn(attemptId, ['pending'], 'timed_out', {}, tx);
+      const settled = await this.repo.updateOutcomeIfIn(attemptId, ['pending'], outcome, {}, tx);
       if (!settled) return null;
 
       await this.audit.write(
@@ -663,7 +756,7 @@ export class InstantService {
           entityType: INSTANT_AUDIT_ENTITY_TYPES.INSTANT_REQUEST,
           entityId: attemptId,
           consultationId: attempt.consultationId,
-          metadata: { change: 'timed_out', doctorId: attempt.doctorId, attemptNumber: attempt.attemptNumber },
+          metadata: { change: outcome, doctorId: attempt.doctorId, attemptNumber: attempt.attemptNumber },
         },
         tx,
       );
@@ -680,13 +773,20 @@ export class InstantService {
       doctorId: timedOut.doctorId,
       to: 'available_now',
       actor: SYSTEM_ACTOR,
+      // *** ONLY OUT OF `request_pending`. *** This releases the reservation
+      // THIS offer took, and nothing else. `offline` and `paused` are both
+      // legal and self-settable from `request_pending`, so a doctor who was
+      // offered a request and then deliberately went Paused was, before this
+      // narrowing, dragged back into the routing pool by the sweep 60 seconds
+      // later and offered the next request straight away.
+      onlyFrom: ['request_pending'],
       reason: 'instant_request_timed_out',
     });
 
     this.presence.publish({
       doctorId: timedOut.doctorId,
       type: 'instant_request_withdrawn',
-      data: { requestId: timedOut.id, consultationId: timedOut.consultationId, reason: 'timed_out' },
+      data: { requestId: timedOut.id, consultationId: timedOut.consultationId, reason: outcome },
     });
 
     return true;
@@ -827,6 +927,11 @@ export class InstantService {
         doctorId: gate.doctorId,
         to: 'available_now',
         actor: SYSTEM_ACTOR,
+        // The narrowing this method's comment above always described but did
+        // not have: without it, `available_now`'s legal `from` set includes
+        // `offline`, `paused` and `scheduled_only`, so filing paperwork DID
+        // drag a doctor back into the routing pool.
+        onlyFrom: ['completing_notes'],
         reason: 'completion_gate_cleared',
       });
     }
@@ -887,12 +992,50 @@ export class InstantService {
 
   /* ── Helpers ───────────────────────────────────────────────────────────── */
 
-  /** Re-routing that must never take down the caller — a decline whose next offer fails is still a valid decline, and the acceptance sweep will try again. */
+  /**
+   * Re-routing that must never take down the caller — a decline whose next
+   * offer fails is still a valid decline.
+   *
+   * *** IT MUST ALSO NOT STRAND THE REQUEST, WHICH IS WHAT THE `catch` USED TO
+   * DO. *** The old comment here said "the acceptance sweep will try again".
+   * It cannot: `findExpiredPendingAttempts` only ever returns offers whose
+   * `outcome` is still `pending`, and by the time this runs the attempt that
+   * triggered it is `declined`, `timed_out` or `accepted`. So a throw left the
+   * consultation `awaiting_doctor` with NO pending attempt and — because
+   * `awaiting_doctor` carries no `hold_expires_at` — invisible to M-11's hold
+   * sweep and to this module's payment sweep as well. Nothing anywhere would
+   * ever have touched it again, and the patient would sit on a spinner until
+   * they gave up.
+   *
+   * A failed re-route is therefore released, exactly as
+   * `requestInstantConsult` already releases a failed FIRST route: the patient
+   * is told no doctor was available and can ask again, which is strictly
+   * better than a request that is alive on the screen and dead in the
+   * database. The release is itself wrapped, because this method's whole
+   * contract is that it does not throw.
+   *
+   * `sweepStrandedRequests` in `instant-expiry.service.ts` is the durable
+   * backstop for the case this cannot reach — a process that dies mid-saga.
+   */
   private async routeNextQuietly(consultationId: string, reason: string): Promise<void> {
     try {
       await this.routeNext(consultationId, reason);
+      return;
     } catch (error) {
       this.logger.error(`Re-routing consultation ${consultationId} after ${reason} failed: ${describeError(error)}`);
+    }
+
+    try {
+      await this.releaseRequest(
+        consultationId,
+        `reroute_failed_${reason}`,
+        INSTANT_NOTIFICATION_TEMPLATES.INSTANT_NO_DOCTOR_AVAILABLE,
+      );
+    } catch (error) {
+      this.logger.error(
+        `Releasing consultation ${consultationId} after a failed re-route left it stranded in awaiting_doctor; ` +
+          `the stranded-request sweep is the backstop. ${describeError(error)}`,
+      );
     }
   }
 
