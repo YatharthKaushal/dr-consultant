@@ -14,6 +14,7 @@ import { ClinicalModule } from './modules/clinical/clinical.module';
 import { ConsentModule } from './modules/consent/consent.module';
 import { DoctorModule } from './modules/doctor/doctor.module';
 import { DocumentModule } from './modules/document/document.module';
+import { FeedbackModule } from './modules/feedback/feedback.module';
 import { FollowupModule } from './modules/followup/followup.module';
 import { IdentityModule } from './modules/identity/identity.module';
 import { InstantModule } from './modules/instant/instant.module';
@@ -175,6 +176,13 @@ import { ErrorsModule } from './shared/errors/errors.module';
     // Plan's "recommended self-help" section keeps rendering empty via
     // `UnavailableCareHubProvider`, never an error.
     CarehubModule,
+    // M-19: feedback and complaints. Depends on M-02 (via `shared/auth`,
+    // `@Global()`) and M-11 (`BookingModule`, for the one consultation-
+    // ownership read post-consult feedback and a consultation-scoped
+    // complaint each need) per `docs/MODULES.md`. `complaints` is a
+    // pre-existing table this module is the first to use; `feedback` is new
+    // — see `src/schema/feedback.schema.ts`.
+    FeedbackModule,
     HealthModule,
   ],
 })

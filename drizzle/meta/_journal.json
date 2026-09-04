@@ -64,6 +64,13 @@
       "when": 1788505806060,
       "tag": "0008_followup_assignments",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1788534664914,
+      "tag": "0009_quick_omega_red",
+      "breakpoints": true
     }
   ]
 }
