@@ -13,6 +13,7 @@ import { ClinicalModule } from './modules/clinical/clinical.module';
 import { ConsentModule } from './modules/consent/consent.module';
 import { DoctorModule } from './modules/doctor/doctor.module';
 import { DocumentModule } from './modules/document/document.module';
+import { FollowupModule } from './modules/followup/followup.module';
 import { IdentityModule } from './modules/identity/identity.module';
 import { InstantModule } from './modules/instant/instant.module';
 import { McpModule } from './modules/mcp/mcp.module';
@@ -141,6 +142,15 @@ import { ErrorsModule } from './shared/errors/errors.module';
     // consultation to `completed`. Both are consequences of
     // `ClinicalService#finalise`, not of anything added to those modules.
     ClinicalModule,
+    // M-16: seven-day follow-up, safety alerts and the Care Plan composition.
+    // Listed after BookingModule, ClinicalModule and NotificationModule
+    // because it consumes all three facades directly — ordering is for
+    // readability, not correctness, since Nest resolves the provider graph
+    // regardless.
+    //
+    // `FollowupFacade.assignPathway` is wired to `ClinicalService#finalise`
+    // via `CLINICAL_RECORD_FINALISED_EVENT` — see `followup-clinical.listener.ts`.
+    FollowupModule,
     // M-17: case clarification. After DoctorModule and ClinicalModule
     // because it consumes both facades — ordering is for readability, not
     // correctness, since Nest resolves the provider graph regardless.
