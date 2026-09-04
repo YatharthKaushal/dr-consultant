@@ -40,10 +40,17 @@ import { VideoWebhookService, type VideoWebhookResult } from './video-webhook.se
  *      empty `participant` — the handler would see a well-formed event with no
  *      participant in it. Taking the body raw makes that impossible.
  *
- * *** This endpoint returns 2xx for everything except a bad signature. ***
+ * *** This endpoint returns 2xx for everything except a rejected signature. ***
  * LiveKit retries on a non-2xx, and a retry storm on an event that will never
  * process helps nobody. See `video-webhook.service.ts` for the one honest cost
- * of that choice.
+ * of that choice, and for the one case where this route answers 401 while the
+ * payment webhook would answer 2xx.
+ *
+ * Verified against a booted server, not inferred: an unsigned, wrongly-signed
+ * and tampered-body delivery each answer `401
+ * VIDEO_WEBHOOK_SIGNATURE_INVALID`, and a delivery signed the way LiveKit's own
+ * server signs one (a JWT whose `sha256` claim is the digest of the exact
+ * bytes) answers 200.
  *
  * `@HttpCode(200)` rather than Nest's default 201 for a `@Post`: nothing here
  * is CREATED from the caller's point of view, and a 201 on a webhook is the
