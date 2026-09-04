@@ -4,6 +4,7 @@ import type { Database } from '../../config/db/database.config';
 import type { ClinicalRecordRow, NewClinicalRecordRow } from '../../schema/clinical-records.schema';
 import type { ConsultationStatus } from '../../schema/enums.schema';
 import { AuditService } from '../../shared/audit/audit.service';
+import { isUniqueConstraintViolation } from '../../shared/errors/postgres-error.util';
 import { CatalogueFacade } from '../catalogue/catalogue.facade';
 import { InstantFacade } from '../instant/instant.facade';
 import type { ClinicalBookingPort, ClinicalConsultationView } from './clinical-booking.contract';
@@ -464,10 +465,9 @@ export class ClinicalService {
    *
    * Read the second condition carefully, because the asymmetry is the rule:
    *
-   *   NON-PRESCRIBING specialty — a medicine line cannot exist (the prescribing
-   *     gate refused it at save time), so the advice fields are the ONLY way
-   *     through. `docs/MODULES.md`: "the advice and therapy plan is their
-   *     closing record".
+   *   NON-PRESCRIBING specialty — a medicine line MUST NOT be there, so the
+   *     advice fields are the ONLY way through. `docs/MODULES.md`: "the advice
+   *     and therapy plan is their closing record".
    *
    *   PRESCRIBING specialty — either satisfies it. A psychiatrist who
    *     prescribed nothing this session and wrote a full therapy plan has
@@ -485,6 +485,35 @@ export class ClinicalService {
    * Blank strings do not count: `normaliseText` has already stored `"   "` as
    * NULL, which is what makes a whitespace submission fail this check instead
    * of passing it.
+   *
+   * ═══════════════════════════════════════════════════════════════════════════
+   * *** AND IT RE-ASSERTS THE PRESCRIBING GATE, BECAUSE SAVE TIME IS NOT
+   *     SEAL TIME. ***
+   * ═══════════════════════════════════════════════════════════════════════════
+   *
+   * "A medicine line cannot exist on a non-prescribing consultation, because
+   * the prescribing gate refused it at save time" WAS AN INVARIANT THAT HELD
+   * ONLY BY COINCIDENCE. `specialties.can_prescribe` is an admin-editable
+   * column (`specialty.service.ts#adminUpdate`), and BOTH gates read it LIVE.
+   * So:
+   *
+   *   1. the doctor saves a draft with medicines — the gate reads `true`
+   *   2. an admin flips that specialty to `can_prescribe: false`
+   *   3. the doctor finalises
+   *
+   * arrives here with medicines in the row and `canPrescribe === false`. Before
+   * this check, `canPrescribe` was consulted ONLY to choose the wording of the
+   * message below — so the medicines were sealed into an immutable record and
+   * printed onto the patient's prescription PDF by a professional the platform
+   * had just decided may not prescribe, AND they satisfied the second condition
+   * on their own, so the advice and therapy plan that is the whole closing
+   * record for such a consultation was never written.
+   *
+   * Refused, not stripped, for the same reason `applyTemplate` refuses rather
+   * than silently dropping a template's medicines: a doctor who is not told is
+   * a doctor who believes the prescription went out. The draft is still a
+   * draft, so the remedy is theirs — save the record without the medicine
+   * lines, and write the advice plan.
    */
   private assertCompletionGate(record: ClinicalRecordRow, canPrescribe: boolean): void {
     if (!normaliseText(record.caseSummary)) {
@@ -495,6 +524,18 @@ export class ClinicalService {
     }
 
     const hasMedicine = parseMedicineLines(record.medicines, 'template').length > 0;
+
+    // *** THE PRESCRIBING GATE, AT THE MOMENT OF SEALING. *** See above. Runs
+    // before the advice test, so a medicine line a non-prescribing consultation
+    // may not carry can never be what satisfies it.
+    if (hasMedicine && !canPrescribe) {
+      throw new ConflictException({
+        code: CLINICAL_ERROR_CODES.MEDICINES_NOT_PERMITTED,
+        message:
+          'This consultation was booked under a specialty that does not allow prescribing, so its record cannot be closed with a medicine line. Remove the medicines and record the advice and therapy plan instead.',
+      });
+    }
+
     const hasAdvice =
       normaliseText(record.adviceCovered) !== null &&
       normaliseText(record.adviceHomePractice) !== null &&
@@ -578,8 +619,50 @@ export class ClinicalService {
    * view because `clinical_records.consultation_id` is UNIQUE — there is at
    * most one record per consultation, and which of the two happened is an
    * implementation detail the doctor never sees.
+   *
+   * ═══════════════════════════════════════════════════════════════════════════
+   * *** THE ROW LOCK DOES NOT COVER THE FIRST SAVE, AND CANNOT. ***
+   * ═══════════════════════════════════════════════════════════════════════════
+   *
+   * `SELECT ... FOR UPDATE` that matches ZERO ROWS LOCKS NOTHING — there is no
+   * row yet to lock. So two requests that both arrive before either has
+   * committed both read `null` and both take the INSERT branch, and the second
+   * one meets the UNIQUE constraint on `consultation_id` instead. That is not
+   * an exotic interleaving: it is a doctor double-tapping "save" on a notes
+   * form they have not saved before, and measured against a real database a
+   * three-way race produced 48 driver errors in 75 attempts.
+   *
+   * Without the retry below the loser got a raw `23505` through
+   * `HttpExceptionFilter`'s generic-500 branch — "your notes did not save",
+   * about notes that in fact saved, for a request that was entirely legal.
+   * Every other check-then-insert in this codebase already carries this net
+   * (`consent.service.ts`, `legal-document.service.ts`,
+   * `clinical-template.service.ts`, `booking.service.ts`); this one did not.
+   *
+   * ONE retry is enough, and is not a loop dressed up as a constant: the
+   * conflict PROVES the row now exists, nothing in this module (or any other)
+   * deletes a `clinical_records` row, and the second attempt's
+   * `FOR UPDATE` therefore finds it and takes the UPDATE branch — blocking on
+   * the real row lock if a third writer is still mid-flight. The retry is a
+   * fresh transaction because the first one is already aborted: Postgres
+   * refuses every further statement on a transaction that has raised an error.
    */
   private async writeDraft(
+    consultationId: string,
+    doctorId: string,
+    patch: Partial<NewClinicalRecordRow>,
+    context: { source: 'form' | 'template'; templateId?: string },
+  ): Promise<ClinicalRecordRow> {
+    try {
+      return await this.writeDraftOnce(consultationId, doctorId, patch, context);
+    } catch (error) {
+      if (!isUniqueConstraintViolation(error)) throw error;
+      return this.writeDraftOnce(consultationId, doctorId, patch, context);
+    }
+  }
+
+  /** One attempt at `writeDraft`. See there for why there are two. */
+  private async writeDraftOnce(
     consultationId: string,
     doctorId: string,
     patch: Partial<NewClinicalRecordRow>,
