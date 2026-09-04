@@ -619,6 +619,52 @@ describe('ClinicalService', () => {
   /* Drafts                                                                  */
   /* ═══════════════════════════════════════════════════════════════════════ */
 
+  /* ═══════════════════════════════════════════════════════════════════════ */
+  /* THE M-21 READ-AUDIT GAP: `getOwnRecord` (the treating doctor's own view) */
+  /* now leaves a trace, the same way `getRecordForAdmin`'s already does.    */
+  /* ═══════════════════════════════════════════════════════════════════════ */
+
+  describe("the treating doctor's own read (getOwnRecord)", () => {
+    it('audits a read of an existing record as the treating doctor', async () => {
+      const deps = createDeps();
+      deps.bookings.getBooking.mockResolvedValue(consultation());
+      deps.repo.findByConsultationId.mockResolvedValue(record());
+
+      await deps.service.getOwnRecord(CONSULTATION_ID, DOCTOR_ID);
+
+      expect(deps.audit.write).toHaveBeenCalledWith(
+        expect.objectContaining({
+          actorType: 'doctor',
+          actorId: DOCTOR_ID,
+          action: 'read',
+          entityType: 'clinical_record',
+          entityId: RECORD_ID,
+          consultationId: CONSULTATION_ID,
+        }),
+      );
+    });
+
+    it('writes no audit entry when there is no record yet to have read', async () => {
+      const deps = createDeps();
+      deps.bookings.getBooking.mockResolvedValue(consultation());
+      deps.repo.findByConsultationId.mockResolvedValue(null);
+
+      const result = await deps.service.getOwnRecord(CONSULTATION_ID, DOCTOR_ID);
+
+      expect(result).toBeNull();
+      expect(deps.audit.write).not.toHaveBeenCalled();
+    });
+
+    it('404s before reading or auditing anything when the consultation is not this doctor’s', async () => {
+      const deps = createDeps();
+      deps.bookings.getBooking.mockResolvedValue(consultation({ doctorId: OTHER_DOCTOR_ID }));
+
+      await expectCode(deps.service.getOwnRecord(CONSULTATION_ID, DOCTOR_ID), CLINICAL_ERROR_CODES.CONSULTATION_NOT_FOUND);
+      expect(deps.repo.findByConsultationId).not.toHaveBeenCalled();
+      expect(deps.audit.write).not.toHaveBeenCalled();
+    });
+  });
+
   describe('saving a draft', () => {
     it('refuses to edit a record that is already finalised', async () => {
       const deps = createDeps();

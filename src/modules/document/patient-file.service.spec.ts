@@ -7,7 +7,7 @@ import type { AuditService } from '../../shared/audit/audit.service';
 import type { AuthContext } from '../../shared/auth/auth.types';
 import type { ConsultationLookupPort, ConsultationSummary } from './consultation-lookup.provider';
 import type { DocumentStoragePort } from './document-storage.contract';
-import { DOCUMENT_ERROR_CODES } from './document.constants';
+import { DOCUMENT_AUDIT_ENTITY_TYPES, DOCUMENT_ERROR_CODES } from './document.constants';
 import { PatientFileService, type UploadFileInput } from './patient-file.service';
 import type { PatientFileRepository } from './patient-file.repository';
 import type { ReportRequestRepository } from './report-request.repository';
@@ -588,6 +588,74 @@ describe('PatientFileService.getDownloadUrl', () => {
 
     expect(result.url).toBe('https://signed.example/file');
     expect(result.expiresAt).toBeInstanceOf(Date);
+  });
+
+  /* ------------------------------------------------------------------ */
+  /* THE M-21 READ-AUDIT SEAM: a `prescription_pdf` download is the same */
+  /* sensitivity class `clinical.service.ts` audits its own reads for.  */
+  /* ------------------------------------------------------------------ */
+
+  it('audits a prescription_pdf download by its owning patient', async () => {
+    const { service, repo, storage, audit } = createService();
+    repo.findById.mockResolvedValue(
+      fileRow({ id: 'rx-1', patientId: PATIENT_ID, fileCategory: 'prescription_pdf', consultationId: CONSULTATION_ID }),
+    );
+    storage.getSignedUrl.mockResolvedValue('https://signed.example/rx');
+
+    await service.getDownloadUrl(auth('patient', PATIENT_ID), 'rx-1');
+
+    expect(audit.write).toHaveBeenCalledWith(
+      expect.objectContaining({
+        actorType: 'patient',
+        actorId: PATIENT_ID,
+        action: 'read',
+        entityType: DOCUMENT_AUDIT_ENTITY_TYPES.PATIENT_FILE,
+        entityId: 'rx-1',
+        consultationId: CONSULTATION_ID,
+      }),
+    );
+  });
+
+  it('audits a prescription_pdf download by the treating doctor', async () => {
+    const { service, repo, consultationLookup, storage, audit } = createService();
+    repo.findById.mockResolvedValue(fileRow({ id: 'rx-1', patientId: PATIENT_ID, fileCategory: 'prescription_pdf' }));
+    consultationLookup.listConsultationIdsBetween.mockResolvedValue([CONSULTATION_ID]);
+    storage.getSignedUrl.mockResolvedValue('https://signed.example/rx');
+
+    await service.getDownloadUrl(auth('doctor', DOCTOR_ID), 'rx-1');
+
+    expect(audit.write).toHaveBeenCalledWith(expect.objectContaining({ actorType: 'doctor', actorId: DOCTOR_ID, action: 'read' }));
+  });
+
+  it('audits a prescription_pdf download by a permitted admin', async () => {
+    const { service, repo, identity, storage, audit } = createService();
+    repo.findById.mockResolvedValue(fileRow({ id: 'rx-1', patientId: PATIENT_ID, fileCategory: 'prescription_pdf' }));
+    identity.hasPermission.mockResolvedValue(true);
+    storage.getSignedUrl.mockResolvedValue('https://signed.example/rx');
+
+    await service.getDownloadUrl(auth('admin', 'admin-1'), 'rx-1');
+
+    expect(audit.write).toHaveBeenCalledWith(expect.objectContaining({ actorType: 'admin', actorId: 'admin-1', action: 'read' }));
+  });
+
+  it('does NOT audit a download of any other file category — narrowed the same way the permission gate is', async () => {
+    const { service, repo, storage, audit } = createService();
+    repo.findById.mockResolvedValue(fileRow({ patientId: PATIENT_ID, fileCategory: 'medical_history' }));
+    storage.getSignedUrl.mockResolvedValue('https://signed.example/file');
+
+    await service.getDownloadUrl(auth('patient', PATIENT_ID), 'file-1');
+
+    expect(audit.write).not.toHaveBeenCalled();
+  });
+
+  it('does not audit a prescription_pdf download that is refused', async () => {
+    const { service, repo, identity, storage, audit } = createService();
+    repo.findById.mockResolvedValue(fileRow({ patientId: PATIENT_ID, fileCategory: 'prescription_pdf' }));
+    identity.hasPermission.mockResolvedValue(false);
+
+    await expect(service.getDownloadUrl(auth('admin', 'admin-1'), 'file-1')).rejects.toMatchObject({ status: 404 });
+    expect(storage.getSignedUrl).not.toHaveBeenCalled();
+    expect(audit.write).not.toHaveBeenCalled();
   });
 
   it('rejects a different patient (404, never 403 — does not confirm the file exists)', async () => {
