@@ -143,13 +143,24 @@ export class PromotionService {
     context: DiscountOrderContext,
     ipAddress: string | null,
   ): Promise<DiscountEvaluation> {
-    const outcome = await this.evaluateCode(code, context, ipAddress);
-    // *** EXACTLY ONE ATTEMPT ROW PER CALL, WHATEVER THE OUTCOME. *** Recording
-    // in each branch instead would double-count some paths and under-count
-    // others, and a throttle whose arithmetic depends on which refusal fired is
-    // a throttle an attacker can steer.
-    await this.recordAttempt(context.patientId, ipAddress, outcome.applicable ? 'resolved' : 'refused');
-    return outcome;
+    // *** EXACTLY ONE ATTEMPT ROW PER CALL, OPENED BEFORE ANYTHING IS DECIDED. ***
+    // Opening it first is what makes the throttle a throttle — see
+    // `checkThrottle`. Recording per branch instead would double-count some
+    // paths and under-count others, and a throttle whose arithmetic depends on
+    // which refusal fired is a throttle an attacker can steer.
+    const attemptId = await this.openAttempt(context.patientId, ipAddress);
+    try {
+      const outcome = await this.evaluateCode(code, context, ipAddress);
+      await this.settleAttempt(attemptId, outcome.applicable ? 'resolved' : 'refused');
+      return outcome;
+    } catch (error) {
+      // A malformed base throws (`parseDiscountableBase`). The attempt still
+      // happened, so it stays counted — a caller hammering the endpoint with
+      // rubbish bodies must not get a free budget — and it is labelled
+      // `refused`, because nothing resolved.
+      await this.settleAttempt(attemptId, 'refused');
+      throw error;
+    }
   }
 
   /** The evaluation half of `preview`, without the attempt bookkeeping — so `reserve` can reuse the refusal wording without recording a second attempt. */
@@ -204,9 +215,16 @@ export class PromotionService {
     consultationId: string;
     holdExpiresAt: Date;
   }): Promise<DiscountReservationResult> {
-    const outcome = await this.attemptReserve(input);
-    await this.recordAttempt(input.context.patientId, null, outcome.reserved ? 'resolved' : 'refused');
-    return outcome;
+    // Opened before the throttle count, exactly as `previewForPatient` does.
+    const attemptId = await this.openAttempt(input.context.patientId, null);
+    try {
+      const outcome = await this.attemptReserve(input);
+      await this.settleAttempt(attemptId, outcome.reserved ? 'resolved' : 'refused');
+      return outcome;
+    } catch (error) {
+      await this.settleAttempt(attemptId, 'refused');
+      throw error;
+    }
   }
 
   /** The reservation itself, without the attempt bookkeeping. One record point lives in `reserve` above. */
@@ -977,45 +995,81 @@ export class PromotionService {
    * controller, which does see a request IP, throttles on both. The
    * unauthenticated probing the IP limit defends against cannot reach the
    * pricing path in the first place, because that path requires a `patientId`.
+   *
+   * ── *** THE CALLER'S OWN ATTEMPT ROW IS ALREADY WRITTEN, AND IS COUNTED. *** ──
+   *
+   * This used to count BEFORE the attempt was recorded, and that made the
+   * throttle decorative: sixty concurrent `preview` calls all read the same
+   * pre-write total, all passed a budget of twenty, and all sixty rows landed
+   * afterwards. A rate limiter that only holds against a caller who waits their
+   * turn does not limit the caller it exists to stop — and walking the code
+   * namespace at full parallelism is exactly what
+   * `promotion-code-attempts.schema.ts` says this table is here to prevent.
+   *
+   * `openAttempt` now inserts the row FIRST, on this module's own connection, so
+   * it is committed and visible before this count runs. If a caller's insert is
+   * the k-th to commit in the window, its own count sees at least k rows — so
+   * the number that can get through is bounded by the budget rather than by how
+   * many requests an attacker is willing to issue at once. That is also why the
+   * comparison is `>` and not `>=`: the count now INCLUDES this call.
+   *
+   * (`identity.service.ts#requestOtp` records before it acts for the same
+   * reason. It is the codebase's convention, and this file had drifted from it.)
    */
   private async checkThrottle(patientId: string, ipAddress: string | null): Promise<DiscountRefusal | null> {
     const config = await this.config.getResolved();
     const since = new Date(Date.now() - ATTEMPT_WINDOW_MS);
 
     const patientCount = await this.repo.countRecentAttemptsByPatient(patientId, since);
-    if (patientCount >= config.codeAttemptsPerPatientPerHour) return this.refuse('TOO_MANY_ATTEMPTS');
+    if (patientCount > config.codeAttemptsPerPatientPerHour) return this.refuse('TOO_MANY_ATTEMPTS');
 
     if (ipAddress !== null) {
       const ipCount = await this.repo.countRecentAttemptsByIp(ipAddress, since);
-      if (ipCount >= config.codeAttemptsPerIpPerHour) return this.refuse('TOO_MANY_ATTEMPTS');
+      if (ipCount > config.codeAttemptsPerIpPerHour) return this.refuse('TOO_MANY_ATTEMPTS');
     }
 
     return null;
   }
 
   /**
-   * Records one attempt, best-effort.
+   * Opens one attempt row, best-effort, BEFORE anything is counted or resolved.
    *
    * Written on this module's own connection, NEVER inside a caller's
    * transaction: an attempt that was made is a fact, and a reservation that
    * rolls back must not erase the evidence that somebody tried — which is
    * precisely the evasion a transactional throttle would permit.
    *
-   * A failure here is logged and swallowed. `AuditService`'s best-effort mode
-   * gives the reasoning: failing a patient's checkout because a rate-limit
-   * bookkeeping row would not insert is a self-inflicted outage, and the
-   * throttle degrades to "slightly more permissive for one attempt" rather than
-   * to "nothing works".
+   * A failure here is logged and swallowed, and returns `null`. `AuditService`'s
+   * best-effort mode gives the reasoning: failing a patient's checkout because a
+   * rate-limit bookkeeping row would not insert is a self-inflicted outage, and
+   * the throttle degrades to "one attempt more permissive" rather than to
+   * "nothing works".
    */
-  private async recordAttempt(
-    patientId: string | null,
-    ipAddress: string | null,
-    outcome: 'resolved' | 'refused',
-  ): Promise<void> {
+  private async openAttempt(patientId: string | null, ipAddress: string | null): Promise<number | null> {
     try {
-      await this.repo.recordCodeAttempt({ patientId, ipAddress, outcome });
+      return await this.repo.recordCodeAttempt({ patientId, ipAddress, outcome: 'pending' });
     } catch (error) {
       this.logger.error(`Could not record a promotion code attempt (best-effort, swallowed): ${describeError(error)}`);
+      return null;
+    }
+  }
+
+  /**
+   * Settles an open attempt's outcome.
+   *
+   * *** BOTH OUTCOMES ARE RECORDED, AND BOTH WERE ALREADY COUNTED. ***
+   * `promotion-code-attempts.schema.ts`: "A throttle that only counts failures
+   * is trivially evaded" — an attacker interleaves known-good codes to keep
+   * their failure count under the limit. This write only labels the row; the
+   * enforcement happened when it was opened, which is why failing it is
+   * survivable.
+   */
+  private async settleAttempt(attemptId: number | null, outcome: 'resolved' | 'refused'): Promise<void> {
+    if (attemptId === null) return;
+    try {
+      await this.repo.markCodeAttemptOutcome(attemptId, outcome);
+    } catch (error) {
+      this.logger.error(`Could not settle a promotion code attempt outcome (best-effort, swallowed): ${describeError(error)}`);
     }
   }
 
