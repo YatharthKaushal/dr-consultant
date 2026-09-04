@@ -30,9 +30,46 @@ import { findUnicodeFont, renderPrescriptionPdf, type PrescriptionDocumentData }
  * `DocumentContract.writePrescriptionPdf` is the counterpart door — the only
  * way such a row is ever created. This module never touches `patient_files`,
  * never mints a storage key, and never learns one: retrieval is the existing
- * access-controlled signed-URL path (`GET /documents/:id/download`, FR-6.1),
- * which already admits the owning patient, the treating doctor and an admin,
- * and admits nobody else.
+ * access-controlled signed-URL path (`GET /documents/:id/download`, FR-6.1).
+ *
+ * ── *** WHO THAT PATH ACTUALLY ADMITS. READ THIS BEFORE QUOTING IT. *** ────
+ *
+ * This header used to say it "admits the owning patient, the treating doctor
+ * and an admin, and admits nobody else". Verified against
+ * `patient-file.service.ts#canAccessForDownload`, TWO THIRDS OF THAT WAS
+ * WRONG, and M-10's own route comment says so plainly ("Patient owner,
+ * treating doctor (ANY consultation with this patient), or admin"). The real
+ * predicate is:
+ *
+ *   patient  `file.patientId === auth.accountId`. Sound: another patient
+ *            cannot reach this file by id, and an unknown id, a deleted file
+ *            and someone else's file all return the same 404.
+ *
+ *   doctor   NOT the treating doctor of THIS consultation. Any doctor who
+ *            shares ANY `consultations` row with the patient, in ANY status
+ *            — `pending_payment` and `cancelled` included — passes
+ *            (`consultation-lookup.provider.ts#listConsultationIdsBetween`).
+ *
+ *   admin    `if (auth.accountType === 'admin') return true;` — the route
+ *            carries NO `@RequirePermission` at all.
+ *
+ * *** THE THIRD LINE IS A HOLE IN THIS MODULE'S OWN BOUNDARY, AND IT IS M-10'S
+ *     TO CLOSE. *** `clinical-admin.controller.ts` spends its whole header
+ * establishing that `care_coordinator` deliberately does NOT hold
+ * `clinical.read_records` — "a coordinator acts on the alert without reading
+ * the notes behind it", SRS §6.2's minimum-necessary rule. But the PDF this
+ * class renders carries the diagnosis and its provisional flag, the risk
+ * category, the referral note, every medicine line and the whole
+ * advice/warning-signs plan. So the content that permission protects walks out
+ * of the softer door: a `care_coordinator` — or an `operations`, `finance` or
+ * `content` admin, or an admin with an empty permission set — can mint a
+ * signed URL for any patient's prescription.
+ *
+ * Not fixed here, because it must not be: a second access rule for
+ * `patient_files` living in M-15 is exactly the "second place that decides who
+ * may read a prescription" this module refuses to become. The fix is one
+ * branch in `canAccessForDownload` — require `clinical.read_records` of an
+ * admin reading `file_category = 'prescription_pdf'` — and it belongs to M-10.
  *
  * ── EVERY FAILURE HERE IS SURVIVABLE, ON PURPOSE ───────────────────────────
  *
@@ -42,8 +79,20 @@ import { findUnicodeFont, renderPrescriptionPdf, type PrescriptionDocumentData }
  * doctor's completion gate from clearing. The record is the source of truth and
  * the PDF is derived from it, so the PDF can always be produced again:
  * `POST /consultations/:id/clinical-record/prescription-pdf` re-runs exactly
- * this path, and `writePrescriptionPdf` is idempotent, so a retry cannot fork
- * one consultation into two prescriptions.
+ * this path, and `writePrescriptionPdf` returns the existing row rather than
+ * minting a second.
+ *
+ * *** THAT IDEMPOTENCE IS SEQUENTIAL ONLY, AND THIS MODULE IS ITS ONLY
+ *     CALLER. *** `patient-file.service.ts#writePrescriptionPdf` is a
+ * check-then-insert (`findByConsultationAndCategory`, then `create`) and
+ * `patient_files` carries only a PLAIN `index().on(consultation_id)` — no
+ * unique constraint on `(consultation_id, file_category)` for the second
+ * writer to lose against. Two concurrent calls both miss the SELECT and both
+ * insert, and the patient's `GET /documents/me` then lists two prescriptions
+ * for one consultation. Reachable two ways from here: a doctor double-tapping
+ * the retry route, and that route firing while `finalise`'s own generation is
+ * still uploading. Not fixed in M-15 — the guard belongs beside the write it
+ * guards, as a partial unique index or an advisory lock in M-10.
  */
 @Injectable()
 export class ClinicalPdfService {

@@ -521,6 +521,85 @@ describe('ClinicalService', () => {
       // No specialty lookup is even needed when there are no medicines to gate.
       expect(deps.catalogue.getSpecialtyById).not.toHaveBeenCalled();
     });
+
+    /* ═════════════════════════════════════════════════════════════════════ */
+    /* ANGLE 4: THE SPECIALTY CHANGED BETWEEN THE DRAFT AND THE FINALISE.    */
+    /*                                                                       */
+    /* `specialties.can_prescribe` is an ADMIN-EDITABLE COLUMN               */
+    /* (`specialty.service.ts#adminUpdate`), and this gate reads it LIVE on  */
+    /* every call rather than from a snapshot. So the sequence               */
+    /*                                                                       */
+    /*   1. doctor saves a draft with medicines — gate passes, `true`        */
+    /*   2. an admin flips the specialty to `can_prescribe: false`           */
+    /*   3. doctor finalises                                                 */
+    /*                                                                       */
+    /* reaches `finalise` with medicines already in the row and              */
+    /* `canPrescribe === false`. `finalise` re-reads the gate — and before   */
+    /* this block existed it used the answer ONLY to pick an error message.  */
+    /* Nothing refused, so the medicines were sealed into an immutable       */
+    /* record and printed onto the patient's prescription PDF.               */
+    /* ═════════════════════════════════════════════════════════════════════ */
+
+    it('ANGLE 4: refuses to FINALISE medicines the consultation may no longer carry', async () => {
+      const deps = createDeps();
+      // Medicines already in the row from when the specialty still allowed
+      // them; `canPrescribe` is now false.
+      arrangeFinalisable(deps, record({ medicines: [MEDICINE], caseSummary: 'Stable. Continue plan.' }), false);
+
+      await expectCode(
+        deps.service.finalise(CONSULTATION_ID, DOCTOR_ID),
+        CLINICAL_ERROR_CODES.MEDICINES_NOT_PERMITTED,
+      );
+      expect(deps.repo.finalise).not.toHaveBeenCalled();
+      expect(deps.instant.clearCompletionGate).not.toHaveBeenCalled();
+      expect(deps.pdf.generateForConsultation).not.toHaveBeenCalled();
+    });
+
+    it('ANGLE 4b: those medicines do not satisfy the completion gate either — the advice plan is still owed', async () => {
+      const deps = createDeps();
+      arrangeFinalisable(deps, record({ medicines: [MEDICINE], caseSummary: 'Stable. Continue plan.' }), false);
+
+      // The record has NO advice at all. `docs/MODULES.md` says the advice and
+      // therapy plan IS a non-prescribing professional's closing record, and
+      // the gate's own doc comment leans on "a medicine line cannot exist" for
+      // such a consultation. It can, so the gate must not accept one.
+      await expect(deps.service.finalise(CONSULTATION_ID, DOCTOR_ID)).rejects.toBeInstanceOf(ConflictException);
+      expect(deps.repo.finalise).not.toHaveBeenCalled();
+    });
+
+    it('ANGLE 4c: the refusal survives the row lock — it is re-checked against the LOCKED row, not only the pre-flight one', async () => {
+      const deps = createDeps();
+      // Clean pre-flight row (no medicines, full advice) passes the cheap
+      // check; the row read FOR UPDATE is the one carrying the medicines.
+      arrangeFinalisable(deps, record({ ...FULL_ADVICE, caseSummary: 'Stable.' }), false);
+      deps.repo.findByConsultationIdForUpdate.mockResolvedValue(
+        record({ ...FULL_ADVICE, caseSummary: 'Stable.', medicines: [MEDICINE] }),
+      );
+
+      await expectCode(
+        deps.service.finalise(CONSULTATION_ID, DOCTOR_ID),
+        CLINICAL_ERROR_CODES.MEDICINES_NOT_PERMITTED,
+      );
+      expect(deps.repo.finalise).not.toHaveBeenCalled();
+    });
+
+    it('POSITIVE CONTROL: a prescribing consultation still finalises on its medicines alone', async () => {
+      const deps = createDeps();
+      arrangeFinalisable(deps, record({ medicines: [MEDICINE], caseSummary: 'Stable. Continue plan.' }), true);
+
+      await expect(deps.service.finalise(CONSULTATION_ID, DOCTOR_ID)).resolves.toMatchObject({
+        record: { finalisedAt: expect.any(Date) },
+      });
+    });
+
+    it('POSITIVE CONTROL: a non-prescribing consultation with no medicines is untouched by ANGLE 4', async () => {
+      const deps = createDeps();
+      arrangeFinalisable(deps, record({ ...FULL_ADVICE, caseSummary: 'Stable. Continue plan.' }), false);
+
+      await expect(deps.service.finalise(CONSULTATION_ID, DOCTOR_ID)).resolves.toMatchObject({
+        record: { finalisedAt: expect.any(Date) },
+      });
+    });
   });
 
   /* ═══════════════════════════════════════════════════════════════════════ */
