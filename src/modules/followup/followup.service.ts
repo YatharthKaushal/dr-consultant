@@ -157,11 +157,23 @@ export class FollowupService {
     answers: unknown;
     actorPatientId: string;
   }): Promise<SubmitCheckinResult> {
+    // *** OWNERSHIP FIRST, ALWAYS. *** Checked before the assignment even
+    // exists is looked up — not after — so a consultation that is not this
+    // patient's produces the SAME `consultationNotFound()` 404 regardless of
+    // whether it has no assignment, an inactive one, or an active one. Doing
+    // the assignment/status checks first (as this method used to) turned
+    // them into an oracle: a caller supplying a STRANGER's consultationId
+    // could distinguish "no follow-up assigned yet" (ASSIGNMENT_NOT_FOUND)
+    // from "assigned but window closed" (403 CHECKIN_OUTSIDE_WINDOW) from
+    // "assigned and open" (falls through to the real ownership check below)
+    // — three distinguishable outcomes for a consultation the caller does
+    // not own, in violation of `followup.controller.ts`'s own header:
+    // "the SAME 404 a stranger gets for a consultation that is not theirs."
+    const booking = await this.assertPatientOwnsConsultation(input.consultationId, input.actorPatientId);
+
     const assignment = await this.repo.findAssignmentByConsultationId(input.consultationId);
     if (!assignment) throw this.assignmentNotFound();
     if (assignment.status !== 'active') throw this.checkinOutsideWindow();
-
-    const booking = await this.assertPatientOwnsConsultation(input.consultationId, input.actorPatientId);
 
     const pathway = await this.pathways.getByIdOrThrow(assignment.pathwayId);
     const questions = pathway.questions as FollowupQuestion[];
