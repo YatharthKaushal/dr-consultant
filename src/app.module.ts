@@ -7,6 +7,7 @@ import { HealthModule } from './health/health.module';
 import { AiModule } from './modules/ai/ai.module';
 import { AvailabilityModule } from './modules/availability/availability.module';
 import { BookingModule } from './modules/booking/booking.module';
+import { CarehubModule } from './modules/carehub/carehub.module';
 import { CatalogueModule } from './modules/catalogue/catalogue.module';
 import { ClarificationModule } from './modules/clarification/clarification.module';
 import { ClinicalModule } from './modules/clinical/clinical.module';
@@ -160,6 +161,20 @@ import { ErrorsModule } from './shared/errors/errors.module';
     // verified against a booking — see
     // `clarification.service.ts#assertSourceConsultationExists`.
     ClarificationModule,
+    // M-18: Care Hub — the education/self-help library and the mechanism by
+    // which a doctor recommends items from it (FR-15.4). Depends on M-02
+    // (via `shared/auth`, `@Global()`) and M-06 (`CatalogueModule`) per
+    // `docs/MODULES.md`; also imports `BookingModule` for the one
+    // consultation-ownership read the doctor recommendation write path
+    // needs (`BookingFacade.getBooking`) — see `carehub.module.ts`.
+    //
+    // *** `CARE_HUB_PORT` IN `modules/followup` IS NOT REBOUND HERE. *** That
+    // is the coordinator's one-line change in `followup.module.ts`
+    // (`{ provide: CARE_HUB_PORT, useExisting: CareHubFacade }`), same as
+    // every other port handover in this codebase. Until then the Care
+    // Plan's "recommended self-help" section keeps rendering empty via
+    // `UnavailableCareHubProvider`, never an error.
+    CarehubModule,
     HealthModule,
   ],
 })
