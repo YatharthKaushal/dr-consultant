@@ -33,6 +33,7 @@ import {
 
 const DOCTOR_ID = '11111111-1111-4111-8111-111111111111';
 const CONSULTATION_ID = '22222222-2222-4222-8222-222222222222';
+const ADMIN_ID = '99999999-9999-4999-8999-999999999999';
 
 type Fn = jest.Mock;
 
@@ -580,6 +581,48 @@ describe('InstantPresenceService', () => {
       expect(DISCONNECT_CLEARS_PRESENCE).toContain('available_now');
       expect(DISCONNECT_CLEARS_PRESENCE).toContain('request_pending');
       expect(DISCONNECT_CLEARS_PRESENCE).toContain('paused');
+    });
+  });
+  describe('*** the operator override goes through the same rule the doctor does ***', () => {
+    /**
+     * DEFECT. `InstantAdminController#setDoctorPresence` called
+     * `presence.transition` DIRECTLY, so the `SELF_SETTABLE_PRESENCE`
+     * restriction its own comment claims ("restricted to the same set a doctor
+     * gets — an admin does not get to assert work in flight either, and in
+     * particular cannot put a doctor into or out of `completing_notes`,
+     * because that would be an admin signing off clinical documentation")
+     * lived in `AdminSetPresenceDto`'s `@IsIn` decorator and nowhere else.
+     * `instant.dto.ts` states the rule that breaks, on the doctor's own DTO:
+     * "The service re-checks this — the DTO is the first line, not the rule."
+     */
+    it('refuses an admin a state only the system may set — the check is in the service, not only in the DTO', async () => {
+      const { service, facade } = buildHarness({ presence: 'in_consultation' });
+
+      await expect(
+        service.setPresenceAsAdmin(DOCTOR_ID, 'completing_notes' as SelfSettablePresence, ADMIN_ID),
+      ).rejects.toMatchObject({
+        response: expect.objectContaining({ code: INSTANT_ERROR_CODES.PRESENCE_NOT_SELF_SETTABLE }),
+      });
+      expect(facade.transitionPresence).not.toHaveBeenCalled();
+    });
+
+    it('POSITIVE CONTROL: an admin can still force a doctor offline, and it is audited as an admin action', async () => {
+      const { service, facade, state } = buildHarness({ presence: 'available_now' });
+
+      await service.setPresenceAsAdmin(DOCTOR_ID, 'offline', ADMIN_ID);
+
+      expect(state.presence).toBe('offline');
+      expect(facade.transitionPresence).toHaveBeenCalledWith(
+        expect.objectContaining({ actor: { actorType: 'admin', actorId: ADMIN_ID }, reason: 'admin_override' }),
+      );
+    });
+
+    it('*** AN ADMIN CANNOT CLEAR THE COMPLETION GATE EITHER *** — requireNotGated applies to their path too', async () => {
+      const { service } = buildHarness({ presence: 'paused', blockedByConsultationId: CONSULTATION_ID });
+
+      await expect(service.setPresenceAsAdmin(DOCTOR_ID, 'available_now', ADMIN_ID)).rejects.toMatchObject({
+        response: expect.objectContaining({ code: INSTANT_ERROR_CODES.COMPLETION_GATE_ACTIVE }),
+      });
     });
   });
 });
