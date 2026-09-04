@@ -16,6 +16,7 @@ import {
 import { PriceQuoteRepository } from './price-quote.repository';
 import { PRICING_ERROR_CODES } from './pricing.constants';
 import type { RefundApportionment, RefundApportionmentComponent } from './pricing.contract';
+import { RefundComponentRepository } from './refund-component.repository';
 
 /**
  * *** HOW MUCH OF A REFUND WAS TAX, AND WHICH HEAD IT COMES BACK OUT OF. ***
@@ -68,7 +69,16 @@ import type { RefundApportionment, RefundApportionmentComponent } from './pricin
  */
 @Injectable()
 export class PricingRefundService {
-  constructor(private readonly quotes: PriceQuoteRepository) {}
+  constructor(
+    private readonly quotes: PriceQuoteRepository,
+    /**
+     * ADDITIVE (M-21/data rights execution): only `countRefundComponentsForConsultations`
+     * below reads this — nothing here writes `refund_components`, which stays
+     * `modules/payment`'s job (see `refund.service.ts`'s own comment on why it
+     * owns that write).
+     */
+    private readonly refundComponents: RefundComponentRepository,
+  ) {}
 
   /**
    * What a refund of `pct` percent of the CAPTURED TOTAL comes to.
@@ -124,6 +134,17 @@ export class PricingRefundService {
       requestedPaise,
       alreadyRefundedByCode: input.alreadyRefundedByCode ?? {},
     });
+  }
+
+  /**
+   * ADDITIVE (M-21/data rights execution): the `refund_components` half of
+   * `PricingContract#countDataRightsRowsForPatient` — a READ-ONLY row count
+   * for a patient's approved data-deletion request. See
+   * `RefundComponentRepository#countForConsultations` for the join this
+   * delegates to and why it is a flagged cross-module read.
+   */
+  async countRefundComponentsForConsultations(consultationIds: readonly string[]): Promise<number> {
+    return this.refundComponents.countForConsultations(consultationIds);
   }
 }
 

@@ -105,6 +105,9 @@ describe('FollowupService', () => {
       listOpenAlerts: jest.fn().mockResolvedValue([]),
       acknowledgeAlert: jest.fn(),
       closeAlert: jest.fn(),
+      countDataRightsRowsForConsultations: jest
+        .fn()
+        .mockResolvedValue({ checkinResponses: 0, safetyAlerts: 0, followupAssignments: 0 }),
     } as unknown as jest.Mocked<FollowupRepository>;
 
     pathways = {
@@ -355,6 +358,28 @@ describe('FollowupService', () => {
       careHub.getRecommendedForConsultation.mockRejectedValue(new Error('down'));
       const plan = await service.getCarePlan(CONSULTATION_ID);
       expect(plan.recommendedSelfHelp).toEqual([]);
+    });
+  });
+
+  describe('countDataRightsRowsForConsultations (ADDITIVE, M-21/data rights execution)', () => {
+    it('returns all-zero WITHOUT querying the repository when given an empty array', async () => {
+      const result = await service.countDataRightsRowsForConsultations([]);
+
+      expect(result).toEqual({ checkinResponses: 0, safetyAlerts: 0, followupAssignments: 0 });
+      expect(repo.countDataRightsRowsForConsultations).not.toHaveBeenCalled();
+    });
+
+    it('delegates a non-empty id list straight to the repository', async () => {
+      repo.countDataRightsRowsForConsultations.mockResolvedValue({
+        checkinResponses: 3,
+        safetyAlerts: 1,
+        followupAssignments: 1,
+      });
+
+      const result = await service.countDataRightsRowsForConsultations([CONSULTATION_ID]);
+
+      expect(repo.countDataRightsRowsForConsultations).toHaveBeenCalledWith([CONSULTATION_ID]);
+      expect(result).toEqual({ checkinResponses: 3, safetyAlerts: 1, followupAssignments: 1 });
     });
   });
 });

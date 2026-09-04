@@ -255,4 +255,18 @@ export interface PaymentContract {
      */
     refundPct?: number;
   }): Promise<{ refundId: string; status: string }>;
+
+  /**
+   * ADDITIVE (M-21/data rights execution). READ-ONLY row counts of
+   * `payments`, `refunds` and `payment_events` for a set of consultations —
+   * `RefundService#countDataRightsRowsForConsultations`'s own doc comment has
+   * the full account. All three are RETAIN in the M-21 survey (financial/tax
+   * record-keeping), so this exists purely to report a count in a
+   * data-deletion preview; nothing here is ever written.
+   */
+  countDataRightsRowsForConsultations(consultationIds: readonly string[]): Promise<{
+    payments: number;
+    refunds: number;
+    paymentEvents: number;
+  }>;
 }

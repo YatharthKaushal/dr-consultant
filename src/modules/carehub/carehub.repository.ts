@@ -1,5 +1,5 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { and, asc, desc, eq, inArray, notInArray } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, notInArray, sql } from 'drizzle-orm';
 import { DATABASE } from '../../config/db/database.module';
 import type { Database, DatabaseTransaction } from '../../config/db/database.config';
 import { contentItemsTable, type ContentItemRow, type NewContentItemRow } from '../../schema/content-items.schema';
@@ -165,5 +165,21 @@ export class CarehubRepository {
       .from(contentRecommendationsTable)
       .where(eq(contentRecommendationsTable.consultationId, consultationId))
       .orderBy(asc(contentRecommendationsTable.createdAt));
+  }
+
+  /**
+   * ADDITIVE (M-21/data rights execution): a patient data-deletion preview
+   * needs a row count for `content_recommendations` without touching any of
+   * them — this table is RETAIN in the M-21 compliance survey (SRS §5.3), so
+   * this is a pure `SELECT COUNT`, never a delete. Empty array in, `0` out,
+   * no query issued — `inArray(col, [])` is unsafe SQL otherwise.
+   */
+  async countRecommendationsForConsultations(consultationIds: readonly string[], executor: Executor = this.db): Promise<number> {
+    if (consultationIds.length === 0) return 0;
+    const [row] = await executor
+      .select({ count: sql<string>`count(*)` })
+      .from(contentRecommendationsTable)
+      .where(inArray(contentRecommendationsTable.consultationId, consultationIds as string[]));
+    return Number(row?.count ?? 0);
   }
 }

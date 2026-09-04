@@ -14,4 +14,12 @@ export class DocumentFacade implements DocumentContract {
   async writePrescriptionPdf(input: WritePrescriptionPdfInput): Promise<PatientFileView> {
     return this.files.writePrescriptionPdf(input);
   }
+
+  /** *** M-21 CALLS THIS. *** See `DocumentContract#countDataRightsRowsForPatient` — a pure, read-only count, nothing here is anonymized or deleted. */
+  async countDataRightsRowsForPatient(input: {
+    patientId: string;
+    consultationIds: readonly string[];
+  }): Promise<{ patientFiles: number; reportRequests: number }> {
+    return this.files.countDataRightsRowsForPatient(input);
+  }
 }

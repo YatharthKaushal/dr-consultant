@@ -1,5 +1,5 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { and, desc, eq, inArray } from 'drizzle-orm';
+import { and, count, desc, eq, inArray } from 'drizzle-orm';
 import { DATABASE } from '../../config/db/database.module';
 import type { Database, DatabaseTransaction } from '../../config/db/database.config';
 import {
@@ -167,5 +167,25 @@ export class ClarificationRepository {
       .where(and(eq(clarificationCasesTable.id, id), inArray(clarificationCasesTable.status, [...from])))
       .returning();
     return row ?? null;
+  }
+
+  /**
+   * ADDITIVE (M-21/data rights execution): a patient data-deletion preview
+   * needs a row count for `clarification_cases` without touching any of
+   * them — this table is RETAIN in the M-21 compliance survey (its case
+   * content is already de-identified per this table's own doc comment;
+   * `source_consultation_id` is kept "for the treating doctor and audit
+   * ONLY", which is exactly the audit-trail exception the survey applies).
+   * Counts rows whose (nullable) `source_consultation_id` is in the given
+   * list. Empty array in, `0` out, no query issued — `inArray(col, [])` is
+   * unsafe SQL otherwise.
+   */
+  async countCasesForConsultations(consultationIds: readonly string[], executor: Executor = this.db): Promise<number> {
+    if (consultationIds.length === 0) return 0;
+    const [row] = await executor
+      .select({ value: count() })
+      .from(clarificationCasesTable)
+      .where(inArray(clarificationCasesTable.sourceConsultationId, [...consultationIds]));
+    return row?.value ?? 0;
   }
 }

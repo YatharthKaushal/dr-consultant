@@ -18,6 +18,7 @@ function createDeps() {
     findDoctorAuthStateById: jest.fn(),
     findAdminAuthStateById: jest.fn(),
     getContactMobileNumber: jest.fn(),
+    anonymizeMobileNumber: jest.fn(),
   } as unknown as jest.Mocked<IdentityRepository>;
 
   const facade = new IdentityFacade(accessService, identityService, repo);
@@ -60,6 +61,16 @@ describe('IdentityFacade', () => {
         actorType: 'admin',
         actorId: 'admin-1',
       });
+    });
+  });
+
+  describe('anonymizeMobileNumber', () => {
+    it('delegates to the repository with the same accountType/id', async () => {
+      const { facade, repo } = createDeps();
+      repo.anonymizeMobileNumber.mockResolvedValue({ changed: true });
+
+      await expect(facade.anonymizeMobileNumber('patient', 'patient-1')).resolves.toEqual({ changed: true });
+      expect(repo.anonymizeMobileNumber).toHaveBeenCalledWith('patient', 'patient-1');
     });
   });
 

@@ -90,6 +90,14 @@ export class FeedbackService {
 
   /* ══════════════════════════════════════════════════════════════════════ */
   /* Shared plumbing                                                        */
+  /**
+   * ADDITIVE (M-21/data rights execution) — see `feedback.repository.ts
+   * #countByPatientId`.
+   */
+  async countByPatientId(patientId: string): Promise<number> {
+    return this.repo.countByPatientId(patientId);
+  }
+
   /* ══════════════════════════════════════════════════════════════════════ */
 
   /** `followup.service.ts#assertPatientOwnsConsultation`'s exact shape. */

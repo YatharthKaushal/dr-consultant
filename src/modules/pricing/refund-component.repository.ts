@@ -1,5 +1,5 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { eq, inArray } from 'drizzle-orm';
+import { count, eq, inArray } from 'drizzle-orm';
 import { DATABASE } from '../../config/db/database.module';
 import type { Database, DatabaseTransaction } from '../../config/db/database.config';
 import {
@@ -7,6 +7,8 @@ import {
   type NewRefundComponentRow,
   type RefundComponentRow,
 } from '../../schema/refund-components.schema';
+import { paymentsTable } from '../../schema/payments.schema';
+import { refundsTable } from '../../schema/refunds.schema';
 
 type Executor = Database | DatabaseTransaction;
 
@@ -74,5 +76,36 @@ export class RefundComponentRepository {
       else byCode.set(row.code, [row.amount]);
     }
     return byCode;
+  }
+
+  /**
+   * ADDITIVE (M-21/data rights execution): `DataRightsFacade#previewExecution`
+   * needs a READ-ONLY row count of `refund_components` for a patient's
+   * approved data-deletion request, without touching a single row —
+   * `refund_components` is RETAIN in the M-21 compliance survey (GST-law and
+   * reconciliation record-keeping), so nothing here is ever anonymized or
+   * deleted.
+   *
+   * *** ONE DELIBERATE CROSS-MODULE READ, FLAGGED LIKE `booking.repository.ts
+   * #findExpiredHoldCandidates`'S OWN. *** `refund_components` carries no
+   * `consultation_id` of its own — only `refunds.payment_id` ->
+   * `payments.consultation_id` says which consultation a refund line belongs
+   * to, and both of those tables are `modules/payment`'s, not this module's.
+   * Two `INNER JOIN`s, SELECT only, nothing written: the same read-only
+   * justification `payment.repository.ts#findBilledConsultationFee` gives for
+   * its own crossing in the other direction. `input.consultationIds` is
+   * caller-resolved (the same convention `sumByCodeForRefunds` above uses for
+   * refund ids it cannot resolve itself), so this file still never queries
+   * `refunds`/`payments` to DISCOVER anything — only to filter a join.
+   */
+  async countForConsultations(consultationIds: readonly string[], executor: Executor = this.db): Promise<number> {
+    if (consultationIds.length === 0) return 0;
+    const [row] = await executor
+      .select({ value: count() })
+      .from(refundComponentsTable)
+      .innerJoin(refundsTable, eq(refundsTable.id, refundComponentsTable.refundId))
+      .innerJoin(paymentsTable, eq(paymentsTable.id, refundsTable.paymentId))
+      .where(inArray(paymentsTable.consultationId, [...consultationIds]));
+    return row?.value ?? 0;
   }
 }

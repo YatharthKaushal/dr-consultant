@@ -113,7 +113,10 @@ function build(overrides: {
     getJoinWindowMinutes: jest.fn().mockResolvedValue(overrides.joinWindowMinutes ?? 15),
   };
 
-  const repo = { listConnections: jest.fn().mockResolvedValue([]) };
+  const repo = {
+    listConnections: jest.fn().mockResolvedValue([]),
+    countParticipantRowsForConsultations: jest.fn().mockResolvedValue(0),
+  };
   const audit = { write: jest.fn().mockResolvedValue(undefined) };
 
   const service = new VideoService(
@@ -751,6 +754,23 @@ describe('VideoService', () => {
 
       expect(codeOf(error)).toBe(VIDEO_ERROR_CODES.CONSULTATION_NOT_FOUND);
       expect(repo.listConnections).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('countParticipantRowsForConsultations (ADDITIVE, M-21/data rights execution)', () => {
+    it('returns 0 WITHOUT querying the repository when given an empty array', async () => {
+      const { service, repo } = build();
+
+      await expect(service.countParticipantRowsForConsultations([])).resolves.toBe(0);
+      expect(repo.countParticipantRowsForConsultations).not.toHaveBeenCalled();
+    });
+
+    it('delegates a non-empty id list straight to the repository', async () => {
+      const { service, repo } = build();
+      repo.countParticipantRowsForConsultations.mockResolvedValue(5);
+
+      await expect(service.countParticipantRowsForConsultations([CONSULTATION_ID])).resolves.toBe(5);
+      expect(repo.countParticipantRowsForConsultations).toHaveBeenCalledWith([CONSULTATION_ID]);
     });
   });
 });

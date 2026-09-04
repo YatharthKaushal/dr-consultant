@@ -13,6 +13,7 @@ import { CatalogueModule } from './modules/catalogue/catalogue.module';
 import { ClarificationModule } from './modules/clarification/clarification.module';
 import { ClinicalModule } from './modules/clinical/clinical.module';
 import { ConsentModule } from './modules/consent/consent.module';
+import { DataRightsModule } from './modules/data-rights/data-rights.module';
 import { DoctorModule } from './modules/doctor/doctor.module';
 import { DocumentModule } from './modules/document/document.module';
 import { FeedbackModule } from './modules/feedback/feedback.module';
@@ -205,6 +206,12 @@ import { ErrorsModule } from './shared/errors/errors.module';
     // unchanged by this build) — see `modules/audit/audit.module.ts`'s own
     // header for why both are named `AuditModule` in their own files.
     AuditReadModule,
+    // M-21 (execution half): "Execution of the data deletion requests
+    // raised in M-03" (`docs/MODULES.md`). Last in the build order — it
+    // surveys every module's tables above it. Imports every owning
+    // module's facade it needs directly (see `data-rights.module.ts`'s own
+    // header); exports nothing, since nothing downstream consumes it.
+    DataRightsModule,
     HealthModule,
   ],
 })

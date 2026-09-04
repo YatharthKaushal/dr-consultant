@@ -200,4 +200,13 @@ export interface InstantContract {
 
   /** A doctor's live presence, or `null` if the doctor id does not exist. */
   getPresence(doctorId: string): Promise<InstantPresenceView | null>;
+
+  /**
+   * ADDITIVE (M-21/data rights execution): a patient data-deletion preview
+   * needs a row count for `instant_consultancy` without touching any of
+   * them — this table is RETAIN in the M-21 compliance survey (a
+   * consultation's routing history, part of the clinical record retained
+   * under SRS §5.3). Empty array in, `0` out.
+   */
+  countOffersForConsultations(consultationIds: readonly string[]): Promise<number>;
 }

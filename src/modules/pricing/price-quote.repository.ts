@@ -1,5 +1,5 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { and, asc, eq, inArray, isNotNull, lt, sql } from 'drizzle-orm';
+import { and, asc, count, eq, inArray, isNotNull, lt, sql } from 'drizzle-orm';
 import { DATABASE } from '../../config/db/database.module';
 import type { Database, DatabaseTransaction } from '../../config/db/database.config';
 import {
@@ -242,5 +242,35 @@ export class PriceQuoteRepository {
       )
       .returning({ id: priceQuotesTable.id });
     return result.length;
+  }
+
+  /**
+   * ADDITIVE (M-21/data rights execution): `DataRightsFacade#previewExecution`
+   * needs a READ-ONLY row count of `price_quotes` for a patient's approved
+   * data-deletion request, without touching a single row — `price_quotes` is
+   * RETAIN in the M-21 compliance survey (GST-law and reconciliation
+   * record-keeping), so nothing here is ever anonymized or deleted.
+   */
+  async countByPatientId(patientId: string, executor: Executor = this.db): Promise<number> {
+    const [row] = await executor
+      .select({ value: count() })
+      .from(priceQuotesTable)
+      .where(eq(priceQuotesTable.patientId, patientId));
+    return row?.value ?? 0;
+  }
+
+  /**
+   * ADDITIVE (M-21/data rights execution): the `price_quote_components`
+   * companion to `countByPatientId` — every component row hanging off a
+   * `price_quotes` row for this patient, joined rather than filtered by a
+   * `patient_id` this table does not carry. READ-ONLY, same RETAIN reasoning.
+   */
+  async countComponentsByPatientId(patientId: string, executor: Executor = this.db): Promise<number> {
+    const [row] = await executor
+      .select({ value: count() })
+      .from(priceQuoteComponentsTable)
+      .innerJoin(priceQuotesTable, eq(priceQuotesTable.id, priceQuoteComponentsTable.priceQuoteId))
+      .where(eq(priceQuotesTable.patientId, patientId));
+    return row?.value ?? 0;
   }
 }

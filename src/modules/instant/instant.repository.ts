@@ -304,6 +304,24 @@ export class InstantRepository {
     };
   }
 
+  /**
+   * ADDITIVE (M-21/data rights execution): a patient data-deletion preview
+   * needs a row count for `instant_consultancy` without touching any of
+   * them — this table is RETAIN in the M-21 compliance survey (SRS §5.3:
+   * medical record retention rests with the client under applicable law; this
+   * is a consultation's routing history), so this is a pure `SELECT COUNT`,
+   * never a delete. Empty array in, `0` out, no query issued — `inArray(col,
+   * [])` is unsafe SQL otherwise.
+   */
+  async countOffersForConsultations(consultationIds: readonly string[], executor: Executor = this.db): Promise<number> {
+    if (consultationIds.length === 0) return 0;
+    const [row] = await executor
+      .select({ count: sql<string>`count(*)` })
+      .from(instantConsultancyTable)
+      .where(inArray(instantConsultancyTable.consultationId, consultationIds as string[]));
+    return Number(row?.count ?? 0);
+  }
+
   /* ── app_config (the `instant.*` keys only) ───────────────────────────── */
 
   /**

@@ -99,6 +99,19 @@ export class ComplaintRepository {
     return new Map(rows.map((row) => [row.status, row.value]));
   }
 
+  /**
+   * ADDITIVE (M-21/data rights execution). READ-ONLY row count of
+   * `complaints` for one patient — `complaints` is RETAIN in the M-21
+   * survey (M-19's own done-when: "a complaint can be raised, tracked and
+   * closed with its full history kept", `docs/MODULES.md`), so this exists
+   * purely to report a count in a data-deletion preview; nothing here is
+   * ever written.
+   */
+  async countByPatientId(patientId: string, executor: Executor = this.db): Promise<number> {
+    const [row] = await executor.select({ value: count() }).from(complaintsTable).where(eq(complaintsTable.patientId, patientId));
+    return row?.value ?? 0;
+  }
+
   /* ── Writes ───────────────────────────────────────────────────────────── */
 
   async create(data: NewComplaintRow, executor: Executor = this.db): Promise<ComplaintRow> {

@@ -76,6 +76,7 @@ function createDeps() {
     listByPatientId: jest.fn(),
     listForAdmin: jest.fn(),
     countByStatusGrouped: jest.fn(),
+    countByPatientId: jest.fn(),
     create: jest.fn(),
     appendMessages: jest.fn(),
     updateStatusIfFrom: jest.fn(),
@@ -289,5 +290,15 @@ describe('ComplaintService.countComplaintsByStatus', () => {
     const result = await service.countComplaintsByStatus();
 
     expect(result).toEqual({ open: 3, in_progress: 0, resolved: 1, rejected: 0 });
+  });
+});
+
+describe('ComplaintService.countByPatientId', () => {
+  it('delegates to the repository', async () => {
+    const { service, repo } = createDeps();
+    repo.countByPatientId.mockResolvedValue(2);
+
+    await expect(service.countByPatientId('patient-1')).resolves.toBe(2);
+    expect(repo.countByPatientId).toHaveBeenCalledWith('patient-1');
   });
 });

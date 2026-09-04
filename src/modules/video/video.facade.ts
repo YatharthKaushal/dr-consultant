@@ -45,4 +45,9 @@ export class VideoFacade implements VideoContract {
   async getSession(consultationId: string): Promise<VideoSessionView> {
     return this.video.getSession(consultationId);
   }
+
+  /** *** M-21 CALLS THIS. *** See `VideoContract#countParticipantRowsForConsultations` — a pure, read-only count, nothing here is anonymized or deleted. */
+  async countParticipantRowsForConsultations(consultationIds: readonly string[]): Promise<number> {
+    return this.video.countParticipantRowsForConsultations(consultationIds);
+  }
 }

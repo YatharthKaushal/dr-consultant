@@ -1,5 +1,5 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { and, asc, desc, eq, gt, isNull, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, gt, inArray, isNull, sql } from 'drizzle-orm';
 import type { Database, DatabaseTransaction } from '../../config/db/database.config';
 import { DATABASE } from '../../config/db/database.module';
 import {
@@ -216,5 +216,40 @@ export class FollowupRepository {
       .where(eq(safetyAlertsTable.id, id))
       .returning();
     return row ?? null;
+  }
+
+  /* ── M-21/data rights (READ-ONLY across all three tables) ───────────────── */
+
+  /**
+   * ADDITIVE (M-21/data rights execution): see `FollowupContract
+   * #countDataRightsRowsForConsultations`. Three independent `count(*)`s, not
+   * a `UNION`/`JOIN` — the tables share no key that would make a single
+   * grouped query meaningful, and this is a one-off preview read, not a hot
+   * path. Empty `consultationIds` is guarded by the caller
+   * (`followup.service.ts`); this method assumes a non-empty array.
+   */
+  async countDataRightsRowsForConsultations(
+    consultationIds: readonly string[],
+    executor: Executor = this.db,
+  ): Promise<{ checkinResponses: number; safetyAlerts: number; followupAssignments: number }> {
+    const ids = [...consultationIds];
+    const [checkinRow] = await executor
+      .select({ count: sql<string>`count(*)` })
+      .from(checkinResponsesTable)
+      .where(inArray(checkinResponsesTable.consultationId, ids));
+    const [alertRow] = await executor
+      .select({ count: sql<string>`count(*)` })
+      .from(safetyAlertsTable)
+      .where(inArray(safetyAlertsTable.consultationId, ids));
+    const [assignmentRow] = await executor
+      .select({ count: sql<string>`count(*)` })
+      .from(followupAssignmentsTable)
+      .where(inArray(followupAssignmentsTable.consultationId, ids));
+
+    return {
+      checkinResponses: Number(checkinRow?.count ?? 0),
+      safetyAlerts: Number(alertRow?.count ?? 0),
+      followupAssignments: Number(assignmentRow?.count ?? 0),
+    };
   }
 }
