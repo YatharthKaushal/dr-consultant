@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { StorageFacade } from '../storage/storage.facade';
+import { IdentityModule } from '../identity/identity.module';
 import { StorageModule } from '../storage/storage.module';
 import { CONSULTATION_LOOKUP_PROVIDER, DOCUMENT_STORAGE_PORT } from './document.constants';
 import { ConsultationLookupProvider } from './consultation-lookup.provider';
@@ -40,7 +41,7 @@ import { ReportRequestService } from './report-request.service';
  * change to either service in this module.
  */
 @Module({
-  imports: [StorageModule],
+  imports: [StorageModule, IdentityModule],
   controllers: [DocumentController, DocumentConsultationController],
   providers: [
     PatientFileRepository,

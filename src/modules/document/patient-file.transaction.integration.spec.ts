@@ -214,6 +214,8 @@ describe('PatientFileService.upload — REAL transaction atomicity (integration)
       storage,
       appConfig,
       new AuditService(db),
+      // Admin prescription-PDF gate; this suite exercises no admin download.
+      { hasPermission: async () => true } as never,
     );
   });
 
