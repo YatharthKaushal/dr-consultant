@@ -1055,6 +1055,111 @@ describe('BookingService.transitionInstantConsultation', () => {
  *     writes and no policy hangs off.
  *   - it never touches `hold_expires_at`. A live call has no hold.
  */
+/**
+ * *** ADDITIVE (M-15). THE MOVE TO `completed`. ***
+ *
+ * A THIRD sibling, and the reason it is not a fourth value on
+ * `transitionConsultationStatus`'s `to` is the whole point: that method is held
+ * by M-14's webhook, and FR-11.5 says a case is complete only once the clinical
+ * record is finalised. Widening the sibling would hand the webhook the power to
+ * close a consultation with no clinical record at all.
+ */
+describe('BookingService.completeConsultation', () => {
+  const FINISH = {
+    consultationId: CONSULTATION_ID,
+    from: ['awaiting_documentation' as const],
+  };
+
+  it('moves to completed and audits before/after transactionally', async () => {
+    const h = buildHarness();
+    h.repo.findByIdForUpdate.mockResolvedValueOnce(makeRow({ status: 'awaiting_documentation' }));
+    h.repo.updateStatusIfIn.mockResolvedValueOnce(makeRow({ status: 'completed' }));
+
+    const result = await h.service.completeConsultation({ ...FINISH, reason: 'clinical_record_finalised' });
+
+    expect(result).toMatchObject({ changed: true, status: 'completed' });
+    expect(h.repo.updateStatusIfIn).toHaveBeenCalledWith(
+      CONSULTATION_ID,
+      ['awaiting_documentation'],
+      { status: 'completed' },
+      h.db,
+    );
+    expect(h.audit.write).toHaveBeenCalledWith(
+      expect.objectContaining({
+        actorType: 'system',
+        consultationId: CONSULTATION_ID,
+        metadata: expect.objectContaining({
+          change: 'consultation_completed',
+          before: 'awaiting_documentation',
+          after: 'completed',
+          reason: 'clinical_record_finalised',
+        }),
+      }),
+      h.db,
+    );
+  });
+
+  it('takes the ROW LOCK first, like every other transition in this service', async () => {
+    const h = buildHarness();
+    h.repo.findByIdForUpdate.mockResolvedValueOnce(makeRow({ status: 'awaiting_documentation' }));
+    h.repo.updateStatusIfIn.mockResolvedValueOnce(makeRow({ status: 'completed' }));
+
+    await h.service.completeConsultation(FINISH);
+
+    expect(h.repo.findByIdForUpdate).toHaveBeenCalledWith(CONSULTATION_ID, h.db);
+  });
+
+  /** M-15's sweep retries this; a retry must not write a second audit row. */
+  it('is an idempotent no-op when already completed, and audits nothing', async () => {
+    const h = buildHarness();
+    h.repo.findByIdForUpdate.mockResolvedValueOnce(makeRow({ status: 'completed' }));
+
+    const result = await h.service.completeConsultation(FINISH);
+
+    expect(result).toEqual({ changed: false, status: 'completed' });
+    expect(h.repo.updateStatusIfIn).not.toHaveBeenCalled();
+    expect(h.audit.write).not.toHaveBeenCalled();
+  });
+
+  it('refuses an illegal transition and reports the status it actually found', async () => {
+    const h = buildHarness();
+    h.repo.findByIdForUpdate.mockResolvedValueOnce(makeRow({ status: 'cancelled' }));
+    h.repo.updateStatusIfIn.mockResolvedValueOnce(undefined);
+
+    const result = await h.service.completeConsultation(FINISH);
+
+    expect(result).toEqual({ changed: false, status: 'cancelled', refusal: 'illegal_transition' });
+    expect(h.audit.write).not.toHaveBeenCalled();
+  });
+
+  it('reports not_found rather than throwing', async () => {
+    const h = buildHarness();
+    h.repo.findByIdForUpdate.mockResolvedValueOnce(undefined);
+
+    await expect(h.service.completeConsultation(FINISH)).resolves.toEqual({
+      changed: false,
+      status: null,
+      refusal: 'not_found',
+    });
+  });
+
+  /**
+   * *** IT NEVER THROWS. *** M-15 calls this AFTER its own transaction has
+   * already committed a finalised record. A throw here would report a
+   * successful finalise as a failure, and its reconciling sweep already treats
+   * a missed move as the ordinary case.
+   */
+  it('works for a scheduled consultation and an instant one alike', async () => {
+    for (const mode of ['scheduled', 'instant'] as const) {
+      const h = buildHarness();
+      h.repo.findByIdForUpdate.mockResolvedValueOnce(makeRow({ mode, status: 'awaiting_documentation' }));
+      h.repo.updateStatusIfIn.mockResolvedValueOnce(makeRow({ status: 'completed' }));
+
+      await expect(h.service.completeConsultation(FINISH)).resolves.toMatchObject({ changed: true });
+    }
+  });
+});
+
 describe('BookingService.transitionConsultationStatus', () => {
   const START = {
     consultationId: CONSULTATION_ID,

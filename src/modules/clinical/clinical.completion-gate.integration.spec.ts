@@ -95,7 +95,7 @@ import { ClinicalRepository } from './clinical.repository';
 import { ClinicalService } from './clinical.service';
 import { ClinicalTemplateRepository } from './clinical-template.repository';
 import { ClinicalTemplateService } from './clinical-template.service';
-import { ConsultationCompletionProvider } from './consultation-completion.provider';
+import { BookingService } from '../booking/booking.service';
 
 jest.setTimeout(30_000);
 
@@ -265,20 +265,37 @@ describe('M-15 finalisation, against a real database', () => {
     const doctorRepo = new DoctorRepository(db);
     presence = new DoctorPresenceService(db, doctorRepo, audit);
 
-    // The consultation READ is M-11's real repository plus M-11's real mapper —
-    // the same two calls `BookingFacade.getBooking` makes. The consultation
-    // WRITE is this module's real placeholder provider, guarded UPDATE and all.
-    const bookingReader = {
+    // *** BOTH HALVES ARE NOW M-11'S REAL CODE. *** The READ is its real
+    // repository plus its real mapper — the same two calls
+    // `BookingFacade.getBooking` makes. The WRITE is `BookingService
+    // #completeConsultation` ITSELF, the production method, not a placeholder:
+    // the coordinator rebound `CLINICAL_BOOKING_PORT` to `BookingFacade` at
+    // merge and deleted the provider that used to write `consultations` from
+    // inside this module.
+    //
+    // `BookingService` takes ten collaborators and `completeConsultation`
+    // touches exactly three — `db`, `repo` and `audit`. The other seven are
+    // `null as never` DELIBERATELY: if that method ever grows a fourth
+    // dependency, this test throws instead of quietly passing against a stub.
+    const bookingService = new BookingService(
+      db,
+      bookingRepo,
+      null as never,
+      null as never,
+      null as never,
+      null as never,
+      null as never,
+      null as never,
+      null as never,
+      audit,
+    );
+    const bookings: ClinicalBookingPort = {
       getBooking: async (consultationId: string) => {
         const row = await bookingRepo.findById(consultationId);
         return row ? toBookingView(row) : null;
       },
+      completeConsultation: (input) => bookingService.completeConsultation(input),
     };
-    const bookings = new ConsultationCompletionProvider(
-      db,
-      bookingReader as never,
-      audit,
-    ) as unknown as ClinicalBookingPort;
 
     // The two `InstantFacade` methods this module uses, delegating to the REAL
     // `DoctorPresenceService`. See this file's header for why M-13 is not

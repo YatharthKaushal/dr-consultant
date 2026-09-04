@@ -156,6 +156,15 @@ export class BookingFacade implements BookingContract {
     };
   }
 
+  /** See `BookingContract#completeConsultation` — the FR-11.5 move, owned by M-15's completion gate. */
+  async completeConsultation(input: {
+    consultationId: string;
+    from: readonly ConsultationStatus[];
+    reason?: string;
+  }): Promise<{ changed: boolean; status: ConsultationStatus | null; refusal?: 'not_found' | 'illegal_transition' }> {
+    return this.service.completeConsultation(input);
+  }
+
   /** See `BookingContract#listExpiredInstantHolds`. */
   async listExpiredInstantHolds(now: Date, limit: number) {
     return this.service.listExpiredInstantHolds(now, limit);
