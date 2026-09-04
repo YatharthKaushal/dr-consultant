@@ -120,12 +120,23 @@ function derivePartySession(
   };
 }
 
-/** `max(left_at)` over connections that have one. Null when none has. */
+/**
+ * `max(left_at)` over connections that have one. Null when none has.
+ *
+ * *** CLAMPED TO ITS OWN `joined_at`, EXACTLY AS `intervalsFor` IS. *** The
+ * same inverted row — clock skew between LiveKit nodes, or a delivery that
+ * landed on the wrong row — reaches both, and reading it raw here while
+ * clamping it there produced a view whose `lastLeftAt` PRECEDED its
+ * `firstJoinedAt`: a call that ended before it began, on the screen a
+ * `technical_issue` complaint is adjudicated from. One row, one reading.
+ *
+ * The connection rows themselves are still returned verbatim — the evidence is
+ * not edited, only the figures derived from it.
+ */
 function latestLeftAt(connections: readonly VideoConnectionView[]): Date | null {
   const times = connections
-    .map((connection) => connection.leftAt)
-    .filter((at): at is Date => at !== null)
-    .map((at) => at.getTime());
+    .filter((connection) => connection.leftAt !== null)
+    .map((connection) => Math.max(connection.joinedAt.getTime(), connection.leftAt!.getTime()));
   return times.length === 0 ? null : new Date(Math.max(...times));
 }
 
