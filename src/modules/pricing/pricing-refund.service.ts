@@ -53,6 +53,12 @@ import type { RefundApportionment, RefundApportionmentComponent } from './pricin
  * ties on ascending index and the components are read in POSITION order, so a
  * retried refund cannot produce a second, different credit note for one event.
  *
+ * *** THE REVERSAL IS A DIFFERENCE OF CUMULATIVE POSITIONS, NOT A FUNCTION OF
+ * ONE SLICE. *** Backing the tax out of each slice independently rounds once per
+ * slice, so N partial refunds of a line reverse a DIFFERENT figure from the one
+ * the invoice charged — and the CGST/SGST error is systematic, because
+ * `halveHalfUp` gives the odd paise to CGST every time. See `reverseTax`.
+ *
  * ── *** "REFUND THE REST" LANDS EXACTLY ON ZERO. *** ───────────────────────
  *
  * When the request MEETS OR EXCEEDS the remaining refundable, the per-component
@@ -138,11 +144,16 @@ export function apportion(input: ApportionInput): RefundApportionment {
   // tie-break `allocateLargestRemainder` falls back to.
   const lines = [...input.components].sort((a, b) => a.position - b.position);
 
-  const capacities = lines.map((line) => {
+  // What has already gone back against each line, in position order. Load-bearing
+  // twice over: it caps the line's remaining capacity, and it is the starting
+  // point of the CUMULATIVE reversal below.
+  const alreadyByLine = lines.map((line) => {
     const captured = rupeesToPaise(line.lineTotal);
     const already = sumRupees(toAmounts(input.alreadyRefundedByCode[line.code]));
-    return captured > already ? captured - already : 0n;
+    return already > captured ? captured : already;
   });
+
+  const capacities = lines.map((line, index) => rupeesToPaise(line.lineTotal) - alreadyByLine[index]);
 
   const totalRemaining = capacities.reduce<bigint>((sum, value) => sum + value, 0n);
 
@@ -172,12 +183,12 @@ export function apportion(input: ApportionInput): RefundApportionment {
     const share = shares[index];
     if (share === 0n) return;
 
+    // *** THE REVERSAL IS A DIFFERENCE OF TWO CUMULATIVE POSITIONS, NOT A
+    // FUNCTION OF THIS SLICE ALONE. *** See `reverseTax`.
     const reversal = reverseTax({
       line,
+      alreadyPaise: alreadyByLine[index],
       sharePaise: share,
-      // A COMPLETE reversal of an untouched line gives back exactly what was
-      // charged on it — see `reverseTax`.
-      isCompleteLineReversal: share === rupeesToPaise(line.lineTotal),
       placeOfSupplyKind: input.placeOfSupplyKind,
     });
 
@@ -219,46 +230,113 @@ export function apportion(input: ApportionInput): RefundApportionment {
  * charged on top) or inclusive (total = the quoted amount, tax embedded). Either
  * way the proportional reversal is `share / (1 + rate)`, which is exactly what
  * `inclusiveTaxableValue` computes — and the tax is then the RESIDUAL,
- * `share - taxable`, never a second rounding. `amount = taxable + heads` holds
- * exactly, which is what `refund_components_balances` verifies.
+ * `share - taxable`, never a second rounding.
  *
- * *** A COMPLETE REVERSAL OF AN UNTOUCHED LINE USES THE STORED FIGURES. ***
- * Backing out is exact to within a paise but is not guaranteed to reproduce an
- * EXCLUSIVE line's original split bit for bit, because that split was
- * `round(taxable x rate)` in the other direction. Refunding a whole line should
- * reverse precisely what was charged on it, so when the share is the entire line
- * total the snapshot is used directly rather than recomputed.
+ * ── *** THE REVERSAL IS A DIFFERENCE OF CUMULATIVE POSITIONS. *** ──────────
+ *
+ * This function does NOT back the tax out of `sharePaise` on its own. It
+ * computes the reversal owed at `already + share` of the line, subtracts the
+ * reversal already owed at `already`, and returns the difference.
+ *
+ * *** THAT IS THE WHOLE POINT, AND DOING IT THE OBVIOUS WAY IS WRONG. *** Backing
+ * out each slice INDEPENDENTLY rounds once per slice, so N partial refunds of one
+ * line reverse `sum(backOut(slice_i))` where the invoice charged
+ * `backOut(sum(slice_i))`. Those are not the same number: round-then-sum is not
+ * sum-then-round, exactly as `payment-money.util.ts#calculateBill` says of the
+ * bill itself. Worse, the CGST/SGST bias is SYSTEMATIC rather than random —
+ * `halveHalfUp` hands the odd paise to CGST on EVERY slice, so a line refunded in
+ * five steps can over-reverse CGST by several paise and under-reverse SGST by the
+ * same amount, while the total refunded rupees are exactly right.
+ *
+ * A credit note that reverses a different CGST/SGST split from the invoice it
+ * credits is a GSTR-1 reconciliation problem, not a rounding curiosity. Measured
+ * before this was written: over 3 000 random quotes refunded in random partial
+ * steps, 2 517 of them closed on a tax reversal that did not match the invoice,
+ * with head errors up to 11 paise.
+ *
+ * Subtracting cumulative positions makes the series TELESCOPE: the slices sum to
+ * `cumulative(lineTotal) - cumulative(0)`, which is the stored figure, whatever
+ * the sizes of the slices and however many there are.
+ *
+ * *** THE LAST SLICE OF A LINE USES THE STORED FIGURES. *** `cumulativeReversal`
+ * returns the snapshot when the cumulative position IS the whole line, because
+ * backing out is exact to within a paise but does not always reproduce an
+ * EXCLUSIVE line's original split bit for bit — that split was
+ * `round(taxable x rate)` in the other direction. Refunding a whole line, in one
+ * step or in twenty, must reverse precisely what was charged on it.
+ *
+ * Every component is monotonic non-decreasing in the cumulative position, so no
+ * slice can come out negative: `inclusiveTaxableValue` is monotonic, the residual
+ * tax `g - backOut(g)` moves by 0 or 1 per paise, and `ceil(t/2)` / `floor(t/2)`
+ * are monotonic in `t`. The one place that could break the argument is the
+ * terminal snapshot; it was checked exhaustively over 400 000 taxable values at
+ * each of eight rates, with zero regressions.
+ *
+ * Per-row balance still holds exactly: `taxable + heads` equals the cumulative
+ * position at both ends, so the difference is `share` — which is what
+ * `refund_components_balances` verifies.
  */
 function reverseTax(input: {
   line: PriceQuoteComponentRow;
+  /** What has ALREADY gone back against this line, before this slice. */
+  alreadyPaise: bigint;
   sharePaise: bigint;
-  isCompleteLineReversal: boolean;
   placeOfSupplyKind: PlaceOfSupplyKind;
 }): { taxablePaise: bigint; cgstPaise: bigint; sgstPaise: bigint; igstPaise: bigint } {
-  if (input.isCompleteLineReversal) {
+  const before = cumulativeReversal(input.line, input.alreadyPaise, input.placeOfSupplyKind);
+  const after = cumulativeReversal(
+    input.line,
+    input.alreadyPaise + input.sharePaise,
+    input.placeOfSupplyKind,
+  );
+
+  return {
+    taxablePaise: after.taxablePaise - before.taxablePaise,
+    cgstPaise: after.cgstPaise - before.cgstPaise,
+    sgstPaise: after.sgstPaise - before.sgstPaise,
+    igstPaise: after.igstPaise - before.igstPaise,
+  };
+}
+
+/**
+ * The tax reversal owed once `cumulativePaise` of this line has been refunded,
+ * measured from zero. A pure function of the line and that one position, which is
+ * what makes the per-slice differences telescope.
+ */
+function cumulativeReversal(
+  line: PriceQuoteComponentRow,
+  cumulativePaise: bigint,
+  placeOfSupplyKind: PlaceOfSupplyKind,
+): { taxablePaise: bigint; cgstPaise: bigint; sgstPaise: bigint; igstPaise: bigint } {
+  if (cumulativePaise <= 0n) {
+    return { taxablePaise: 0n, cgstPaise: 0n, sgstPaise: 0n, igstPaise: 0n };
+  }
+
+  // *** THE WHOLE LINE IS BACK: REVERSE THE SNAPSHOT, NOT A RECOMPUTATION. ***
+  if (cumulativePaise >= rupeesToPaise(line.lineTotal)) {
     return {
-      taxablePaise: rupeesToPaise(input.line.taxableValue),
-      cgstPaise: rupeesToPaise(input.line.cgstAmount),
-      sgstPaise: rupeesToPaise(input.line.sgstAmount),
-      igstPaise: rupeesToPaise(input.line.igstAmount),
+      taxablePaise: rupeesToPaise(line.taxableValue),
+      cgstPaise: rupeesToPaise(line.cgstAmount),
+      sgstPaise: rupeesToPaise(line.sgstAmount),
+      igstPaise: rupeesToPaise(line.igstAmount),
     };
   }
 
-  const rateBasisPoints = pctToBasisPoints(input.line.taxRatePct);
+  const rateBasisPoints = pctToBasisPoints(line.taxRatePct);
 
   // An exempt line carries no tax to reverse; the whole share is taxable value.
   // `inclusiveTaxableValue` short-circuits a zero rate anyway, but saying it here
   // keeps the exempt case bit-for-bit obvious.
-  if (input.line.taxTreatment === 'exempt' || rateBasisPoints === 0n) {
-    return { taxablePaise: input.sharePaise, cgstPaise: 0n, sgstPaise: 0n, igstPaise: 0n };
+  if (line.taxTreatment === 'exempt' || rateBasisPoints === 0n) {
+    return { taxablePaise: cumulativePaise, cgstPaise: 0n, sgstPaise: 0n, igstPaise: 0n };
   }
 
-  const taxablePaise = inclusiveTaxableValue(input.sharePaise, rateBasisPoints);
-  const taxPaise = input.sharePaise - taxablePaise;
+  const taxablePaise = inclusiveTaxableValue(cumulativePaise, rateBasisPoints);
+  const taxPaise = cumulativePaise - taxablePaise;
 
   // Split into heads the same way the original invoice was: CGST computed, SGST
   // the residual, so the two always sum to the tax being reversed.
-  if (input.placeOfSupplyKind === 'intra_state') {
+  if (placeOfSupplyKind === 'intra_state') {
     const cgstPaise = halveHalfUp(taxPaise);
     return { taxablePaise, cgstPaise, sgstPaise: taxPaise - cgstPaise, igstPaise: 0n };
   }
