@@ -152,19 +152,16 @@ export class InstantAdminController {
    */
   @Put('doctors/:doctorId/presence')
   @RequirePermission(PERMISSIONS.DOCTORS_MANAGE_LISTING)
-  async setDoctorPresence(
+  setDoctorPresence(
     @CurrentUser() auth: AuthContext,
     @Param('doctorId', createUuidValidationPipe('doctorId')) doctorId: string,
     @Body() dto: AdminSetPresenceDto,
   ) {
-    const result = await this.presence.transition({
-      doctorId,
-      to: dto.presence,
-      actor: { actorType: 'admin', actorId: auth.accountId },
-      reason: 'admin_override',
-    });
-    this.presence.throwForRefusal(result);
-    return this.presence.getOwnPresence(doctorId);
+    // Through the service, not straight into `transition`: the
+    // `SELF_SETTABLE_PRESENCE` restriction this method's comment claims used
+    // to live only in `AdminSetPresenceDto`'s `@IsIn`. See
+    // `InstantPresenceService#setPresenceAsAdmin`.
+    return this.presence.setPresenceAsAdmin(doctorId, dto.presence, auth.accountId);
   }
 
   /** One request's full routing history — every doctor tried, in order, with each outcome. */

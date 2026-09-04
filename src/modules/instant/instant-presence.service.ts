@@ -149,6 +149,44 @@ export class InstantPresenceService implements OnModuleInit {
    * from being none.
    */
   async setOwnPresence(doctorId: string, to: SelfSettablePresence): Promise<InstantPresenceView> {
+    return this.setDeclaredPresence(doctorId, to, { actorType: 'doctor', actorId: doctorId }, 'doctor_self_service');
+  }
+
+  /**
+   * *** THE OPERATOR OVERRIDE, THROUGH THE SAME RULE. ***
+   *
+   * `PUT /admin/instant-consults/doctors/:id/presence`. Its controller's
+   * comment says it is "restricted to the same `SELF_SETTABLE_PRESENCE` set a
+   * doctor gets" — and it was, in `AdminSetPresenceDto`'s `@IsIn` and nowhere
+   * else. It called `transition` directly, so the ONLY thing standing between
+   * an admin and `completing_notes` (an admin signing off clinical
+   * documentation) was a decorator on a DTO. `instant.dto.ts` states the rule
+   * this breaks in its own comment on the doctor's DTO: "The service re-checks
+   * this — the DTO is the first line, not the rule (`backend/README.md`:
+   * services hold the rules, not just the HTTP layer)." Now both paths go
+   * through one method, and the check cannot be true of one and not the other.
+   */
+  async setPresenceAsAdmin(doctorId: string, to: SelfSettablePresence, adminId: string): Promise<InstantPresenceView> {
+    return this.setDeclaredPresence(doctorId, to, { actorType: 'admin', actorId: adminId }, 'admin_override');
+  }
+
+  /**
+   * The shared body of the two DECLARED presence changes — a doctor's own and
+   * an operator's.
+   *
+   * THREE GUARDS, IN THIS ORDER, AND THE ORDER MATTERS — see `setOwnPresence`
+   * above for what each one is for. The third, the completion gate, is applied
+   * by `transition` as a predicate inside the same atomic UPDATE, and it
+   * applies to the admin path exactly as it does to the doctor's: an operator
+   * forcing a gated doctor to `available_now` is refused with
+   * `COMPLETION_GATE_ACTIVE`.
+   */
+  private async setDeclaredPresence(
+    doctorId: string,
+    to: SelfSettablePresence,
+    actor: PresenceActor,
+    reason: string,
+  ): Promise<InstantPresenceView> {
     if (!(SELF_SETTABLE_PRESENCE as readonly DoctorPresence[]).includes(to)) {
       throw new ConflictException({
         code: INSTANT_ERROR_CODES.PRESENCE_NOT_SELF_SETTABLE,
@@ -156,12 +194,7 @@ export class InstantPresenceService implements OnModuleInit {
       });
     }
 
-    const result = await this.transition({
-      doctorId,
-      to,
-      actor: { actorType: 'doctor', actorId: doctorId },
-      reason: 'doctor_self_service',
-    });
+    const result = await this.transition({ doctorId, to, actor, reason });
 
     this.throwForRefusal(result);
     return this.getOwnPresence(doctorId);
