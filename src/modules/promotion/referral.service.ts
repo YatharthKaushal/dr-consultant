@@ -220,8 +220,18 @@ export class ReferralService {
    * Driven only by the sweep, which is the component that knows a consultation's
    * status. One transaction: lock the event, flip it, mint each enabled side.
    *
-   * *** THE PER-REFERRER CAP IS CHECKED UNDER THE EVENT'S LOCK. *** Counted from
-   * `referral_events`, never stored — the same reasoning as the instrument caps.
+   * *** THE PER-REFERRER CAP IS CHECKED UNDER A PER-REFERRER LOCK, NOT THE
+   * EVENT'S. *** Counted from `referral_events`, never stored — the same
+   * reasoning as the instrument caps. But unlike an instrument cap, the count
+   * spans MANY event rows, and locking the one event being qualified serialises
+   * nothing: two of this referrer's referrals qualifying at the same moment lock
+   * two different rows, each reads a count that excludes the other, and a cap of
+   * 1 mints twice. Two instances sweeping concurrently is the documented normal
+   * case (`promotion-sweep.service.ts`), so this is a race that happens, not one
+   * that could. `ReferralRepository.lockReferrerGuard` closes it; the event's own
+   * row lock stays, because it is what stops two callers qualifying the SAME
+   * event twice.
+   *
    * A referrer over their cap still has the event marked `qualified` (it DID
    * qualify; that is a fact about the consultation) but no reward is minted, and
    * the audit row says why. Recording it as `void` instead would misstate what
@@ -231,6 +241,16 @@ export class ReferralService {
     const config = await this.config.getResolved();
 
     return this.db.transaction(async (tx) => {
+      // Read the event first, WITHOUT a lock, only to learn whose referral this
+      // is. `referrer_patient_id` is immutable once written.
+      const candidate = await this.events.findEventById(eventId, tx);
+      if (!candidate || candidate.status !== 'qualifying') return { qualified: false, mintedRewardIds: [] };
+
+      // *** THE PER-REFERRER LOCK, TAKEN BEFORE THE ROW LOCK AND BEFORE THE
+      // COUNT. *** Everything below is serialised per referrer, which is the
+      // scope `countQualifiedForReferrer` actually counts over.
+      await this.events.lockReferrerGuard(candidate.referrerPatientId, tx);
+
       const locked = await this.events.findEventByIdForUpdate(eventId, tx);
       if (!locked || locked.status !== 'qualifying') return { qualified: false, mintedRewardIds: [] };
 

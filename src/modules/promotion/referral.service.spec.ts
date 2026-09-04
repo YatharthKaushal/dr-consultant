@@ -58,6 +58,12 @@ function build(
   };
 
   const events = {
+    findEventById: jest.fn().mockResolvedValue(event()),
+    // The per-referrer advisory lock `qualify` takes before it counts. A no-op
+    // here — a mock cannot demonstrate `pg_advisory_xact_lock` serialising two
+    // transactions, which is why that guarantee is proved against a real
+    // database in `promotion.redemption-race.integration.spec.ts` instead.
+    lockReferrerGuard: jest.fn().mockResolvedValue(undefined),
     findEventByIdForUpdate: jest.fn().mockResolvedValue(event()),
     markQualifiedIfQualifying: jest.fn().mockResolvedValue(event({ status: 'qualified' })),
     markVoidIfQualifying: jest.fn().mockResolvedValue(event({ status: 'void' })),
@@ -262,6 +268,44 @@ describe('ReferralService', () => {
     });
 
     describe('the per-referrer cap', () => {
+      it('*** TAKES THE PER-REFERRER LOCK BEFORE IT COUNTS — the event’s own row lock is the wrong scope ***', async () => {
+        // ════════════════════════════════════════════════════════════════════
+        // `countQualifiedForReferrer` counts MANY event rows, and the lock on
+        // the ONE event being flipped serialises none of them. Two of this
+        // referrer's referrals qualifying at the same moment lock two different
+        // rows, each reads a count that excludes the other, and a cap of 1 mints
+        // twice — proved against a real database in
+        // `promotion.redemption-race.integration.spec.ts`, where it happens
+        // because two instances sweeping concurrently is the documented normal
+        // case.
+        //
+        // A mock cannot show `pg_advisory_xact_lock` blocking anything. What it
+        // CAN pin is the ORDER, and the order is the fix: the referrer guard
+        // must be taken before the count it protects.
+        // ════════════════════════════════════════════════════════════════════
+        const order: string[] = [];
+        const { service } = build({
+          events: {
+            lockReferrerGuard: jest.fn(async () => {
+              order.push('lock');
+            }),
+            countQualifiedForReferrer: jest.fn(async () => {
+              order.push('count');
+              return 1;
+            }),
+          },
+        });
+
+        await service.qualify('event-1');
+        expect(order).toEqual(['lock', 'count']);
+      });
+
+      it('locks the REFERRER named on the event, not the event id', async () => {
+        const { service, events } = build();
+        await service.qualify('event-1');
+        expect(events.lockReferrerGuard).toHaveBeenCalledWith(REFERRER, expect.anything());
+      });
+
       it('*** SUPPRESSES THE REWARD BUT STILL MARKS THE EVENT QUALIFIED ***', async () => {
         // It DID qualify — that is a fact about the consultation. Recording it
         // as `void` instead would misstate what happened; the audit row carries

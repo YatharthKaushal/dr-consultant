@@ -163,7 +163,8 @@ function build(overrides: {
     countLiveRedemptions: jest.fn().mockResolvedValue(0),
     countDistinctRedeemers: jest.fn().mockResolvedValue(0),
     countLiveRedemptionsForPatient: jest.fn().mockResolvedValue(0),
-    recordCodeAttempt: jest.fn().mockResolvedValue(undefined),
+    recordCodeAttempt: jest.fn().mockResolvedValue(1),
+    markCodeAttemptOutcome: jest.fn().mockResolvedValue(undefined),
     countRecentAttemptsByPatient: jest.fn().mockResolvedValue(0),
     countRecentAttemptsByIp: jest.fn().mockResolvedValue(0),
     listRedeemableForPatient: jest.fn().mockResolvedValue([]),
@@ -317,19 +318,63 @@ describe('PromotionService', () => {
   });
 
   describe('the enumeration throttle', () => {
+    it('*** OPENS THE ATTEMPT ROW BEFORE IT COUNTS — the ordering IS the throttle ***', async () => {
+      // ══════════════════════════════════════════════════════════════════════
+      // This used to count first and record afterwards, which made the throttle
+      // decorative: every concurrent caller read the same pre-write total, so
+      // sixty parallel `preview` calls all passed a budget of twenty and sixty
+      // rows landed afterwards. Proved against a real database in
+      // `promotion.redemption-race.integration.spec.ts`.
+      //
+      // Recording first is what bounds it: the row COMMITS on this module's own
+      // connection before the count runs, so a caller whose insert is the k-th
+      // to commit in the window sees at least k rows. Nothing else in this file
+      // can demonstrate that, but the ORDER can be asserted here, and the order
+      // is the fix.
+      // ══════════════════════════════════════════════════════════════════════
+      const order: string[] = [];
+      const { service } = build({
+        repo: {
+          recordCodeAttempt: jest.fn(async () => {
+            order.push('record');
+            return 1;
+          }),
+          countRecentAttemptsByPatient: jest.fn(async () => {
+            order.push('count');
+            return 0;
+          }),
+        },
+      });
+
+      await service.preview('SAVEME', context());
+      expect(order).toEqual(['record', 'count']);
+    });
+
     it('refuses TOO_MANY_ATTEMPTS once the per-patient budget is spent', async () => {
+      // 21, not 20: the count now INCLUDES this call's own just-opened row, so
+      // a budget of 20 is exceeded at 21.
       const { service, repo } = build({
-        repo: { countRecentAttemptsByPatient: jest.fn().mockResolvedValue(20) },
+        repo: { countRecentAttemptsByPatient: jest.fn().mockResolvedValue(21) },
       });
       expect(await service.preview('SAVEME', context())).toMatchObject({ reason: 'TOO_MANY_ATTEMPTS' });
       // And it did not even look the code up.
       expect(repo.findInstrumentByCode).not.toHaveBeenCalled();
     });
 
+    it('still admits the LAST attempt inside the budget, so the limit is 20 and not 19', async () => {
+      const { service } = build({
+        repo: {
+          countRecentAttemptsByPatient: jest.fn().mockResolvedValue(20),
+          findInstrumentByCode: jest.fn().mockResolvedValue(instrument()),
+        },
+      });
+      expect(await service.preview('SAVEME', context())).toMatchObject({ applicable: true });
+    });
+
     it('counts the per-IP budget too, but only when an IP is available', async () => {
       // `DiscountOrderContext` is FROZEN and carries no IP, so the pricing path
       // throttles per patient only. This module's own controller has one.
-      const { service, repo } = build({ repo: { countRecentAttemptsByIp: jest.fn().mockResolvedValue(60) } });
+      const { service, repo } = build({ repo: { countRecentAttemptsByIp: jest.fn().mockResolvedValue(61) } });
 
       expect(await service.preview('SAVEME', context())).not.toMatchObject({ reason: 'TOO_MANY_ATTEMPTS' });
       expect(repo.countRecentAttemptsByIp).not.toHaveBeenCalled();
@@ -344,20 +389,31 @@ describe('PromotionService', () => {
       const resolved = build({ repo: { findInstrumentByCode: jest.fn().mockResolvedValue(instrument()) } });
       await resolved.service.preview('SAVEME', context());
       expect(resolved.repo.recordCodeAttempt).toHaveBeenCalledWith(
-        expect.objectContaining({ patientId: PATIENT, outcome: 'resolved' }),
+        expect.objectContaining({ patientId: PATIENT, outcome: 'pending' }),
       );
+      expect(resolved.repo.markCodeAttemptOutcome).toHaveBeenCalledWith(1, 'resolved');
 
       const refused = build({ repo: { findInstrumentByCode: jest.fn().mockResolvedValue(null) } });
       await refused.service.preview('SAVEME', context());
-      expect(refused.repo.recordCodeAttempt).toHaveBeenCalledWith(
-        expect.objectContaining({ patientId: PATIENT, outcome: 'refused' }),
-      );
+      expect(refused.repo.markCodeAttemptOutcome).toHaveBeenCalledWith(1, 'refused');
     });
 
     it('records EXACTLY ONE attempt per call, so the budget cannot be steered by which refusal fires', async () => {
       const { service, repo } = build({ repo: { findInstrumentByCode: jest.fn().mockResolvedValue(null) } });
       await service.preview('SAVEME', context());
       expect(repo.recordCodeAttempt).toHaveBeenCalledTimes(1);
+    });
+
+    it('spends an attempt even when the base is malformed and the call THROWS', async () => {
+      // A caller hammering the endpoint with rubbish bodies must not get a free
+      // budget: `parseDiscountableBase` throws before any code is resolved, and
+      // the row was already opened.
+      const { service, repo } = build();
+      await expect(
+        service.preview('SAVEME', { ...context(), discountableAmount: 'not-money' }),
+      ).rejects.toThrow(BadRequestException);
+      expect(repo.recordCodeAttempt).toHaveBeenCalledTimes(1);
+      expect(repo.markCodeAttemptOutcome).toHaveBeenCalledWith(1, 'refused');
     });
 
     it('swallows a failure to record, because a bookkeeping row must not fail a checkout', async () => {

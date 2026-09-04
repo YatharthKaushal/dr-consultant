@@ -643,21 +643,53 @@ export class PromotionRepository {
   /* ---------------------------------------------------------------------- */
 
   /**
-   * One row per ATTEMPT.
+   * One row per ATTEMPT, OPENED BEFORE THE COUNT THAT DECIDES IT.
    *
-   * *** BOTH OUTCOMES ARE RECORDED. *** `promotion-code-attempts.schema.ts`: "A
-   * throttle that only counts failures is trivially evaded" — an attacker
-   * interleaves known-good codes to keep their failure count under the limit.
+   * *** THE ROW IS WRITTEN FIRST, AND THAT IS THE WHOLE THROTTLE. *** A
+   * count-then-insert throttle counts nothing under concurrency: every caller in
+   * flight reads the same total before any of them has written, so N parallel
+   * requests all pass a budget of one. Inserting first — on this module's own
+   * connection, so it COMMITS immediately — makes each caller's own row visible
+   * to every count taken after it, which is what bounds the number that can get
+   * through. See `PromotionService.checkThrottle`.
+   *
+   * `outcome` is therefore written as `pending` here and settled by
+   * `markCodeAttemptOutcome` once the evaluation is over. Both terminal outcomes
+   * are recorded and both are counted — `promotion-code-attempts.schema.ts`: "A
+   * throttle that only counts failures is trivially evaded" — and a row left
+   * `pending` (a crash mid-evaluation) still counts, which is the safe direction.
    *
    * Written on its OWN executor by default, never inside the reservation
    * transaction: an attempt that was made is a fact, and a reservation that
-   * rolls back must not erase the evidence that somebody tried.
+   * rolls back must not erase the evidence that somebody tried — which is
+   * precisely the evasion a transactional throttle would permit.
+   *
+   * Returns the row id so the outcome can be settled later.
    */
   async recordCodeAttempt(
-    values: { patientId: string | null; ipAddress: string | null; outcome: 'resolved' | 'refused' },
+    values: { patientId: string | null; ipAddress: string | null; outcome: 'pending' | 'resolved' | 'refused' },
+    executor: Executor = this.db,
+  ): Promise<number> {
+    const [row] = await executor
+      .insert(promotionCodeAttemptsTable)
+      .values(values)
+      .returning({ id: promotionCodeAttemptsTable.id });
+    return row.id;
+  }
+
+  /**
+   * Settles an open attempt's outcome. Best-effort by the caller: the row is
+   * already counted, so a failure here costs evidence, never enforcement.
+   */
+  async markCodeAttemptOutcome(
+    id: number,
+    outcome: 'resolved' | 'refused',
     executor: Executor = this.db,
   ): Promise<void> {
-    await executor.insert(promotionCodeAttemptsTable).values(values);
+    await executor
+      .update(promotionCodeAttemptsTable)
+      .set({ outcome })
+      .where(eq(promotionCodeAttemptsTable.id, id));
   }
 
   /**

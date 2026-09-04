@@ -321,20 +321,59 @@ describe('AffiliateService', () => {
       );
     });
 
-    it('falls back to the redemption’s own snapshot when no captured component is supplied', async () => {
-      // `discountable_base - discount_amount` is the same figure by a different
-      // route: pricing declared that amount discountable, and for this platform
-      // that IS the convenience fee.
+    it('*** NEVER mistakes `discountable_base` for the convenience fee — it is THE WHOLE ORDER’S GROSS ***', async () => {
+      // ══════════════════════════════════════════════════════════════════════
+      // THE REGRESSION THIS FILE EXISTS TO HOLD. `resolveBasePaise` used to
+      // fall back to the redemption's `discountable_base` when no
+      // convenience-fee component arrived, on the grounds that "pricing
+      // declared that amount discountable, and for this platform that IS the
+      // convenience fee".
+      //
+      // It is not. `pricing-discount.contract.ts` names `discountableAmount` as
+      // the WHOLE ORDER'S GROSS and `pricing.engine.ts` fills it from
+      // `grossTotalPaise` — 600.00 on the seeded catalogue (500.00 doctor fee +
+      // 100.00 convenience fee), not 100.00.
+      //
+      // So on this booking the platform's TRUE net margin is
+      // 100.00 - 100.00 = 0.00 and the correct commission is 0.00. The old
+      // fallback computed 600.00 - 100.00 = 500.00 and paid 50.00 — five times
+      // the entire convenience fee, funded out of the DOCTOR'S OWN CONSULTATION
+      // FEE, on the one base that ships with no mandatory ceiling precisely
+      // because it is supposed to be incapable of that.
+      //
+      // The fix is to refuse to guess. Skipping under-pays; guessing over-paid.
+      // ══════════════════════════════════════════════════════════════════════
       const { service, repo } = build();
-      await service.recordCommissionForRedemption(
-        { redemption: redemption({ discountableBase: '100.00', discountAmount: '40.00' }), paymentId: 'pay-1', captured: captured(null), config: CONFIG as never },
+      const result = await service.recordCommissionForRedemption(
+        {
+          redemption: redemption({ discountableBase: '600.00', discountAmount: '100.00' }),
+          paymentId: 'pay-1',
+          captured: captured(null),
+          config: CONFIG as never,
+        },
         {} as never,
       );
 
-      expect(repo.insertCommissionIfAbsent).toHaveBeenCalledWith(
-        expect.objectContaining({ baseAmount: '60.00' }),
-        expect.anything(),
-      );
+      expect(result).toBeNull();
+      expect(repo.insertCommissionIfAbsent).not.toHaveBeenCalled();
+    });
+
+    it('and the link-only path is refused for the same reason, so both entry points agree', async () => {
+      const { service, repo } = build({
+        repo: {
+          findActiveAttribution: jest.fn().mockResolvedValue({ partnerId: PARTNER }),
+        },
+      });
+      const result = await service.recordLinkOnlyCommissionForPatient({
+        patientId: 'patient-1',
+        doctorId: 'other-doctor',
+        consultationId: 'consult-1',
+        paymentId: 'pay-1',
+        capturedComponents: [{ code: 'doctor_fee', amount: '500.00' }],
+      });
+
+      expect(result).toBeNull();
+      expect(repo.insertCommissionIfAbsent).not.toHaveBeenCalled();
     });
 
     it('SKIPS rather than guessing when no base can be derived at all', async () => {
@@ -478,6 +517,18 @@ describe('AffiliateService', () => {
         }),
         expect.anything(),
       );
+    });
+
+    it('*** ACCRUES NOTHING WHILE THE MASTER SWITCH IS OFF, even for a row recorded while it was on ***', async () => {
+      // A `pending` commission outlives the switch that created it. Without this
+      // gate the sweep goes on turning those rows into money owed to a doctor
+      // AFTER an admin has switched the mechanism off — so "off" would mean
+      // "stops taking new ones", which is not what a regulatory kill switch is.
+      // The row is left `pending`, not voided: it accrues if the switch returns.
+      const { service, repo, audit } = build({ config: { affiliateEnabled: false } });
+      expect(await service.accrueCommission('comm-1', 'consult-1')).toBe(false);
+      expect(repo.accrueCommissionIfPending).not.toHaveBeenCalled();
+      expect(audit.write).not.toHaveBeenCalled();
     });
 
     it('does nothing on a second pass — the guarded UPDATE matches zero rows', async () => {
