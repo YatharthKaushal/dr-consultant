@@ -147,6 +147,17 @@ export interface ClinicalContract {
 
   /** ADDITIVE (M-20/governance and quality): the dashboard-number companion to `listPendingCaseSummaries` — FR-18.6's "pending summaries" figure. Same predicate, no page. */
   countPendingCaseSummaries(): Promise<number>;
+
+  /**
+   * ADDITIVE (M-21/data rights execution): `DataRightsFacade#previewExecution`
+   * needs a READ-ONLY row count of `clinical_records` for a patient's approved
+   * data-deletion request, across every consultation the caller has already
+   * resolved for that patient — without touching a single row. This table is
+   * RETAIN in the M-21 compliance survey (SRS §5.3 medical-record retention),
+   * so nothing here is ever anonymized or deleted. Empty `consultationIds`
+   * in, `0` out — no query issued.
+   */
+  countRecordsForConsultations(consultationIds: readonly string[]): Promise<number>;
 }
 
 /**

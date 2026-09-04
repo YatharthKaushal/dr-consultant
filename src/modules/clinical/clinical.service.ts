@@ -431,6 +431,11 @@ export class ClinicalService {
     return this.repo.countDrafts();
   }
 
+  /** ADDITIVE (M-21/data rights execution) — see `clinical.repository.ts#countRecordsForConsultations`. */
+  async countRecordsForConsultations(consultationIds: readonly string[]): Promise<number> {
+    return this.repo.countRecordsForConsultations(consultationIds);
+  }
+
   /**
    * *** THE `clinical.read_records` READ (SRS §6.2). ***
    *

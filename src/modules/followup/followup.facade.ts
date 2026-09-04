@@ -70,4 +70,11 @@ export class FollowupFacade implements FollowupContract {
   async countOpenAlertsByType(): Promise<Partial<Record<SafetyAlertType, number>>> {
     return this.alerts.countOpenAlertsByType();
   }
+
+  /** ADDITIVE (M-21/data rights execution) — see `FollowupContract#countDataRightsRowsForConsultations`. */
+  async countDataRightsRowsForConsultations(
+    consultationIds: readonly string[],
+  ): Promise<{ checkinResponses: number; safetyAlerts: number; followupAssignments: number }> {
+    return this.followup.countDataRightsRowsForConsultations(consultationIds);
+  }
 }

@@ -1,5 +1,5 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { and, desc, eq, inArray, isNull, or } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNull, or, sql } from 'drizzle-orm';
 import { DATABASE } from '../../config/db/database.module';
 import type { Database, DatabaseTransaction } from '../../config/db/database.config';
 import { patientFilesTable, type NewPatientFileRow, type PatientFileRow } from '../../schema/patient-files.schema';
@@ -108,6 +108,23 @@ export class PatientFileRepository {
       .from(patientFilesTable)
       .where(and(isNull(patientFilesTable.deletedAt), scopeCondition))
       .orderBy(desc(patientFilesTable.createdAt));
+  }
+
+  /**
+   * ADDITIVE (M-21/data rights execution): a patient data-deletion preview
+   * needs a row count for `patient_files` without touching any of them —
+   * `patient_files` is RETAIN in the M-21 compliance survey (SRS §5.3), so
+   * this is a pure `SELECT COUNT`, never a delete. Excludes soft-deleted rows
+   * (`deleted_at IS NULL`), the same default every other read in this class
+   * applies unless its own comment says otherwise — a row the patient
+   * already can't see is not part of the live count the preview reports.
+   */
+  async countByPatient(patientId: string, executor: Executor = this.db): Promise<number> {
+    const [row] = await executor
+      .select({ count: sql<string>`count(*)` })
+      .from(patientFilesTable)
+      .where(and(eq(patientFilesTable.patientId, patientId), isNull(patientFilesTable.deletedAt)));
+    return Number(row?.count ?? 0);
   }
 
   /** Soft-deletes one row (`deletedAt = now()`), only if it is not already deleted. Returns the updated row, or `null` if `id` doesn't exist or was already deleted (idempotent-safe: a second delete attempt reports "not found", not a silent no-op success). */

@@ -1,8 +1,9 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { and, asc, eq, isNull, lte } from 'drizzle-orm';
+import { and, asc, count, eq, inArray, isNull, lte } from 'drizzle-orm';
 import { DATABASE } from '../../config/db/database.module';
 import type { Database, DatabaseTransaction } from '../../config/db/database.config';
 import { paymentEventsTable, type PaymentEventRow } from '../../schema/payment-events.schema';
+import { paymentsTable } from '../../schema/payments.schema';
 import { isUniqueConstraintViolation } from '../../shared/errors/postgres-error.util';
 
 type Executor = Database | DatabaseTransaction;
@@ -130,5 +131,29 @@ export class PaymentEventRepository {
       .from(paymentEventsTable)
       .where(eq(paymentEventsTable.paymentId, paymentId))
       .orderBy(asc(paymentEventsTable.receivedAt));
+  }
+
+  /**
+   * ADDITIVE (M-21/data rights execution): `DataRightsFacade#previewExecution`
+   * needs a READ-ONLY row count of `payment_events` for a patient's approved
+   * data-deletion request, without touching a single row — `payment_events`
+   * is RETAIN in the M-21 compliance survey (financial/statutory
+   * record-keeping under GST law and reconciliation obligations), so nothing
+   * here is ever anonymized or deleted.
+   *
+   * `payment_events` has no `consultation_id` of its own, only a NULLABLE
+   * `payment_id`, so this joins to `payments` — this module's OWN table — to
+   * filter on `input.consultationIds`. The `INNER JOIN` itself excludes every
+   * row whose `payment_id` is null: those never resolved to a payment at all
+   * and are out of scope, exactly as the caller's spec requires.
+   */
+  async countByConsultationIds(consultationIds: readonly string[], executor: Executor = this.db): Promise<number> {
+    if (consultationIds.length === 0) return 0;
+    const [row] = await executor
+      .select({ value: count() })
+      .from(paymentEventsTable)
+      .innerJoin(paymentsTable, eq(paymentsTable.id, paymentEventsTable.paymentId))
+      .where(inArray(paymentsTable.consultationId, [...consultationIds]));
+    return row?.value ?? 0;
   }
 }

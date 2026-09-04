@@ -47,4 +47,14 @@ export interface FeedbackContract {
    * record off a consultation id").
    */
   countComplaintsByStatus(): Promise<Record<ComplaintStatus, number>>;
+
+  /**
+   * ADDITIVE (M-21/data rights execution). READ-ONLY row counts of
+   * `feedback` and `complaints` for one patient — both are RETAIN in the
+   * M-21 survey (M-19's own done-when: "a complaint can be raised, tracked
+   * and closed with its full history kept", `docs/MODULES.md`), so this
+   * exists purely to report a count in a data-deletion preview; nothing
+   * here is ever written.
+   */
+  countDataRightsRowsForPatient(patientId: string): Promise<{ feedback: number; complaints: number }>;
 }

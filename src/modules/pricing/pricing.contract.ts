@@ -321,4 +321,30 @@ export interface PricingContract {
 
   /** Whether a pricing catalogue has been configured at all. `PaymentConfigService.update` gates on this. */
   hasCatalogue(): Promise<boolean>;
+
+  /**
+   * ADDITIVE (M-21/data rights execution): `DataRightsFacade#previewExecution`
+   * needs a READ-ONLY row count of what this module holds for a patient's
+   * approved data-deletion request, without touching a single row — this
+   * module's tables are RETAIN in the M-21 compliance survey (financial and
+   * statutory record-keeping under GST law, and the reconciliation
+   * obligations pricing/payment both carry), so nothing here is ever
+   * anonymized or deleted.
+   *
+   * `priceQuotes` counts `price_quotes` rows for `input.patientId` directly.
+   * `priceQuoteComponents` counts `price_quote_components` rows joined
+   * through their owning `price_quotes` row — the components table carries
+   * no `patient_id` of its own. `refundComponents` counts `refund_components`
+   * rows reached by joining through `refunds` and `payments`
+   * (`modules/payment`'s tables), filtered to `input.consultationIds` — the
+   * one column that actually says which consultation a refund line is for.
+   * `input.consultationIds` is caller-resolved, the same convention
+   * `apportionRefund`'s `quoteId` and every other cross-module id this
+   * contract takes already follows.
+   */
+  countDataRightsRowsForPatient(input: { patientId: string; consultationIds: readonly string[] }): Promise<{
+    priceQuotes: number;
+    priceQuoteComponents: number;
+    refundComponents: number;
+  }>;
 }

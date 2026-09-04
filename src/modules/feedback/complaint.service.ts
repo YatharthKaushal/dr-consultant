@@ -230,6 +230,14 @@ export class ComplaintService {
     return result;
   }
 
+  /**
+   * ADDITIVE (M-21/data rights execution) — see `complaint.repository.ts
+   * #countByPatientId`.
+   */
+  async countByPatientId(patientId: string): Promise<number> {
+    return this.repo.countByPatientId(patientId);
+  }
+
   /* ══════════════════════════════════════════════════════════════════════ */
   /* Shared plumbing                                                        */
   /* ══════════════════════════════════════════════════════════════════════ */

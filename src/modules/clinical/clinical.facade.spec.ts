@@ -9,6 +9,7 @@ function createFacade() {
     getCarePlanInputs: jest.fn().mockResolvedValue(null),
     listPendingCaseSummaries: jest.fn().mockResolvedValue([]),
     countPendingCaseSummaries: jest.fn().mockResolvedValue(0),
+    countRecordsForConsultations: jest.fn().mockResolvedValue(0),
   };
   return { facade: new ClinicalFacade(clinical as unknown as ClinicalService), clinical };
 }
@@ -46,6 +47,14 @@ describe('ClinicalFacade', () => {
     expect(clinical.countPendingCaseSummaries).toHaveBeenCalled();
   });
 
+  it('delegates the M-21/data rights preview count for a set of consultations', async () => {
+    const { facade, clinical } = createFacade();
+
+    await facade.countRecordsForConsultations([CONSULTATION_ID]);
+
+    expect(clinical.countRecordsForConsultations).toHaveBeenCalledWith([CONSULTATION_ID]);
+  });
+
   /**
    * *** THE ABSENCE IS THE CONTRACT. *** Finalising asserts that a clinician
    * did the clinical work, so it is the treating doctor's act through this
@@ -61,6 +70,7 @@ describe('ClinicalFacade', () => {
 
     expect(surface.sort()).toEqual([
       'countPendingCaseSummaries',
+      'countRecordsForConsultations',
       'getCarePlanInputs',
       'getRecordByConsultationId',
       'listPendingCaseSummaries',

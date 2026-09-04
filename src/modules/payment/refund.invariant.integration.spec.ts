@@ -58,6 +58,7 @@ import { patientsTable as _patients } from '../../schema/patients.schema';
 import { refundsTable } from '../../schema/refunds.schema';
 import { specialtiesTable } from '../../schema/specialties.schema';
 import { AuditService } from '../../shared/audit/audit.service';
+import { PaymentEventRepository } from './payment-event.repository';
 import { PaymentRepository } from './payment.repository';
 import { PriceQuoteRepository } from '../pricing/price-quote.repository';
 import { PricingConfigRepository } from '../pricing/pricing-config.repository';
@@ -202,7 +203,7 @@ function buildPricingFacade(db: Database): PricingFacade {
     new UnavailableDiscountProvider(),
     new AuditService(db),
   );
-  return new PricingFacade(pricing, new PricingRefundService(quotes));
+  return new PricingFacade(pricing, new PricingRefundService(quotes, new RefundComponentRepository(db)));
 }
 
 describe('RefundService — the refund invariant under REAL concurrency (integration)', () => {
@@ -256,6 +257,7 @@ describe('RefundService — the refund invariant under REAL concurrency (integra
       new AuditService(db),
       pricingFacade,
       new RefundComponentRepository(db),
+      new PaymentEventRepository(db),
     );
   });
 
@@ -575,6 +577,7 @@ describe('RefundService — the refund invariant under REAL concurrency (integra
       new AuditService(db),
       pricingFacade,
       new RefundComponentRepository(db),
+      new PaymentEventRepository(db),
     );
 
     await expect(

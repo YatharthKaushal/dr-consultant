@@ -59,4 +59,29 @@ export class PatientRepository {
       .returning();
     return row ?? null;
   }
+
+  /**
+   * ADDITIVE (M-21/data rights execution). Nulls every direct-identifier
+   * column this module owns on `patients` — `fullName`, `dateOfBirth`,
+   * `pushToken`, `deviceId`. Deliberately NOT `mobileNumber` or
+   * `tokenVersion`: both stay exclusively identity's to write, per this
+   * file's own header comment, so a caller anonymizing a patient must also
+   * call `IdentityFacade.anonymizeMobileNumber('patient', id)` and
+   * `IdentityFacade.revokeAllSessions('patient', id, ...)` — this method is
+   * only the half of anonymization that belongs to THIS table's owning
+   * columns. Deliberately NOT `status`: the caller decides that separately
+   * (`patient.service.ts#updateStatus` already owns the
+   * status-plus-revocation transition to `deleted`), so this method can be
+   * retried on its own without re-deciding the account's status each time.
+   * `gender`/`preferredLanguage` are left alone — neither is a direct
+   * identifier.
+   */
+  async anonymizeIdentity(id: string, executor: Executor = this.db): Promise<PatientRow | null> {
+    const [row] = await executor
+      .update(patientsTable)
+      .set({ fullName: null, dateOfBirth: null, pushToken: null, deviceId: null, updatedAt: new Date() })
+      .where(eq(patientsTable.id, id))
+      .returning();
+    return row ?? null;
+  }
 }

@@ -50,6 +50,7 @@ describe('NotificationFacade', () => {
   beforeEach(() => {
     notifications = {
       notify: jest.fn().mockResolvedValue({ queued: true, notificationId: 41 }),
+      countNotificationsForPatient: jest.fn().mockResolvedValue(0),
     } as unknown as jest.Mocked<NotificationService>;
 
     facade = new NotificationFacade(notifications);
@@ -126,16 +127,31 @@ describe('NotificationFacade', () => {
   });
 
   /**
-   * The facade exposes ONLY `notify`. The in-app inbox and device
-   * registration are HTTP surfaces for the apps themselves, not something
-   * another MODULE calls — a module that could reach them could read another
-   * account's notifications, and M-08's done-when is a structural property of
-   * this surface rather than a convention.
+   * *** M-21 CALLS THIS. *** A pure row count for a patient data-deletion
+   * preview — see `notification.contract.ts#NotificationContract.countNotificationsForPatient`.
+   * Nothing here writes, and it does not touch the three frozen M-13 interfaces.
    */
-  it('exposes notify and nothing else', () => {
+  describe('the M-21 data-rights row count', () => {
+    it('delegates to the service', async () => {
+      notifications.countNotificationsForPatient.mockResolvedValue(6);
+
+      await expect(facade.countNotificationsForPatient('p1')).resolves.toBe(6);
+      expect(notifications.countNotificationsForPatient).toHaveBeenCalledWith('p1');
+    });
+  });
+
+  /**
+   * The facade exposes `notify` and the M-21 row count, and nothing else.
+   * The in-app inbox and device registration are HTTP surfaces for the apps
+   * themselves, not something another MODULE calls — a module that could
+   * reach them could read another account's notifications, and M-08's
+   * done-when is a structural property of this surface rather than a
+   * convention.
+   */
+  it('exposes notify, the M-21 count, and nothing else', () => {
     const surface = Object.getOwnPropertyNames(Object.getPrototypeOf(facade) as object).filter(
       (name) => name !== 'constructor',
     );
-    expect(surface).toEqual(['notify']);
+    expect(surface.sort()).toEqual(['countNotificationsForPatient', 'notify']);
   });
 });

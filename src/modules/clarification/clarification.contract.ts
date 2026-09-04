@@ -70,4 +70,16 @@ export interface ClarificationCaseSummaryView {
 export interface ClarificationContract {
   /** One case's governance summary, or `null` if the id does not exist. No ownership check — the caller (an admin-only consumer) authorizes, same rule `ClinicalContract`'s two methods state. */
   getCaseSummary(caseId: string): Promise<ClarificationCaseSummaryView | null>;
+
+  /**
+   * ADDITIVE (M-21/data rights execution): a patient data-deletion preview
+   * needs a row count for `clarification_cases` without touching any of
+   * them or reading their content — this table is RETAIN in the M-21
+   * compliance survey (case content is already de-identified;
+   * `source_consultation_id` is kept "for the treating doctor and audit
+   * ONLY" per this table's own schema comment, which is the audit-trail
+   * exception the survey applies). Counts rows whose `source_consultation_id`
+   * is in the given list. Empty array in, `0` out.
+   */
+  countCasesForConsultations(consultationIds: readonly string[]): Promise<number>;
 }

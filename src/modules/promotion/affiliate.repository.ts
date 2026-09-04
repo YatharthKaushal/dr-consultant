@@ -461,4 +461,36 @@ export class AffiliateRepository {
 
     return { settlement, restored: restored.length };
   }
+
+  /**
+   * M-21/data rights execution, READ-ONLY. See `PromotionContract
+   * #countDataRightsRowsForPatient`. `affiliate_commissions` has no direct
+   * `patient_id` column — it references `consultation_id` — so it is counted
+   * via `consultationIds` instead; an empty array is `0` with no query run,
+   * since `inArray` over an empty array is unsafe.
+   */
+  async countDataRightsRows(
+    input: { patientId: string; consultationIds: readonly string[] },
+    executor: Executor = this.db,
+  ): Promise<{ affiliateAttributions: number; affiliateCommissions: number }> {
+    const [attributionsRow] = await executor
+      .select({ value: count() })
+      .from(affiliateAttributionsTable)
+      .where(eq(affiliateAttributionsTable.patientId, input.patientId));
+
+    const affiliateCommissions =
+      input.consultationIds.length === 0
+        ? 0
+        : ((
+            await executor
+              .select({ value: count() })
+              .from(affiliateCommissionsTable)
+              .where(inArray(affiliateCommissionsTable.consultationId, [...input.consultationIds]))
+          )[0]?.value ?? 0);
+
+    return {
+      affiliateAttributions: attributionsRow?.value ?? 0,
+      affiliateCommissions,
+    };
+  }
 }

@@ -15,8 +15,12 @@ export type DataDeletionReviewStatus = Extract<DeletionStatus, 'in_review' | 'ap
  * *** THE STATE MACHINE THIS MODULE OWNS — AND WHERE IT DELIBERATELY STOPS. ***
  *
  * `enums.schema.ts#DELETION_STATUSES` is `requested -> in_review -> approved |
- * rejected -> executed | failed`. `executed`/`failed` are NOT reachable from
- * here at all — see `reviewRequest`'s own header. Within what remains:
+ * rejected -> executed | failed`. `executed`/`failed` are NOT reachable
+ * through THIS table or `reviewRequest` — see that method's own header.
+ * (M-21/data rights execution added the one legal way to reach them,
+ * `recordExecutionOutcome` below — a deliberately separate method with its
+ * own guard, not a widening of this table or `reviewRequest`.) Within what
+ * remains here:
  *   - `requested` -> `in_review`, `approved`, or `rejected` (an admin may
  *     decide outright without first marking it under review).
  *   - `in_review` -> `approved` or `rejected`.
@@ -154,6 +158,84 @@ export class DataDeletionService {
           entityType: DATA_DELETION_AUDIT_ENTITY_TYPES.DATA_DELETION_REQUEST,
           entityId: requestId,
           metadata: { transition: { from: existing.status, to: input.status }, reviewNote: input.reviewNote ?? null },
+        },
+        tx,
+      );
+
+      return row;
+    });
+
+    return toDataDeletionRequestRecord(updated);
+  }
+
+  /* ---------------------------------------------------------------------- */
+  /* M-21 (data rights execution) — see data-deletion-execution.contract.ts  */
+  /* ---------------------------------------------------------------------- */
+
+  /**
+   * ADDITIVE (M-21/data rights execution). Like `getForAdmin`, but returns
+   * `null` instead of throwing on a missing id — this is a trusted
+   * module-to-module read (`DataDeletionExecutionFacade#getRequest`), and a
+   * caller composing a preview/execution flow needs to distinguish "does not
+   * exist" from every other outcome itself, not catch a `NotFoundException`.
+   */
+  async findForExecution(requestId: string): Promise<DataDeletionRequestRecord | null> {
+    const row = await this.repo.findById(requestId);
+    return row ? toDataDeletionRequestRecord(row) : null;
+  }
+
+  /**
+   * ADDITIVE (M-21/data rights execution). *** THE TRANSITION
+   * `reviewRequest` DELIBERATELY CANNOT MAKE. *** See that method's header
+   * and `LEGAL_REVIEW_TRANSITIONS`'s: `executed`/`failed` are unreachable
+   * from every review state on purpose, because deciding a request may
+   * proceed (review) and actually acting on the patient's data (execution)
+   * are different acts with different authors in time — a request can sit
+   * `approved` for a while before an admin actually runs execution.
+   *
+   * Refuses (`ConflictException`) unless the request is CURRENTLY
+   * `approved` — never `requested`/`in_review`/`rejected`, and never a
+   * SECOND time once it is already `executed`/`failed`. A caller that needs
+   * to retry a partial failure re-approves the request first (a fresh
+   * admin decision), rather than this method silently allowing a replay.
+   *
+   * Writes `executed_at`/`execution_outcome` and the target `status`
+   * together, and a `data_deletion_request`-entity audit entry for the
+   * transition — the same pairing `reviewRequest` makes for its own writes.
+   */
+  async recordExecutionOutcome(
+    actingAdminId: string,
+    requestId: string,
+    input: { status: Extract<DeletionStatus, 'executed' | 'failed'>; executionOutcome: unknown },
+  ): Promise<DataDeletionRequestRecord> {
+    const existing = await this.repo.findById(requestId);
+    if (!existing) throw this.notFound();
+
+    if (existing.status !== 'approved') {
+      throw new ConflictException({
+        code: DATA_DELETION_ERROR_CODES.DATA_DELETION_NOT_APPROVED,
+        message: `A request in "${existing.status}" may not be executed — only an "approved" request may.`,
+        currentStatus: existing.status,
+      });
+    }
+
+    const executedAt = new Date();
+    const updated = await this.db.transaction(async (tx) => {
+      const row = await this.repo.recordExecutionOutcome(
+        requestId,
+        { status: input.status, executionOutcome: input.executionOutcome, executedAt },
+        tx,
+      );
+      if (!row) throw this.notFound();
+
+      await this.audit.write(
+        {
+          actorType: 'admin',
+          actorId: actingAdminId,
+          action: 'update',
+          entityType: DATA_DELETION_AUDIT_ENTITY_TYPES.DATA_DELETION_REQUEST,
+          entityId: requestId,
+          metadata: { transition: { from: existing.status, to: input.status }, executionOutcome: input.executionOutcome },
         },
         tx,
       );

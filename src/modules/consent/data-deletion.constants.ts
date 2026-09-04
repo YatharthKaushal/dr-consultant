@@ -16,6 +16,12 @@ export const DATA_DELETION_ERROR_CODES = {
    * transition itself is illegal (e.g. `approved` back to `in_review`).
    */
   DATA_DELETION_ILLEGAL_TRANSITION: 'DATA_DELETION_ILLEGAL_TRANSITION',
+  /**
+   * ADDITIVE (M-21/data rights execution). `recordExecutionOutcome` was
+   * called against a request that is not currently `approved` — either it
+   * was never reviewed, was rejected, or has already been executed once.
+   */
+  DATA_DELETION_NOT_APPROVED: 'DATA_DELETION_NOT_APPROVED',
 } as const;
 export type DataDeletionErrorCode = (typeof DATA_DELETION_ERROR_CODES)[keyof typeof DATA_DELETION_ERROR_CODES];
 

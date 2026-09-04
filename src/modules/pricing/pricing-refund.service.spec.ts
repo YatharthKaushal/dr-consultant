@@ -10,6 +10,9 @@ import type { PriceQuoteComponentRow } from '../../schema/price-quote-components
 import type { PriceQuoteRow } from '../../schema/price-quotes.schema';
 import type { PriceQuoteRepository } from './price-quote.repository';
 import { apportion, PricingRefundService } from './pricing-refund.service';
+import type { RefundComponentRepository } from './refund-component.repository';
+
+const noopRefundComponents = { countForConsultations: jest.fn().mockResolvedValue(0) } as unknown as RefundComponentRepository;
 
 /* -------------------------------------------------------------------------- */
 /* Fixtures — the seeded catalogue's own 618.00 bill                           */
@@ -362,7 +365,7 @@ describe('PricingRefundService.refundAmountForPct — THE REFUND BASE CHANGED', 
       }),
       findComponents: jest.fn().mockResolvedValue(SEEDED_618),
     } as unknown as jest.Mocked<PriceQuoteRepository>;
-    return new PricingRefundService(quotes);
+    return new PricingRefundService(quotes, noopRefundComponents);
   }
 
   /**

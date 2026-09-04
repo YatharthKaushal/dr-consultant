@@ -58,6 +58,7 @@ import { PricingConfigService } from './pricing-config.service';
 import { financialYearFor, PricingDocumentRepository } from './pricing-document.repository';
 import { PricingRefundService } from './pricing-refund.service';
 import { PricingService } from './pricing.service';
+import { RefundComponentRepository } from './refund-component.repository';
 import { UnavailableDiscountProvider } from './unavailable-discount.provider';
 import { PRICING_DOCUMENT_SERIES } from './pricing.constants';
 
@@ -93,7 +94,7 @@ describe('Pricing — the quote lifecycle against a REAL database (integration)'
     // The NULL OBJECT, exactly as `pricing.module.ts` binds it until promotions
     // merges. Nothing here reaches a network.
     pricing = new PricingService(db, quotes, documents, config, new UnavailableDiscountProvider(), new AuditService(db));
-    refunds = new PricingRefundService(quotes);
+    refunds = new PricingRefundService(quotes, new RefundComponentRepository(db));
   });
 
   afterAll(async () => {

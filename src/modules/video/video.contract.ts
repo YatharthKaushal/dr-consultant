@@ -133,4 +133,15 @@ export interface VideoContract {
    * `InstantContract#getInstantConsult` state.
    */
   getSession(consultationId: string): Promise<VideoSessionView>;
+
+  /**
+   * ADDITIVE (M-21/data rights execution): `DataRightsFacade#previewExecution`
+   * needs a READ-ONLY row count of `consultation_participants` for a
+   * patient's approved data-deletion request, across every consultation the
+   * caller has already resolved for that patient — without touching a
+   * single row. This table is RETAIN in the M-21 compliance survey (SRS
+   * §5.3), so nothing this method reads is ever anonymized or deleted. Empty
+   * `consultationIds` in, `0` out — no query issued.
+   */
+  countParticipantRowsForConsultations(consultationIds: readonly string[]): Promise<number>;
 }

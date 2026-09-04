@@ -25,6 +25,7 @@ const SPECIALTY_ID = 'd0000000-0000-4000-8000-000000000001';
 
 function harness() {
   const createRefund = jest.fn(async () => ({ refundId: 'r1', status: 'processing' }));
+  const countDataRightsRowsForConsultations = jest.fn(async () => ({ payments: 0, refunds: 0, paymentEvents: 0 }));
   const quote = jest.fn(async () => ({ totalPayable: '500.00' }) as unknown as PaymentBreakdown);
   const createOrderForConsultation = jest.fn(async () => ({
     paymentId: PAYMENT_ID,
@@ -33,8 +34,14 @@ function harness() {
     breakdown: { totalPayable: '500.00' },
   }));
   const payments = { quote, createOrderForConsultation } as unknown as PaymentService;
-  const refunds = { createRefund } as unknown as RefundService;
-  return { facade: new PaymentFacade(payments, refunds), createRefund, quote, createOrderForConsultation };
+  const refunds = { createRefund, countDataRightsRowsForConsultations } as unknown as RefundService;
+  return {
+    facade: new PaymentFacade(payments, refunds),
+    createRefund,
+    quote,
+    createOrderForConsultation,
+    countDataRightsRowsForConsultations,
+  };
 }
 
 describe('PaymentFacade.quote — the options argument crosses the seam', () => {
@@ -175,5 +182,19 @@ describe('PaymentFacade.createRefund — the refund base crosses the seam', () =
     });
 
     expect(createRefund).toHaveBeenCalledWith(expect.not.objectContaining({ refundPct: expect.anything() }));
+  });
+});
+
+describe('PaymentFacade.countDataRightsRowsForConsultations', () => {
+  it('delegates to RefundService, which reads across payments/refunds/payment_events', async () => {
+    const { facade, countDataRightsRowsForConsultations } = harness();
+    countDataRightsRowsForConsultations.mockResolvedValueOnce({ payments: 2, refunds: 1, paymentEvents: 4 });
+
+    await expect(facade.countDataRightsRowsForConsultations([CONSULTATION_ID])).resolves.toEqual({
+      payments: 2,
+      refunds: 1,
+      paymentEvents: 4,
+    });
+    expect(countDataRightsRowsForConsultations).toHaveBeenCalledWith([CONSULTATION_ID]);
   });
 });

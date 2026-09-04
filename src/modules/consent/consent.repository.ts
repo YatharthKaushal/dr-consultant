@@ -1,5 +1,5 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { and, desc, eq } from 'drizzle-orm';
+import { and, count, desc, eq } from 'drizzle-orm';
 import type { Database, DatabaseTransaction } from '../../config/db/database.config';
 import { DATABASE } from '../../config/db/database.module';
 import { consentsTable, type ConsentRow } from '../../schema/consents.schema';
@@ -99,6 +99,20 @@ export class ConsentRepository {
       .innerJoin(legalDocumentsTable, eq(consentsTable.legalDocumentId, legalDocumentsTable.id))
       .where(eq(consentsTable.doctorId, doctorId))
       .orderBy(desc(consentsTable.acceptedAt));
+  }
+
+  /**
+   * ADDITIVE (M-21/data rights execution). READ-ONLY row count for
+   * `DataDeletionExecutionFacade#countConsentsForPatient` — a data-deletion
+   * preview needs to report how many `consents` rows this patient has
+   * without touching any of them. `consents` is RETAIN in the M-21
+   * compliance survey (`consents.schema.ts`: "append-only legal evidence" of
+   * acceptance before teleconsultation, SRS §5.2), so this repository still
+   * has no update/delete method — that discipline is unchanged.
+   */
+  async countPatientAcceptances(patientId: string, executor: Executor = this.db): Promise<number> {
+    const [row] = await executor.select({ value: count() }).from(consentsTable).where(eq(consentsTable.patientId, patientId));
+    return row?.value ?? 0;
   }
 
   /**

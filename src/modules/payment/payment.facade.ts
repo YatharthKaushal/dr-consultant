@@ -115,4 +115,13 @@ export class PaymentFacade implements PaymentContract {
   }): Promise<{ refundId: string; status: string }> {
     return this.refunds.createRefund(input);
   }
+
+  /** ADDITIVE (M-21/data rights execution) — see `PaymentContract#countDataRightsRowsForConsultations`. */
+  async countDataRightsRowsForConsultations(consultationIds: readonly string[]): Promise<{
+    payments: number;
+    refunds: number;
+    paymentEvents: number;
+  }> {
+    return this.refunds.countDataRightsRowsForConsultations(consultationIds);
+  }
 }

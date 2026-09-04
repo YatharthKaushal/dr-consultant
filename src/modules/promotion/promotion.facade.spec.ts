@@ -40,6 +40,15 @@ describe('PromotionFacade', () => {
       release: jest.fn().mockResolvedValue(null),
       getForConsultation: jest.fn().mockResolvedValue(null),
       listRedeemableForPatient: jest.fn().mockResolvedValue([]),
+      countDataRightsRowsForPatient: jest.fn().mockResolvedValue({
+        discountInstruments: 0,
+        discountRedemptions: 0,
+        affiliateAttributions: 0,
+        affiliateCommissions: 0,
+        referralEvents: 0,
+        promotionCodeAttempts: 0,
+      }),
+      anonymizePromotionCodeAttemptsForPatient: jest.fn().mockResolvedValue({ anonymizedCount: 0 }),
     };
     const referrals = { getOrCreateReferralCode: jest.fn().mockResolvedValue({ code: 'REFX' }) };
     const affiliates = {
@@ -74,7 +83,9 @@ describe('PromotionFacade', () => {
     const own = Object.getOwnPropertyNames(PromotionFacade.prototype).filter((name) => name !== 'constructor');
     expect(own.sort()).toEqual(
       [
+        'anonymizePromotionCodeAttemptsForPatient',
         'confirm',
+        'countDataRightsRowsForPatient',
         'getForConsultation',
         'getOrCreateReferralCode',
         'listRedeemableInstrumentsForPatient',
@@ -137,6 +148,19 @@ describe('PromotionFacade', () => {
       const input = { patientId: 'p-1', doctorId: 'd-1', consultationId: 'c-1', paymentId: 'pay-1' };
       await facade.recordLinkOnlyAffiliateCommission(input);
       expect(affiliates.recordLinkOnlyCommissionForPatient).toHaveBeenCalledWith(input);
+    });
+
+    it('forwards the M-21 data-rights count', async () => {
+      const { facade, promotions } = build();
+      const input = { patientId: 'p-1', consultationIds: ['c-1', 'c-2'] };
+      await facade.countDataRightsRowsForPatient(input);
+      expect(promotions.countDataRightsRowsForPatient).toHaveBeenCalledWith(input);
+    });
+
+    it('forwards the M-21 promotion-code-attempts anonymization', async () => {
+      const { facade, promotions } = build();
+      await facade.anonymizePromotionCodeAttemptsForPatient('p-1');
+      expect(promotions.anonymizePromotionCodeAttemptsForPatient).toHaveBeenCalledWith('p-1');
     });
   });
 

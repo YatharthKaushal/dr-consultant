@@ -119,6 +119,59 @@ export class PatientService {
     return toPublicPatient(updated);
   }
 
+  /**
+   * ADDITIVE (M-21/data rights execution). See `PatientContract
+   * #anonymizeForDeletion`'s header for the idempotency contract.
+   *
+   * *** WHY `patients` IS ANONYMIZED, NEVER HARD-DELETED. *** The M-21
+   * survey retains `consultations`, `clinical_records`, `payments`,
+   * `audit_log` and every other clinical/financial table for a deleted
+   * patient — medical-record and financial retention obligations
+   * (`docs/SRS.md` §5.3, §8) that a single deletion request does not
+   * override. Every one of those tables carries a NOT NULL `patient_id` FK
+   * to this row. Hard-deleting it would either violate that FK or force
+   * cascading through tables this survey deliberately decided NOT to touch.
+   * Anonymizing severs the identity while every FK keeps resolving.
+   *
+   * Four writes, deliberately not one transaction spanning modules
+   * (`backend/README.md` §2 forbids a cross-module transaction):
+   *   1. This table's own identifying columns, nulled.
+   *   2. `status` -> `deleted`, reusing `updateStatus` — which also revokes
+   *      every live session (`REVOKING_STATUSES` already includes
+   *      `'deleted'`) and writes its own audit entry for the transition.
+   *   3. `mobileNumber`, anonymized through `IdentityFacade` — identity
+   *      owns that column, never this module (see `patient.repository.ts`'s
+   *      header and `anonymizeIdentity`'s own comment).
+   *   4. A `delete`-action audit entry for the anonymization itself,
+   *      distinct from `updateStatus`'s own `update`-action entry for the
+   *      status transition.
+   *
+   * The caller (`data-rights` module) is responsible for deciding what
+   * happens if a later step in ITS OWN sequence fails — this method either
+   * completes all four writes or throws; it does not partially apply.
+   */
+  async anonymizeForDeletion(patientId: string, actorAdminId: string): Promise<{ anonymized: boolean }> {
+    const existing = await this.findOrThrow(patientId);
+    if (existing.status === 'deleted') {
+      return { anonymized: false };
+    }
+
+    await this.repo.anonymizeIdentity(patientId);
+    await this.updateStatus(actorAdminId, patientId, 'deleted');
+    await this.identity.anonymizeMobileNumber('patient', patientId);
+
+    await this.audit.write({
+      actorType: 'admin',
+      actorId: actorAdminId,
+      action: 'delete',
+      entityType: PATIENT_AUDIT_ENTITY_TYPES.PATIENT,
+      entityId: patientId,
+      metadata: { reason: 'data_deletion_request_executed' },
+    });
+
+    return { anonymized: true };
+  }
+
   private async findOrThrow(patientId: string): Promise<PatientRow> {
     const row = await this.repo.findById(patientId);
     if (!row) {

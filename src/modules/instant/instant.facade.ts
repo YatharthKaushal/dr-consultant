@@ -80,4 +80,9 @@ export class InstantFacade implements InstantContract {
   async getPresence(doctorId: string): Promise<InstantPresenceView | null> {
     return this.presence.getPresence(doctorId);
   }
+
+  /** *** M-21 CALLS THIS. *** See `InstantContract#countOffersForConsultations` — a pure, read-only count, nothing here is anonymized or deleted. */
+  async countOffersForConsultations(consultationIds: readonly string[]): Promise<number> {
+    return this.instant.countOffersForConsultations(consultationIds);
+  }
 }

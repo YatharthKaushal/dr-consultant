@@ -357,6 +357,22 @@ export class FollowupService {
     return this.recommendFollowUpBooking(consultationId, urgent);
   }
 
+  /**
+   * ADDITIVE (M-21/data rights execution) — see `FollowupContract
+   * #countDataRightsRowsForConsultations`. Guards the empty-array case here,
+   * not in the repository: `inArray(col, [])` is unsafe/misleading on an
+   * empty list, so an empty `consultationIds` short-circuits to all-zero
+   * with no query at all.
+   */
+  async countDataRightsRowsForConsultations(
+    consultationIds: readonly string[],
+  ): Promise<{ checkinResponses: number; safetyAlerts: number; followupAssignments: number }> {
+    if (consultationIds.length === 0) {
+      return { checkinResponses: 0, safetyAlerts: 0, followupAssignments: 0 };
+    }
+    return this.repo.countDataRightsRowsForConsultations(consultationIds);
+  }
+
   /** Same 404 a stranger gets when the consultation is not theirs, so a patient cannot probe for another patient's consultation — the convention `clinical.controller.ts`'s header states for the same reason. Returns the booking so a caller that also needs it (`submitCheckin`) does not re-fetch. */
   private async assertPatientOwnsConsultation(consultationId: string, patientId: string) {
     const booking = await this.booking.getBooking(consultationId);

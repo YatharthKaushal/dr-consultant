@@ -1,5 +1,5 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { and, count, desc, eq, gte, isNotNull, isNull, lte, sql, type SQL } from 'drizzle-orm';
+import { and, count, desc, eq, gte, inArray, isNotNull, isNull, lte, sql, type SQL } from 'drizzle-orm';
 import { DATABASE } from '../../config/db/database.module';
 import type { Database, DatabaseTransaction } from '../../config/db/database.config';
 import type { PaymentStatus } from '../../schema/enums.schema';
@@ -303,5 +303,26 @@ export class PaymentRepository {
       )
       .orderBy(paymentsTable.createdAt)
       .limit(limit);
+  }
+
+  /**
+   * ADDITIVE (M-21/data rights execution): `DataRightsFacade#previewExecution`
+   * needs a READ-ONLY row count of `payments` for a patient's approved
+   * data-deletion request, without touching a single row — `payments` is
+   * RETAIN in the M-21 compliance survey (financial/statutory record-keeping
+   * under GST law and reconciliation obligations), so nothing here is ever
+   * anonymized or deleted.
+   *
+   * `consultationIds` is caller-resolved — this module has no `patient_id`
+   * lookup of its own, only `consultation_id`, `booking.repository.ts`'s
+   * convention for the identical reason.
+   */
+  async countByConsultationIds(consultationIds: readonly string[], executor: Executor = this.db): Promise<number> {
+    if (consultationIds.length === 0) return 0;
+    const [row] = await executor
+      .select({ value: count() })
+      .from(paymentsTable)
+      .where(inArray(paymentsTable.consultationId, [...consultationIds]));
+    return row?.value ?? 0;
   }
 }

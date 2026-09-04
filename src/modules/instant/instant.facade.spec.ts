@@ -32,6 +32,7 @@ function buildHarness() {
       attempts: [],
       pendingAttempt: null,
     })),
+    countOffersForConsultations: jest.fn(async () => 0),
   };
 
   const presence: Record<string, Fn> = {
@@ -106,16 +107,27 @@ describe('InstantFacade', () => {
     await expect(facade.getInstantConsult(CONSULTATION_ID)).resolves.toMatchObject({ consultationId: CONSULTATION_ID });
   });
 
+  /** *** M-21 CALLS THIS. *** A pure row count for a patient data-deletion preview — see `instant.contract.ts#InstantContract.countOffersForConsultations`. Nothing here writes. */
+  it('delegates the M-21 data-rights offer count', async () => {
+    const { facade, instant } = buildHarness();
+    instant.countOffersForConsultations.mockResolvedValue(3);
+
+    await expect(facade.countOffersForConsultations([CONSULTATION_ID])).resolves.toBe(3);
+    expect(instant.countOffersForConsultations).toHaveBeenCalledWith([CONSULTATION_ID]);
+  });
+
   it('is deliberately narrow — routing, accepting and timing out are NOT on the public surface', () => {
     const surface = Object.getOwnPropertyNames(InstantFacade.prototype).filter((name) => name !== 'constructor');
 
-    // Five, and every one is a TRUSTED module-to-module call another module
+    // Six, and every one is a TRUSTED module-to-module call another module
     // genuinely needs: M-15 clears the gate, M-14 marks a call started and
-    // ended, M-09/M-04 read presence, the admin panel reads a consult. Routing,
-    // accepting and timing out stay off the surface — they are this module's
-    // own decisions and nothing outside it may reach them.
+    // ended, M-09/M-04 read presence, the admin panel reads a consult, M-21
+    // reads a deletion-preview row count. Routing, accepting and timing out
+    // stay off the surface — they are this module's own decisions and nothing
+    // outside it may reach them.
     expect(surface.sort()).toEqual([
       'clearCompletionGate',
+      'countOffersForConsultations',
       'getInstantConsult',
       'getPresence',
       // The pair M-14 needs: the call started, and — the half that was missing
