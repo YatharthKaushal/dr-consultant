@@ -5,6 +5,7 @@ import { EventsModule } from './config/events/events.module';
 import { getEnv } from './config/env/env.validation';
 import { HealthModule } from './health/health.module';
 import { AiModule } from './modules/ai/ai.module';
+import { AuditModule as AuditReadModule } from './modules/audit/audit.module';
 import { AvailabilityModule } from './modules/availability/availability.module';
 import { BookingModule } from './modules/booking/booking.module';
 import { CarehubModule } from './modules/carehub/carehub.module';
@@ -195,6 +196,15 @@ import { ErrorsModule } from './shared/errors/errors.module';
     // (M-19, listed just above) in `governance.module.ts` post-merge — the
     // standard one-line handover.
     GovernanceModule,
+    // M-21: Audit, Compliance and Data Rights — the READ half (search,
+    // export, client-configurable retention over `audit_log`). Depends on
+    // no feature module: it reads `audit_log`/`app_config` directly, the
+    // same way `shared/audit`'s writer does. Imported under an alias purely
+    // to avoid a file-scope name collision with `shared/audit/audit.module
+    // .ts`'s own `AuditModule` (the `@Global()` provider of `AuditService`,
+    // unchanged by this build) — see `modules/audit/audit.module.ts`'s own
+    // header for why both are named `AuditModule` in their own files.
+    AuditReadModule,
     HealthModule,
   ],
 })

@@ -180,7 +180,28 @@ export class PatientFileService {
     return rows.map(toSafePatientFileRow);
   }
 
-  /** Ownership check: the patient who owns the file, the treating doctor (any consultation with this patient — rule 6's relationship test), or an admin. Returns a freshly-minted signed URL, never the raw `storageKey`. */
+  /**
+   * Ownership check: the patient who owns the file, the treating doctor (any
+   * consultation with this patient — rule 6's relationship test), or an
+   * admin. Returns a freshly-minted signed URL, never the raw `storageKey`.
+   *
+   * *** THE M-21 READ-AUDIT SEAM, NARROWED TO `prescription_pdf`. *** Same
+   * reasoning `canAccessForDownload`'s own header already gives for gating
+   * this one category on `clinical.read_records`: a `prescription_pdf`
+   * carries the diagnosis, risk category, referral note, every medicine line
+   * and the whole advice/warning-signs plan — the exact sensitivity class
+   * `clinical.service.ts#getOwnRecord`/`getRecordForAdmin` are audited for.
+   * Every OTHER category (`medical_history`, `report`, `clarification_
+   * attachment`) is the ordinary file-sharing this module has always done and
+   * is not additionally audited here — narrowing the blast radius the same
+   * deliberate way the permission check itself is narrowed.
+   *
+   * Written for every caller who reaches this branch (patient, treating
+   * doctor, or the `clinical.read_records`-holding admin `canAccessForDownload`
+   * already required) — a download is a read regardless of who the reader is.
+   * Best-effort (no `tx`): a signed URL a caller is entitled to must not be
+   * withheld because the audit insert failed.
+   */
   async getDownloadUrl(auth: AuthContext, fileId: string): Promise<{ url: string; expiresAt: Date }> {
     const file = await this.repo.findById(fileId);
     if (!file || file.deletedAt) {
@@ -190,6 +211,18 @@ export class PatientFileService {
     const allowed = await this.canAccessForDownload(auth, file);
     if (!allowed) {
       throw fileNotFound();
+    }
+
+    if (file.fileCategory === 'prescription_pdf') {
+      await this.audit.write({
+        actorType: auth.accountType,
+        actorId: auth.accountId,
+        action: 'read',
+        entityType: DOCUMENT_AUDIT_ENTITY_TYPES.PATIENT_FILE,
+        entityId: file.id,
+        consultationId: file.consultationId ?? undefined,
+        metadata: { fileCategory: file.fileCategory, event: 'prescription_pdf_download' },
+      });
     }
 
     let url: string;

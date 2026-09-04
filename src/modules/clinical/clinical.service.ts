@@ -130,10 +130,34 @@ export class ClinicalService {
   /* The treating doctor's record                                           */
   /* ══════════════════════════════════════════════════════════════════════ */
 
-  /** The doctor's own view of the record they are writing. 404 — with the same code a stranger gets — when the consultation is not theirs. */
+  /**
+   * The doctor's own view of the record they are writing. 404 — with the same
+   * code a stranger gets — when the consultation is not theirs.
+   *
+   * *** THE M-21 READ-AUDIT SEAM. *** SRS 5.2 ("audit logs record who
+   * accessed or changed clinical ... records") and `docs/MODULES.md`'s M-21
+   * done-when ("a clinical record read... leaves a complete entry") both name
+   * this as a READ, not just the writes `saveDraft`/`finalise` already audit.
+   * Best-effort (no `tx`) — the same discipline every other read-site audit
+   * write in this codebase uses: a doctor opening their own notes must never
+   * fail because the audit insert did. Only written when there is an actual
+   * record to have read; a doctor opening a consultation with no draft yet
+   * has read nothing.
+   */
   async getOwnRecord(consultationId: string, doctorId: string): Promise<ClinicalRecordView | null> {
     await this.requireOwnConsultation(consultationId, doctorId);
     const row = await this.repo.findByConsultationId(consultationId);
+    if (row) {
+      await this.audit.write({
+        actorType: 'doctor',
+        actorId: doctorId,
+        action: 'read',
+        entityType: CLINICAL_AUDIT_ENTITY_TYPES.CLINICAL_RECORD,
+        entityId: row.id,
+        consultationId,
+        metadata: { event: 'record_read' },
+      });
+    }
     return row ? toClinicalRecordView(row) : null;
   }
 
