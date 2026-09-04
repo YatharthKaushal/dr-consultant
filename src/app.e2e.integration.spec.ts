@@ -44,8 +44,9 @@
  *                  A wrong signature and a wrong amount are BOTH proved to be
  *                  refused before the correct delivery is accepted.
  *   6. the seam    `payment.captured` moves the consultation
- *                  `pending_payment -> scheduled` IN-PROCESS AND SYNCHRONOUSLY.
- *                  That only works because a real application is running.
+ *                  `pending_payment -> scheduled` IN-PROCESS — and, as this
+ *                  test discovered, NOT synchronously with the webhook's own
+ *                  response. See the capture test for what that costs.
  *   7. video       POST /api/video/consultations/:id/token — refused outside
  *                  the join window, then issued for BOTH parties, then
  *                  `participant_joined`/`participant_left`/`room_finished`
@@ -58,6 +59,30 @@
  *  10. the payoff  `PromotionSweepService#sweepQualifications()` — machinery
  *                  that has NEVER RUN END TO END ANYWHERE — flips a real
  *                  `referral_events` row from `qualifying` to `qualified`.
+ *
+ * ── WHAT IT FOUND ON ITS FIRST RUN ─────────────────────────────────────────
+ *
+ * The chain completes. Four things it turned up on the way, each pinned by a
+ * test below rather than left to be rediscovered:
+ *
+ *   1. *** NO HTTP ROUTE CARRIES A DISCOUNT CODE INTO A BOOKING. ***
+ *      `CreateBookingDto` has no field for one and `BookingPaymentPort` has no
+ *      parameter for one, so `ValidationPipe({ whitelist: true })` STRIPS a
+ *      `discountCode` SILENTLY and answers 201. The whole discount, referral
+ *      and affiliate mechanism is unreachable from the patient app.
+ *   2. *** THE QUOTE A BOOKING CREATES HAS NO PATIENT, DOCTOR OR SPECIALTY. ***
+ *      All three columns are NULL on every real booking, which is also what
+ *      `tryReserveForPinned` would hand the promotion module (as
+ *      `patientId: ''`) the day (1) is fixed.
+ *   3. *** THE CAPTURE SEAM IS IN-PROCESS BUT NOT SYNCHRONOUS. *** The webhook
+ *      answers 2xx before the booking has moved, so a client that navigates on
+ *      payment success can still see `pending_payment`.
+ *   4. *** A SCHEDULED CONSULTATION NEVER SETS THE COMPLETION GATE. ***
+ *      `video.service.ts#endSession` sets it only for `mode === 'instant'`.
+ *
+ * And one thing that is NOT a bug but reads like one: the bill is 618.00, not
+ * FR-7.3's 708.00, because the pricing engine treats the doctor's fee as
+ * GST-exempt. Stated at the assertion.
  *
  * ── WHAT IS STUBBED, AND THEREFORE WHAT THIS DOES NOT PROVE ────────────────
  *
@@ -93,8 +118,10 @@
  *   1. `loadEnvFiles()` FIRST — never `getEnv()`, which would `process.exit(1)`
  *      inside a Jest worker. Then the app boots (its `DatabaseModule` connects).
  *   2. ONE `seedFixtures`, returning every id it created.
- *   3. Per-run `runId` namespacing on EVERY unique column — phone numbers,
- *      specialty code, reference codes, legal-document version.
+ *   3. Per-run namespacing on EVERY unique column — specialty code and
+ *      legal-document version by `runId`, and phone numbers by a separate
+ *      all-DIGITS run namespace, because these numbers go through
+ *      `@IsPhoneNumber('IN')` and the other specs' hex ones would not.
  *   4. ONE `teardown`, in strict reverse-FK order, nulling
  *      `doctors.blocked_by_consultation_id` before deleting consultations.
  *   5. Every assertion re-reads from Postgres with a fresh raw query. The code
