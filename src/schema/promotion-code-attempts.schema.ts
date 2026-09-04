@@ -14,6 +14,13 @@ import { bigserial, index, inet, pgTable, timestamp, uuid, varchar } from 'drizz
  * in-process counter, and therefore correct across every instance without
  * sticky routing.
  *
+ * *** THE ROW IS WRITTEN BEFORE THE COUNT, NOT AFTER. *** That ordering IS the
+ * throttle: a count taken before the caller's own row exists is a count every
+ * concurrent caller reads identically, so N parallel requests all pass a budget
+ * of one. `otp_request_attempts` is used the same way
+ * (`identity.service.ts#requestOtp` records before it acts). See
+ * `promotion.service.ts#checkThrottle`.
+ *
  * Throttled per patient AND per IP: per-patient alone is useless against
  * unauthenticated probing, and per-IP alone punishes a shared NAT.
  *
@@ -35,7 +42,14 @@ export const promotionCodeAttemptsTable = pgTable(
     /** Null for an unauthenticated attempt — see the header on why this is not an FK. */
     patientId: uuid('patient_id'),
     ipAddress: inet('ip_address'),
-    /** `resolved` | `refused`. Both are counted: a throttle that only counts failures is trivially evaded. */
+    /**
+     * `pending` -> `resolved` | `refused`.
+     *
+     * Written `pending` when the attempt is OPENED (before the count that
+     * decides it) and settled when the evaluation ends. All three are counted
+     * identically: a throttle that only counts failures is trivially evaded, and
+     * a row left `pending` by a crash mid-evaluation must still hold its budget.
+     */
     outcome: varchar('outcome', { length: 20 }).notNull(),
     createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' }).notNull().defaultNow(),
   },
