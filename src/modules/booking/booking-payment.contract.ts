@@ -47,6 +47,24 @@ export interface PaymentBreakdown {
   totalPayable: string;
   /** ISO 4217, e.g. `"INR"` — `payments.currency`. */
   currency: string;
+  /** `price_quotes.id`. Present on every engine-priced bill. Additive — declared optional so this mirror stayed assignable before it was populated. */
+  quoteId?: string | null;
+  /**
+   * What a discount code actually did, applied or refused. Null when none was
+   * offered. *** THIS IS THE FIELD THAT MAKES A REFUSAL VISIBLE. *** Without
+   * it, a bad or expired code priced by M-12 collapses to a plain,
+   * undiscounted breakdown with nothing here to say why — see
+   * `pricing-discount.contract.ts#DiscountRefusalReason`.
+   */
+  discount?: {
+    applied: boolean;
+    code: string;
+    amount: string;
+    /** The part of the promised discount no line could bear. The checkout must show the CAPPED figure. */
+    cappedAmount: string;
+    reason: string | null;
+    message: string | null;
+  } | null;
 }
 
 /** What M-12 hands back once a gateway order exists for a consultation. `gatewayKeyId` is the publishable key the client needs to open checkout; it is not a secret. */
@@ -58,8 +76,28 @@ export interface CreatedOrder {
 }
 
 export interface BookingPaymentPort {
-  /** Price a consultation fee WITHOUT creating anything — backs the pre-booking quote a patient sees before committing to a slot. */
-  quote(consultationFeeInr: string): Promise<PaymentBreakdown>;
+  /**
+   * Price a consultation fee WITHOUT creating anything — backs the pre-booking
+   * quote a patient sees before committing to a slot.
+   *
+   * `options` is what lets that pre-booking quote reflect a discount code the
+   * patient has already typed, and — via `patientId`/`doctorId`/`specialtyId`
+   * — what lets a per-user or per-specialty cap be evaluated at all.
+   * `materialise` MUST stay falsy on this path: a preview reserves nothing.
+   */
+  quote(
+    consultationFeeInr: string,
+    options?: {
+      placeOfSupplyStateCode?: string;
+      placeOfSupplyPincode?: string;
+      discountCode?: string | null;
+      patientId?: string | null;
+      doctorId?: string | null;
+      specialtyId?: string | null;
+      mode?: 'scheduled' | 'instant';
+      materialise?: boolean;
+    },
+  ): Promise<PaymentBreakdown>;
 
   /**
    * Creates the `payments` row and the gateway order for a consultation that
@@ -86,7 +124,17 @@ export interface BookingPaymentPort {
    * payment, which is exactly Tier 1 of the expiry sweep. See
    * `booking.service.ts#createBooking` for the full argument.
    */
-  createOrderForConsultation(input: { consultationId: string; consultationFeeInr: string }): Promise<CreatedOrder>;
+  createOrderForConsultation(input: {
+    consultationId: string;
+    consultationFeeInr: string;
+    /** The code the patient offered at preview time, carried through to be RESERVED here — see `payment.contract.ts#createOrderForConsultation`. */
+    discountCode?: string | null;
+    /** Also the per-user/per-doctor cap key a discount reservation is keyed on — omitting it reserves against `''`, shared by every patient. */
+    patientId?: string | null;
+    doctorId?: string | null;
+    specialtyId?: string | null;
+    mode?: 'scheduled' | 'instant';
+  }): Promise<CreatedOrder>;
 
   /** The payment attached to a consultation, or `null` if none exists yet. `status` is M-12's `payment_status` vocabulary (`created`/`pending`/`paid`/`failed`/`refunded`/`partially_refunded`). */
   getByConsultationId(consultationId: string): Promise<{ paymentId: string; status: string; paidAt: Date | null } | null>;

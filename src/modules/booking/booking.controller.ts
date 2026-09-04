@@ -4,6 +4,7 @@ import type { AuthContext } from '../../shared/auth/auth.types';
 import { createUuidValidationPipe } from '../../shared/errors/uuid-param.pipe';
 import {
   AttachDocumentDto,
+  BookingQuoteQueryDto,
   CancelBookingDto,
   CreateBookingDto,
   CreateInstantBookingDto,
@@ -63,6 +64,7 @@ export class BookingController {
         concernId: dto.concernId ?? null,
         scheduledStartAt: new Date(dto.scheduledStartAt),
         intakeAnswers: dto.intakeAnswers,
+        discountCode: dto.discountCode ?? null,
       },
       { party: 'patient', accountId: auth.accountId },
     );
@@ -105,10 +107,21 @@ export class BookingController {
     return rows.map(toBookingView);
   }
 
-  /** The bill BEFORE committing to a slot, so a patient sees the total first. */
+  /**
+   * The bill BEFORE committing to a slot, so a patient sees the total first.
+   * `?code=` previews a discount/coupon code against this doctor's fee — this
+   * NEVER reserves anything, only `POST /bookings` does. `patientId` always
+   * comes from `@CurrentUser()`: this whole controller requires patient auth
+   * (`@AccountType('patient')`, and every route needs a bearer token by
+   * default), so there is no anonymous-browsing case where it would be absent.
+   */
   @Get('quote/:doctorId')
-  quote(@Param('doctorId', createUuidValidationPipe('doctorId')) doctorId: string) {
-    return this.bookings.quoteForDoctor(doctorId);
+  quote(
+    @CurrentUser() auth: AuthContext,
+    @Param('doctorId', createUuidValidationPipe('doctorId')) doctorId: string,
+    @Query() query: BookingQuoteQueryDto,
+  ) {
+    return this.bookings.quoteForDoctor({ doctorId, patientId: auth.accountId, discountCode: query.code ?? null });
   }
 
   @Get(':id')

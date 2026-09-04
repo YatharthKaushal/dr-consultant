@@ -238,6 +238,15 @@ describe('PaymentService', () => {
         expect.objectContaining({ placeOfSupplyStateCode: '29', discountCode: 'WELCOME20' }),
       );
     });
+
+    /** `specialtyId`/`mode` reach the engine too — a per-specialty cap needs `specialtyId` to evaluate a code at all. */
+    it('forwards specialtyId and mode to the engine', async () => {
+      await service.quote('500.00', { specialtyId: 's0000000-0000-4000-8000-000000000001', mode: 'instant' });
+
+      expect(pricing.preview).toHaveBeenLastCalledWith(
+        expect.objectContaining({ specialtyId: 's0000000-0000-4000-8000-000000000001', mode: 'instant' }),
+      );
+    });
   });
 
   /* ================================================================== */
@@ -352,6 +361,51 @@ describe('PaymentService', () => {
     it('never marks the payment paid — only a verified webhook may do that', async () => {
       await service.createOrderForConsultation({ consultationId: CONSULTATION_ID, consultationFeeInr: '500.00' });
       expect(payments.markPaidIfUnpaid).not.toHaveBeenCalled();
+    });
+
+    /**
+     * *** THE FIX. *** Without this, `materialiseAndPin` was called with
+     * `discountCode`/`patientId`/`doctorId`/`specialtyId`/`mode` all absent —
+     * so every real booking priced and pinned with them null: a code typed at
+     * `quote()`'s preview time was never RESERVED at charge time, and
+     * `price_quotes.patient_id`/`doctor_id`/`specialty_id` were null on every
+     * row, which would make `tryReserveForPinned`'s per-user cap key on `''`,
+     * shared by every patient, the moment a code became reachable at all.
+     */
+    it('forwards discountCode, patientId, doctorId, specialtyId and mode to materialiseAndPin when no quoteId is supplied', async () => {
+      await service.createOrderForConsultation({
+        consultationId: CONSULTATION_ID,
+        consultationFeeInr: '500.00',
+        discountCode: 'SAVE20',
+        patientId: 'p0000000-0000-4000-8000-000000000001',
+        doctorId: 'd0000000-0000-4000-8000-000000000001',
+        specialtyId: 's0000000-0000-4000-8000-000000000001',
+        mode: 'scheduled',
+      });
+
+      expect(pricing.materialiseAndPin).toHaveBeenCalledWith(
+        expect.objectContaining({
+          discountCode: 'SAVE20',
+          patientId: 'p0000000-0000-4000-8000-000000000001',
+          doctorId: 'd0000000-0000-4000-8000-000000000001',
+          specialtyId: 's0000000-0000-4000-8000-000000000001',
+          mode: 'scheduled',
+        }),
+      );
+    });
+
+    /** Omitting the fields stays legal — they default to null, exactly as `placeOfSupplyStateCode` already does. */
+    it('defaults discount/attribution fields to null when the caller supplies none', async () => {
+      await service.createOrderForConsultation({ consultationId: CONSULTATION_ID, consultationFeeInr: '500.00' });
+
+      expect(pricing.materialiseAndPin).toHaveBeenCalledWith(
+        expect.objectContaining({
+          discountCode: null,
+          patientId: null,
+          doctorId: null,
+          specialtyId: null,
+        }),
+      );
     });
   });
 

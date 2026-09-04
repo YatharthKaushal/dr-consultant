@@ -154,6 +154,10 @@ export interface PaymentContract {
       discountCode?: string | null;
       patientId?: string | null;
       doctorId?: string | null;
+      /** Reaches the discount port unchanged — a per-specialty cap needs this to evaluate a code at all. */
+      specialtyId?: string | null;
+      /** Promotions may price an instant consult differently. Defaults to `'scheduled'` downstream when omitted. */
+      mode?: 'scheduled' | 'instant';
       materialise?: boolean;
     },
   ): Promise<PaymentBreakdown>;
@@ -177,6 +181,19 @@ export interface PaymentContract {
     quoteId?: string;
     placeOfSupplyStateCode?: string;
     placeOfSupplyPincode?: string;
+    /**
+     * *** THREADED INTO `materialiseAndPin`, NOT JUST `quote`. ***
+     * A code priced at `quote()`'s preview time must be RESERVED here, at the
+     * same call that pins the price — otherwise every real booking prices and
+     * pins with these null, and a discount typed at preview never actually
+     * applies at charge time. See `pricing.service.ts#tryReserveForPinned`.
+     */
+    discountCode?: string | null;
+    /** Also the per-user/per-doctor cap key `tryReserveForPinned` reserves against — omitting it reserves against `''`, shared by every patient. */
+    patientId?: string | null;
+    doctorId?: string | null;
+    specialtyId?: string | null;
+    mode?: 'scheduled' | 'instant';
   }): Promise<CreatedOrder>;
   /** Current status, for booking to gate on. */
   getByConsultationId(consultationId: string): Promise<{ paymentId: string; status: string; paidAt: Date | null } | null>;
