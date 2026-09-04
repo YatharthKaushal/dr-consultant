@@ -1,5 +1,5 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { and, desc, eq, gte, isNotNull, isNull } from 'drizzle-orm';
+import { and, desc, eq, gte, isNotNull, isNull, lt, or } from 'drizzle-orm';
 import { DATABASE } from '../../config/db/database.module';
 import type { Database, DatabaseTransaction } from '../../config/db/database.config';
 import { auditLogTable } from '../../schema/audit-log.schema';
@@ -145,20 +145,64 @@ export class ClinicalRepository {
   /* ── The reconciling sweep ────────────────────────────────────────────── */
 
   /**
-   * The sweep's candidate query: records finalised at or after `since`, newest
-   * first, bounded.
+   * The sweep's candidate query: ONE PAGE of records finalised at or after
+   * `since`, newest first.
    *
    * Indexed — `clinical-records.schema.ts` declares `index().on(finalisedAt)`,
    * which is exactly this predicate and this ordering. See
    * `CLINICAL_GATE_SWEEP_LOOKBACK_MS` for why the window is bounded at all and
    * what that costs.
+   *
+   * ═══════════════════════════════════════════════════════════════════════════
+   * *** WHY THERE IS A CURSOR, AND WHY `limit` ALONE WAS NOT ENOUGH. ***
+   * ═══════════════════════════════════════════════════════════════════════════
+   *
+   * This used to be `limit` with no cursor, and `CLINICAL_GATE_SWEEP_BATCH_SIZE`
+   * described that as bounding "one pass's facade calls so a backlog drains
+   * steadily instead of in one spike — same reasoning as `SWEEP_BATCH_SIZE`".
+   * The reasoning does not transfer, and copying it was the bug.
+   *
+   * `booking.repository.ts#listExpiredInstantHolds` selects
+   * `status = 'pending_payment' ... order by hold_expires_at ASC limit N`, and
+   * the sweep's action MOVES the row out of `pending_payment`. The candidate
+   * LEAVES THE SET, and the oldest are taken first, so a backlog really does
+   * drain one batch per tick.
+   *
+   * Nothing the clinical sweep does removes a row from THIS set. Reconciling a
+   * record leaves it exactly as it was — finalised, and still inside the
+   * 24-hour window — and the ordering is NEWEST first. So a fixed `limit`
+   * meant every pass, forever, examined the same newest 100 rows, and a
+   * stranded gate on the 101st was unreachable by anything. That is not a rare
+   * state: it is every finalised record on any day with more than 100 of them,
+   * which for this product is a small day.
+   *
+   * The cursor is a keyset on `(finalised_at, id)` rather than an OFFSET
+   * because new rows land at the newest end of a DESC ordering, so an OFFSET
+   * would shift under the sweep and skip rows. `id` is in the key because two
+   * records CAN share a `finalised_at`: it is a JS `Date`, so millisecond
+   * precision, and a strict `<` on the timestamp alone would drop the ties.
    */
-  async listFinalisedSince(since: Date, limit: number, executor: Executor = this.db): Promise<ClinicalRecordRow[]> {
+  async listFinalisedSince(
+    since: Date,
+    limit: number,
+    cursor?: { finalisedAt: Date; id: string } | null,
+    executor: Executor = this.db,
+  ): Promise<ClinicalRecordRow[]> {
+    const conditions = [isNotNull(clinicalRecordsTable.finalisedAt), gte(clinicalRecordsTable.finalisedAt, since)];
+    if (cursor) {
+      conditions.push(
+        or(
+          lt(clinicalRecordsTable.finalisedAt, cursor.finalisedAt),
+          and(eq(clinicalRecordsTable.finalisedAt, cursor.finalisedAt), lt(clinicalRecordsTable.id, cursor.id)),
+        )!,
+      );
+    }
+
     return executor
       .select()
       .from(clinicalRecordsTable)
-      .where(and(isNotNull(clinicalRecordsTable.finalisedAt), gte(clinicalRecordsTable.finalisedAt, since)))
-      .orderBy(desc(clinicalRecordsTable.finalisedAt))
+      .where(and(...conditions))
+      .orderBy(desc(clinicalRecordsTable.finalisedAt), desc(clinicalRecordsTable.id))
       .limit(limit);
   }
 

@@ -7,6 +7,7 @@ import {
   CLINICAL_GATE_SWEEP_BATCH_SIZE,
   CLINICAL_GATE_SWEEP_INTERVAL_MS,
   CLINICAL_GATE_SWEEP_LOOKBACK_MS,
+  CLINICAL_GATE_SWEEP_MAX_BATCHES,
   CLINICAL_RECORD_WRITABLE_STATUSES,
 } from './clinical.constants';
 import { ClinicalRepository } from './clinical.repository';
@@ -19,6 +20,12 @@ export interface ClinicalGateSweepResult {
   /** Consultations moved to `completed` by this pass — the other half of the same repair. */
   consultationsCompleted: number;
   failed: number;
+  /**
+   * `true` when the pass hit `CLINICAL_GATE_SWEEP_MAX_BATCHES` with candidates
+   * still unread. The rest of the window is left for the next tick — which is
+   * a real backlog, so it is REPORTED rather than silently absorbed.
+   */
+  truncated: boolean;
 }
 
 /**
@@ -125,7 +132,7 @@ export class ClinicalGateSweepService implements OnModuleInit, OnApplicationShut
     this.sweepInFlight = true;
     try {
       const result = await this.sweepFinalisedRecords();
-      if (result.gatesCleared > 0 || result.consultationsCompleted > 0 || result.failed > 0) {
+      if (result.gatesCleared > 0 || result.consultationsCompleted > 0 || result.failed > 0 || result.truncated) {
         this.logger.log(
           `Clinical gate sweep: ${result.gatesCleared} gate(s) cleared, ${result.consultationsCompleted} consultation(s) completed, ` +
             `${result.failed} failed, of ${result.examined} examined.`,
@@ -139,38 +146,94 @@ export class ClinicalGateSweepService implements OnModuleInit, OnApplicationShut
   }
 
   /**
-   * One sweep pass. Safe to call directly (tests do), and safe to run
-   * concurrently with itself in another process.
+   * One sweep pass, PAGED ACROSS THE WHOLE WINDOW.
    *
-   * `now` and `lookbackMs` are parameters rather than reads of a global clock
-   * and constant, so a test can drive it deterministically and an operator can
-   * widen the horizon without a redeploy.
+   * `now`, `lookbackMs` and `batchSize` are parameters rather than reads of a
+   * global clock and constants, so a test can drive it deterministically and an
+   * operator can widen the horizon without a redeploy.
+   *
+   * Safe to call directly (tests do), and safe to run concurrently with itself
+   * in another process — every write it performs is idempotent by the contract
+   * of the method that performs it.
+   *
+   * ═══════════════════════════════════════════════════════════════════════════
+   * *** WHY THIS PAGES INSTEAD OF TAKING ONE BATCH. ***
+   * ═══════════════════════════════════════════════════════════════════════════
+   *
+   * It used to be a single `listFinalisedSince(since, BATCH_SIZE)` and nothing
+   * more, on the reasoning — copied verbatim from
+   * `booking-slot-hold.service.ts` — that a batch cap lets "a backlog drain
+   * steadily instead of in one spike". THAT REASONING DOES NOT SURVIVE THE
+   * COPY, and `clinical.repository.ts#listFinalisedSince` sets out why in full:
+   * that sweep's action removes the candidate from its own candidate set and
+   * takes the oldest first, so its backlog genuinely drains. Nothing here
+   * removes a record from "finalised within the last 24 hours", and the
+   * ordering is newest first — so every pass, forever, examined the same newest
+   * 100 records, and a gate stranded on the 101st was reachable by nothing at
+   * all.
+   *
+   * That is not a corner case. It is every finalised record on any day with
+   * more than `CLINICAL_GATE_SWEEP_BATCH_SIZE` of them. The sweep is the ONLY
+   * backstop for the crash window between `finalised_at` and the two facade
+   * calls that follow it (`clinical.service.ts`), so the backstop quietly
+   * stopped covering most of its own window at a volume this product reaches
+   * on a slow day.
+   *
+   * `CLINICAL_GATE_SWEEP_MAX_BATCHES` still bounds the pass: paging an
+   * unbounded window every 60 seconds would be a self-inflicted load spike,
+   * which is the real concern the batch size was reaching for. Hitting the
+   * bound is reported (`truncated`) and logged, rather than being the silent
+   * default it used to be.
    */
   async sweepFinalisedRecords(
     now: Date = new Date(),
     lookbackMs: number = CLINICAL_GATE_SWEEP_LOOKBACK_MS,
+    batchSize: number = CLINICAL_GATE_SWEEP_BATCH_SIZE,
   ): Promise<ClinicalGateSweepResult> {
     const since = new Date(now.getTime() - lookbackMs);
-    const candidates = await this.repo.listFinalisedSince(since, CLINICAL_GATE_SWEEP_BATCH_SIZE);
 
     const result: ClinicalGateSweepResult = {
-      examined: candidates.length,
+      examined: 0,
       gatesCleared: 0,
       consultationsCompleted: 0,
       failed: 0,
+      truncated: false,
     };
 
-    for (const record of candidates) {
-      try {
-        const outcome = await this.reconcileOne(record.consultationId);
-        if (outcome.gateCleared) result.gatesCleared += 1;
-        if (outcome.consultationCompleted) result.consultationsCompleted += 1;
-      } catch (error) {
-        result.failed += 1;
-        this.logger.error(`Reconciling finalised consultation ${record.consultationId} failed: ${describeError(error)}`);
+    let cursor: { finalisedAt: Date; id: string } | null = null;
+
+    for (let batch = 0; batch < CLINICAL_GATE_SWEEP_MAX_BATCHES; batch += 1) {
+      const candidates = await this.repo.listFinalisedSince(since, batchSize, cursor);
+      if (candidates.length === 0) return result;
+
+      for (const record of candidates) {
+        result.examined += 1;
+        try {
+          const outcome = await this.reconcileOne(record.consultationId);
+          if (outcome.gateCleared) result.gatesCleared += 1;
+          if (outcome.consultationCompleted) result.consultationsCompleted += 1;
+        } catch (error) {
+          result.failed += 1;
+          this.logger.error(
+            `Reconciling finalised consultation ${record.consultationId} failed: ${describeError(error)}`,
+          );
+        }
       }
+
+      // A short page is the end of the window. A full one may not be, so keyset
+      // on the last row read — see the repository for why `(finalised_at, id)`
+      // and not an OFFSET.
+      if (candidates.length < batchSize) return result;
+      const last = candidates[candidates.length - 1];
+      if (!last?.finalisedAt) return result;
+      cursor = { finalisedAt: last.finalisedAt, id: last.id };
     }
 
+    result.truncated = true;
+    this.logger.warn(
+      `Clinical gate sweep stopped after ${CLINICAL_GATE_SWEEP_MAX_BATCHES} batches with candidates still unread; ` +
+        'the rest of the look-back window will be examined on the next tick.',
+    );
     return result;
   }
 
