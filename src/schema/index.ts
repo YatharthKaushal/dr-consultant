@@ -69,6 +69,7 @@ export * from './storage-providers.schema';
 export * from './content-items.schema';
 export * from './content-recommendations.schema';
 export * from './complaints.schema';
+export * from './feedback.schema';
 export * from './consents.schema';
 export * from './data-deletion-requests.schema';
 export * from './notifications.schema';
