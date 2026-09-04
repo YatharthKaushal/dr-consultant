@@ -181,8 +181,6 @@ export class AffiliateService {
         redemptionId: input.redemption.id,
         attributionSource: input.redemption.attributionSource ?? 'code',
         captured: input.captured,
-        // The GROSS convenience fee, best available. See `resolveBasePaise`.
-        fallbackGrossConvenience: input.redemption.discountableBase,
         discountAmount: input.redemption.discountAmount,
         currency: input.redemption.currency,
       },
@@ -213,9 +211,10 @@ export class AffiliateService {
    * at reserve time) is handled by `recordCommissionForRedemption` on the
    * ordinary path.
    *
-   * Requires `capturedComponents` to carry a convenience fee: with no redemption
-   * there is no `discountable_base` to fall back on. A caller that omits them
-   * gets a logged skip rather than a guessed base.
+   * Requires `capturedComponents` to carry a convenience fee. So does the
+   * ordinary redemption path — see `resolveBasePaise` on why there is no longer
+   * a fallback on either. A caller that omits them gets a logged skip rather
+   * than a guessed base.
    */
   async recordLinkOnlyCommissionForPatient(input: {
     patientId: string;
@@ -253,7 +252,6 @@ export class AffiliateService {
           redemptionId: null,
           attributionSource: 'link',
           captured,
-          fallbackGrossConvenience: null,
           discountAmount: '0.00',
           currency: 'INR',
         },
@@ -280,7 +278,6 @@ export class AffiliateService {
       redemptionId: string | null;
       attributionSource: string;
       captured: CapturedComponents;
-      fallbackGrossConvenience: string | null;
       discountAmount: string;
       currency: string;
     },
@@ -378,25 +375,53 @@ export class AffiliateService {
    * MERGE; the blast radius is confined to a commission figure, because this
    * module never computes tax or fees and never touches a patient's bill.
    *
-   * With no captured component at all, `discountable_base` from the redemption's
-   * own snapshot stands in: pricing declared that amount discountable, which for
-   * this platform IS the convenience fee (FR-7.4 keeps the doctor's fee out of
-   * it), so `discountable_base - discount_amount` is the same figure by a
-   * different route.
+   * ── *** THERE IS NO `discountable_base` FALLBACK, AND THERE MUST NOT BE. *** ──
+   *
+   * This function once fell back to the redemption's own `discountable_base`
+   * when no convenience-fee component was supplied, on the stated grounds that
+   * "pricing declared that amount discountable, which for this platform IS the
+   * convenience fee". *** THAT WAS WRONG, AND IT IS THE SAME CLASS OF DEFECT AS
+   * THE `line_total`-FOR-`gross_amount` MIX-UP THIS FILE ALREADY WARNS ABOUT. ***
+   *
+   * `pricing-discount.contract.ts` names `discountableAmount` explicitly as THE
+   * WHOLE ORDER'S GROSS — every component before discount and before tax — and
+   * `pricing.service.ts` fills it from `discountableBasePaise`, which
+   * `pricing.engine.ts` sets to `grossTotalPaise`. On the seeded catalogue that
+   * is 600.00 (a 500.00 doctor fee plus a 100.00 convenience fee), NOT the
+   * 100.00 convenience fee. Pricing states its reasoning: a minimum-order rule
+   * is a statement about the ORDER, and "20% off" means 20% of what the patient
+   * pays.
+   *
+   * So the fallback silently put THE DOCTOR'S OWN CONSULTATION FEE inside a
+   * commission base this module swears never contains it (FR-7.4), and it did it
+   * on `net_platform_margin` — the DEFAULT base, and the only one
+   * `affiliate_partners_nondefault_base_needs_cap` lets ship with NO ceiling,
+   * precisely because it is supposed to be structurally incapable of paying out
+   * more than the booking earned. With the fallback it could: on a 600.00 order
+   * with a 100.00 convenience fee and a 100.00 discount the true margin is 0.00
+   * and the fallback computed 500.00.
+   *
+   * Nothing in this module can tell the two conventions apart — both arrive as a
+   * `numeric(10,2)` string — so the answer is to REFUSE TO GUESS. A missing
+   * convenience-fee component now SKIPS the commission and logs, which is this
+   * file's own stated discipline ("A miss returns `null` and the caller falls
+   * back or skips; it never guesses") and errs in the direction the header
+   * already argues for: under-paying a commission whose legality the client's
+   * lawyer has not yet signed off.
    */
   private resolveBasePaise(
     base: AffiliateCommissionBase,
-    input: { captured: CapturedComponents; fallbackGrossConvenience: string | null; discountAmount: string },
+    input: { captured: CapturedComponents; discountAmount: string },
   ): bigint | null {
     switch (base) {
       case 'net_platform_margin': {
-        const gross = input.captured.convenienceFee ?? input.fallbackGrossConvenience;
+        const gross = input.captured.convenienceFee;
         if (gross === null) return null;
         return subtractFloorZero(rupeesToPaise(gross), rupeesToPaise(input.discountAmount));
       }
 
       case 'convenience_fee': {
-        const gross = input.captured.convenienceFee ?? input.fallbackGrossConvenience;
+        const gross = input.captured.convenienceFee;
         return gross === null ? null : rupeesToPaise(gross);
       }
 
@@ -415,8 +440,26 @@ export class AffiliateService {
     }
   }
 
-  /** `pending` -> `accrued`. The consultation reached a qualifying status, so the money is genuinely owed. Called only by the sweep. */
+  /**
+   * `pending` -> `accrued`. The consultation reached a qualifying status, so the
+   * money is genuinely owed. Called only by the sweep.
+   *
+   * *** THE MASTER SWITCH IS READ HERE TOO, AND THAT IS NOT BELT-AND-BRACES. ***
+   * A `pending` row can only have been created while `promotion.affiliate_enabled`
+   * was `true`, but it OUTLIVES the switch: turn the mechanism off after a
+   * commission is recorded and, without this gate, the sweep goes on turning
+   * those rows into money owed to a doctor on its own timer. "Switched off"
+   * would then mean "stops taking new ones", which is not what an admin who
+   * flips a regulatory kill switch is asking for. `settle` already takes exactly
+   * this position ("the affiliate mechanism is switched off, so there is nothing
+   * to settle"); this is the same stance one step earlier, where the liability
+   * is actually created. The rows stay `pending` and accrue the moment the
+   * switch comes back on.
+   */
   async accrueCommission(commissionId: string, consultationId: string): Promise<boolean> {
+    const config = await this.config.getResolved();
+    if (!config.affiliateEnabled) return false;
+
     return this.db.transaction(async (tx) => {
       const accrued = await this.repo.accrueCommissionIfPending(commissionId, new Date(), tx);
       if (!accrued) return false;
