@@ -819,6 +819,90 @@ describe('InstantService', () => {
    * The completion gate
    * ═══════════════════════════════════════════════════════════════════════ */
 
+  /**
+   * *** THE HOLE M-14 FOUND AND COULD NOT CLOSE FROM ITS SIDE. ***
+   *
+   * An INSTANT consult reaches `in_consultation` at accept. Nothing did that
+   * for a SCHEDULED one, so a doctor sitting `available_now` could be offered
+   * an instant request in the middle of a booked video call. The legal
+   * from-states live in this module's constants, so the fix had to live here.
+   */
+  describe('markConsultInProgress', () => {
+    it('*** TAKES THE DOCTOR OUT OF THE ROUTING POOL *** for a SCHEDULED consult', async () => {
+      const h = buildHarness();
+      h.bookings.getBooking.mockResolvedValue(makeBooking({ mode: 'scheduled', doctorId: DOCTOR_ID, status: 'scheduled' }));
+
+      const result = await h.service.markConsultInProgress(CONSULTATION_ID);
+
+      expect(h.presence.transition).toHaveBeenCalledWith(
+        expect.objectContaining({ doctorId: DOCTOR_ID, to: 'in_consultation' }),
+      );
+      expect(result).toMatchObject({ changed: true, doctorId: DOCTOR_ID });
+    });
+
+    /** Mode-agnostic on purpose, so M-14 calls it for every call without asking which kind it is. */
+    it('is an idempotent no-op for an INSTANT consult, which is already there', async () => {
+      const h = buildHarness();
+      h.bookings.getBooking.mockResolvedValue(makeBooking({ mode: 'instant', doctorId: DOCTOR_ID, status: 'pending_payment' }));
+      h.presence.transition.mockResolvedValue({ changed: false, before: 'in_consultation', after: 'in_consultation' });
+
+      const result = await h.service.markConsultInProgress(CONSULTATION_ID);
+
+      expect(result).toMatchObject({ changed: false, presence: 'in_consultation' });
+      expect(result.refusal).toBeUndefined();
+    });
+
+    /**
+     * A doctor who owes documentation may not be ROUTED a new instant request,
+     * but they may certainly take the scheduled call already in their diary —
+     * which is why `in_consultation` is absent from PRESENCE_REQUIRING_NO_GATE.
+     */
+    it('does not demand an ungated doctor', async () => {
+      const h = buildHarness();
+      h.bookings.getBooking.mockResolvedValue(makeBooking({ mode: 'scheduled', doctorId: DOCTOR_ID, status: 'scheduled' }));
+
+      await h.service.markConsultInProgress(CONSULTATION_ID);
+
+      const passed = h.presence.transition.mock.calls[0][0] as Record<string, unknown>;
+      expect(passed.requireNotGated).toBeUndefined();
+    });
+
+    /* Never throws — the caller is a webhook handler that must answer 2xx. */
+
+    it('reports not_found rather than throwing', async () => {
+      const h = buildHarness();
+      h.bookings.getBooking.mockResolvedValue(null);
+
+      await expect(h.service.markConsultInProgress(CONSULTATION_ID)).resolves.toEqual({
+        changed: false,
+        doctorId: null,
+        presence: null,
+        refusal: 'not_found',
+      });
+    });
+
+    it('reports no_doctor for a consultation still searching for one', async () => {
+      const h = buildHarness();
+      h.bookings.getBooking.mockResolvedValue(makeBooking({ doctorId: null, status: 'awaiting_doctor' }));
+
+      const result = await h.service.markConsultInProgress(CONSULTATION_ID);
+
+      expect(result.refusal).toBe('no_doctor');
+      expect(h.presence.transition).not.toHaveBeenCalled();
+    });
+
+    it('surfaces a refused presence move without throwing', async () => {
+      const h = buildHarness();
+      h.bookings.getBooking.mockResolvedValue(makeBooking({ mode: 'scheduled', doctorId: DOCTOR_ID, status: 'scheduled' }));
+      h.presence.transition.mockResolvedValue({ changed: false, before: 'completing_notes', after: 'completing_notes', refusal: 'illegal_transition' });
+
+      await expect(h.service.markConsultInProgress(CONSULTATION_ID)).resolves.toMatchObject({
+        changed: false,
+        refusal: 'illegal_transition',
+      });
+    });
+  });
+
   describe('markInstantConsultEnded', () => {
     it('*** SETS THE GATE BEFORE MOVING PRESENCE *** — a crash between the two must fail safe', async () => {
       const h = buildHarness();

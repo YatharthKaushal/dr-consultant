@@ -37,6 +37,18 @@ export interface InstantPresenceView {
   routable: boolean;
 }
 
+/**
+ * The outcome of taking a doctor out of the routing pool because a call
+ * started. `changed: false` with no `refusal` is an idempotent no-op — an
+ * instant consult is already `in_consultation` from its accept.
+ */
+export interface ConsultStartView {
+  changed: boolean;
+  doctorId: string | null;
+  presence: DoctorPresence | null;
+  refusal?: 'not_found' | 'no_doctor' | 'illegal_transition';
+}
+
 /** The outcome of a completion-gate write. `changed: false` with no `refusal` is an idempotent no-op, not a failure. */
 export interface CompletionGateView {
   changed: boolean;
@@ -99,6 +111,29 @@ export interface InstantContract {
    * prevent. A no-op on a consultation that is already gating its doctor.
    */
   markInstantConsultEnded(consultationId: string): Promise<CompletionGateView>;
+
+  /**
+   * *** THE CALL STARTED. M-14 CALLS THIS. ***
+   *
+   * Takes the doctor out of the routing pool for the duration, by moving them
+   * to `in_consultation`.
+   *
+   * It exists because of a real hole. For an INSTANT consult M-13 already sets
+   * `in_consultation` at accept — but for a SCHEDULED one nothing did, so a
+   * doctor sitting `available_now` could be offered an instant request in the
+   * middle of a booked video call. M-14 found it and could not close it from
+   * its own side: the legal from-states live in this module's constants, and
+   * importing them across the boundary is the deep import `README.md` §2
+   * forbids. So the fix belongs here, as a sibling of the method above.
+   *
+   * MODE-AGNOSTIC and IDEMPOTENT. An instant consult is already
+   * `in_consultation`, which answers `changed: false` with no refusal, so M-14
+   * calls this for every call without caring which kind it is.
+   *
+   * NON-THROWING: the caller is a webhook handler that must answer 2xx, and a
+   * redelivered join for a call already under way is an ordinary event.
+   */
+  markConsultInProgress(consultationId: string): Promise<ConsultStartView>;
 
   /**
    * *** CLEARS THE COMPLETION GATE (FR-10.5). M-15 CALLS THIS. *** Addressed
