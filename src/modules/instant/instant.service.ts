@@ -717,12 +717,35 @@ export class InstantService {
    * re-routes once.
    */
   async timeOutAttempt(attemptId: string): Promise<boolean> {
+    const existing = await this.repo.findAttemptById(attemptId);
+    if (!existing || existing.outcome !== 'pending') return false;
+
+    // *** WHY THE OFFER LAPSED DECIDES WHAT IT IS CALLED. ***
+    //
+    // A doctor whose offer runs out has `timed_out` written against them, and
+    // FR-18.6's acceptance rate is computed straight off these rows
+    // (`doctor-reliability.service.ts`). But an offer also runs out when the
+    // request stopped being routable — the ordinary case is a patient
+    // cancelling through M-11's `POST /bookings/:id/cancel`, which accepts
+    // `awaiting_doctor` and, correctly, knows nothing about this module. The
+    // pending offer is left on a doctor's screen until this sweep reaches it,
+    // and calling that a timeout writes a patient's change of mind into a
+    // doctor's reliability figures.
+    //
+    // `superseded` is the outcome that already means exactly this — see
+    // `instant.repository.ts#supersedePendingAttempts`, which uses it for the
+    // same situation when this module notices first. One extra read per
+    // expiring offer, on a path that already does several.
+    const booking = await this.bookings.getBooking(existing.consultationId);
+    const outcome: 'timed_out' | 'superseded' =
+      booking && booking.status === 'awaiting_doctor' ? 'timed_out' : 'superseded';
+
     const timedOut = await this.db.transaction(async (tx) => {
       const attempt = await this.repo.findAttemptByIdForUpdate(attemptId, tx);
       if (!attempt || attempt.outcome !== 'pending') return null;
       if (attempt.expiresAt.getTime() > Date.now()) return null;
 
-      const settled = await this.repo.updateOutcomeIfIn(attemptId, ['pending'], 'timed_out', {}, tx);
+      const settled = await this.repo.updateOutcomeIfIn(attemptId, ['pending'], outcome, {}, tx);
       if (!settled) return null;
 
       await this.audit.write(
@@ -733,7 +756,7 @@ export class InstantService {
           entityType: INSTANT_AUDIT_ENTITY_TYPES.INSTANT_REQUEST,
           entityId: attemptId,
           consultationId: attempt.consultationId,
-          metadata: { change: 'timed_out', doctorId: attempt.doctorId, attemptNumber: attempt.attemptNumber },
+          metadata: { change: outcome, doctorId: attempt.doctorId, attemptNumber: attempt.attemptNumber },
         },
         tx,
       );
@@ -763,7 +786,7 @@ export class InstantService {
     this.presence.publish({
       doctorId: timedOut.doctorId,
       type: 'instant_request_withdrawn',
-      data: { requestId: timedOut.id, consultationId: timedOut.consultationId, reason: 'timed_out' },
+      data: { requestId: timedOut.id, consultationId: timedOut.consultationId, reason: outcome },
     });
 
     return true;

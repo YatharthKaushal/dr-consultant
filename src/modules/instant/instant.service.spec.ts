@@ -1193,6 +1193,46 @@ describe('InstantService', () => {
     });
   });
 
+  describe('*** an offer that lapsed because the REQUEST went away is not the doctor fault ***', () => {
+    /**
+     * DEFECT. A patient cancelling through M-11's `POST /bookings/:id/cancel`
+     * — which accepts `awaiting_doctor` and, correctly, knows nothing about
+     * this module — leaves the pending offer on a doctor's screen until the
+     * acceptance sweep reaches it. That wrote `timed_out` against the doctor,
+     * and FR-18.6's acceptance rate is computed straight off these rows.
+     * `superseded` is the outcome that already means exactly this; nothing was
+     * using it for the case where the patient acted first.
+     */
+    it('records superseded, not timed_out, when the consultation has left awaiting_doctor', async () => {
+      const h = buildHarness();
+      h.repo.findAttemptById.mockResolvedValue(makeAttempt({ expiresAt: new Date(Date.now() - 1_000) }));
+      h.repo.findAttemptByIdForUpdate.mockResolvedValue(makeAttempt({ expiresAt: new Date(Date.now() - 1_000) }));
+      h.bookings.getBooking.mockResolvedValue(makeBooking({ status: 'cancelled' }));
+
+      await expect(h.service.timeOutAttempt(ATTEMPT_ID)).resolves.toBe(true);
+
+      expect(h.repo.updateOutcomeIfIn).toHaveBeenCalledWith(ATTEMPT_ID, ['pending'], 'superseded', {}, expect.anything());
+    });
+
+    it('POSITIVE CONTROL: still records timed_out when the request really was still looking for a doctor', async () => {
+      const h = buildHarness();
+      h.repo.findAttemptById.mockResolvedValue(makeAttempt({ expiresAt: new Date(Date.now() - 1_000) }));
+      h.repo.findAttemptByIdForUpdate.mockResolvedValue(makeAttempt({ expiresAt: new Date(Date.now() - 1_000) }));
+
+      await expect(h.service.timeOutAttempt(ATTEMPT_ID)).resolves.toBe(true);
+
+      expect(h.repo.updateOutcomeIfIn).toHaveBeenCalledWith(ATTEMPT_ID, ['pending'], 'timed_out', {}, expect.anything());
+    });
+
+    it('does not read the consultation at all for an offer that is no longer pending', async () => {
+      const h = buildHarness();
+      h.repo.findAttemptById.mockResolvedValue(makeAttempt({ outcome: 'accepted' }));
+
+      await expect(h.service.timeOutAttempt(ATTEMPT_ID)).resolves.toBe(false);
+      expect(h.bookings.getBooking).not.toHaveBeenCalled();
+    });
+  });
+
   describe('*** a failed re-route must not strand the request ***', () => {
     /**
      * DEFECT. `routeNextQuietly` swallowed the throw and its comment claimed

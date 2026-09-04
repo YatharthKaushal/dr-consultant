@@ -47,6 +47,7 @@ import { patientsTable } from '../../schema/patients.schema';
 import { specialtiesTable } from '../../schema/specialties.schema';
 import { isUniqueConstraintViolation } from '../../shared/errors/postgres-error.util';
 import { BookingRepository } from '../booking/booking.repository';
+import { DoctorReliabilityService } from '../doctor/doctor-reliability.service';
 import { DoctorRepository } from '../doctor/doctor.repository';
 import { InstantRepository } from './instant.repository';
 import { LEGAL_PRESENCE_TRANSITIONS, ROUTING_CANDIDATE_FETCH } from './instant.constants';
@@ -505,6 +506,67 @@ describe('Instant routing — the index, the row lock and the candidate WHERE cl
         .update(consultationsTable)
         .set({ status: 'awaiting_doctor' })
         .where(eq(consultationsTable.id, fixtures.consultationId));
+    });
+  });
+  /* ═══════════════════════════════════════════════════════════════════════
+   * 6. FR-18.6's acceptance rate, against the rows that actually feed it
+   * ═══════════════════════════════════════════════════════════════════════ */
+
+  describe('the FR-18.6 acceptance rate', () => {
+    /**
+     * DEFECT. The denominator was `count(*)` over every `instant_consultancy`
+     * row for the doctor, so it counted two outcomes that say nothing about
+     * them: `superseded` (the request stopped being routable — the patient
+     * cancelled) and `pending` (an offer that is on their screen right now).
+     *
+     * `supersedePendingAttempts` exists precisely so a patient's cancellation
+     * is NOT written down as `declined` ("which the doctor did not do") or
+     * `timed_out` ("which is not what happened") — and then the metric put it
+     * in the denominator anyway, so the distinction bought the doctor nothing.
+     *
+     * Only real SQL can answer this: the unit spec mocks the row the query
+     * returns, so it can prove the arithmetic and not the WHERE clause.
+     */
+    it('*** COUNTS ONLY THE OFFERS THE DOCTOR COULD HAVE ANSWERED *** — superseded and pending are not failures', async () => {
+      const reliability = new DoctorReliabilityService(db, doctorRepo);
+      const expiresAt = new Date(Date.now() + 60_000);
+
+      // A clean doctor with a hand-built history: 1 accepted, 1 declined,
+      // 1 timed out, plus 1 superseded and 1 still pending.
+      await db.delete(instantConsultancyTable).where(eq(instantConsultancyTable.doctorId, fixtures.unverifiedDoctorId));
+      let attemptNumber = 10;
+      for (const outcome of ['accepted', 'declined', 'timed_out', 'superseded', 'pending'] as const) {
+        await db.insert(instantConsultancyTable).values({
+          consultationId: fixtures.consultationId,
+          doctorId: fixtures.unverifiedDoctorId,
+          attemptNumber: attemptNumber++,
+          outcome,
+          expiresAt,
+        });
+      }
+
+      const metrics = await reliability.getMetrics(fixtures.unverifiedDoctorId);
+
+      // 1 accepted out of 3 answerable. The old `count(*)` denominator was 5,
+      // which would have reported 0.2 — a doctor punished for a patient's
+      // change of mind and for an offer they are still looking at.
+      expect(metrics.acceptanceRate).toBeCloseTo(1 / 3, 10);
+    });
+
+    it('reports null rather than 0 when every row is one the doctor never got to answer', async () => {
+      const reliability = new DoctorReliabilityService(db, doctorRepo);
+      await db.delete(instantConsultancyTable).where(eq(instantConsultancyTable.doctorId, fixtures.unverifiedDoctorId));
+      await db.insert(instantConsultancyTable).values({
+        consultationId: fixtures.consultationId,
+        doctorId: fixtures.unverifiedDoctorId,
+        attemptNumber: 20,
+        outcome: 'superseded',
+        expiresAt: new Date(Date.now() + 60_000),
+      });
+
+      // "No data yet" is a different fact from "0% reliable" — and one
+      // superseded offer is no data.
+      await expect(reliability.getMetrics(fixtures.unverifiedDoctorId)).resolves.toMatchObject({ acceptanceRate: null });
     });
   });
 });
