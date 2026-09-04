@@ -381,7 +381,7 @@ export class InstantService {
    * gateway order and a pinned quote stranded behind it. See step (b) in the
    * body.
    *
-   * Steps c and d both run against a consultation this module verified one
+   * Steps b and d both run against a consultation this module verified one
    * step earlier, so a THROW from either is an infrastructure failure rather
    * than a business one; the compensation frees the doctor either way, and
    * the payment sweep is the backstop if a payment row was already created.
@@ -401,7 +401,7 @@ export class InstantService {
     // and this module deliberately has no cancel path of its own, so that
     // window is real and ordinary rather than exotic.
     //
-    // Step (d) below would refuse the transition anyway, but by then step (b)
+    // Step (d) below would refuse the transition anyway, but by then step (c)
     // has already minted a gateway order — a `payments` row against a
     // consultation nobody is going to hold, which is a money-shaped mess to
     // unpick and one the patient never asked for. So the status is re-read
