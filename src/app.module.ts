@@ -22,6 +22,7 @@ import { PromotionModule } from './modules/promotion/promotion.module';
 import { SearchModule } from './modules/search/search.module';
 import { SearchToolModule } from './modules/search/tools/search-tool.module';
 import { StorageModule } from './modules/storage/storage.module';
+import { VideoModule } from './modules/video/video.module';
 import { AppConfigModule } from './shared/app-config/app-config.module';
 import { AuditModule } from './shared/audit/audit.module';
 import { AuthModule } from './shared/auth/auth.module';
@@ -101,6 +102,18 @@ import { ErrorsModule } from './shared/errors/errors.module';
     // readability, not correctness, since Nest resolves the provider graph
     // regardless.
     InstantModule,
+    // M-14: video consultation, on self-hosted LiveKit. After BookingModule,
+    // PaymentModule, PatientModule and InstantModule because it consumes all
+    // four facades — ordering is for readability, not correctness, since Nest
+    // resolves the provider graph regardless.
+    //
+    // *** SHIPS REFUSING EVERY JOIN UNTIL M-03 (CONSENT) IS WIRED UP. ***
+    // `CONSENT_PORT` is bound to a null object that answers
+    // `hasCurrentConsent: false`, and FR-8.5 issues a join token only "after
+    // payment and consent checks pass". That is a deliberate fail-closed
+    // default, not an unfinished edge: see `unavailable-consent.provider.ts`.
+    // The coordinator rebinds the token in `video.module.ts` post-merge.
+    VideoModule,
     // Promotions — coupons, vouchers, refer-and-earn and doctor affiliate
     // commission. Imports NO feature module: it reads booking's consultation
     // statuses through `PROMOTION_BOOKING_LOOKUP_PORT`, because BOOKING ->

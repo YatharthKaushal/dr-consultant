@@ -206,6 +206,42 @@ export interface BookingContract {
     reason?: string;
   }): Promise<{ changed: boolean; booking: BookingView | null; refusal?: 'not_found' | 'not_instant' | 'illegal_transition' }>;
 
+  /* ── For M-14 (Video Consultation) ─────────────────────────────────────── */
+
+  /**
+   * *** ADDITIVE (M-14). THE CONSULT LIFECYCLE'S TWO MIDDLE STATUS MOVES. ***
+   *
+   *   `scheduled`   -> `in_progress`             the call started
+   *   `in_progress` -> `awaiting_documentation`  the call ended
+   *
+   * `consultation_status` has carried both values since the first migration and
+   * nothing set either one before M-14 — see `BookingService
+   * #transitionConsultationStatus` for the full account of who writes what.
+   *
+   * *** A SIBLING OF `transitionInstantConsultation`, NOT A WIDENING OF IT. ***
+   * That method cannot be reused: its `to` is type-narrowed to three values
+   * neither of these is among, and it refuses any row whose `mode` is not
+   * `'instant'`. This one works for BOTH modes, because a scheduled
+   * consultation is the ORDINARY case of a video call.
+   *
+   * Same rule/write split as its sibling and as `DoctorContract
+   * #transitionPresence`: the caller supplies the legal FROM-states, this
+   * module takes the `SELECT ... FOR UPDATE` and enforces them. What keeps it
+   * from becoming a general status setter is the `to` narrowing — no caller can
+   * reach `cancelled`, `no_show`, `scheduled` or `completed` through here and
+   * route around the policy that owns each.
+   *
+   * NON-THROWING for a refused move: the caller is a webhook handler that must
+   * answer 2xx, and a redelivered join event for a consultation that has since
+   * ended is an ordinary event rather than an error.
+   */
+  transitionConsultationStatus(input: {
+    consultationId: string;
+    to: 'in_progress' | 'awaiting_documentation';
+    from: readonly ConsultationStatus[];
+    reason?: string;
+  }): Promise<{ changed: boolean; booking: BookingView | null; refusal?: 'not_found' | 'illegal_transition' }>;
+
   /**
    * ADDITIVE (M-13): instant consultations sitting in `pending_payment` past
    * their hold — the candidate query behind M-13's post-acceptance payment

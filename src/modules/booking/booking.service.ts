@@ -62,6 +62,26 @@ export interface InstantTransitionInput {
   reason?: string;
 }
 
+/** ADDITIVE (M-14) — see `BookingService#transitionConsultationStatus`. */
+export interface ConsultationStatusTransitionInput {
+  consultationId: string;
+  /** Only the two states M-14 owns; everything else stays behind `cancel`/`reschedule`/`markNoShow`/`confirmPayment`. */
+  to: Extract<ConsultationStatus, 'in_progress' | 'awaiting_documentation'>;
+  /** The statuses this move is legal FROM — M-14's `LEGAL_VIDEO_STATUS_TRANSITIONS`, enforced here under the row lock. */
+  from: readonly ConsultationStatus[];
+  /** Carried into the audit row's `metadata.reason`. */
+  reason?: string;
+}
+
+/** ADDITIVE (M-14) — see `BookingService#transitionConsultationStatus`. */
+export interface ConsultationStatusTransitionResult {
+  /** `false` for both an idempotent no-op (already in `to`) and a refusal — `refusal` tells them apart. */
+  changed: boolean;
+  /** The row as it stands after the call, or `null` when the consultation does not exist. */
+  booking: ConsultationRow | null;
+  refusal?: 'not_found' | 'illegal_transition';
+}
+
 /** ADDITIVE (M-13) — see `BookingService#transitionInstantConsultation`. */
 export interface InstantTransitionResult {
   /** `false` for both an idempotent no-op (already in `to`) and a refusal — `refusal` tells them apart. */
@@ -365,6 +385,96 @@ export class BookingService {
           consultationId: input.consultationId,
           metadata: {
             change: 'instant_transition',
+            before: row.status,
+            after: input.to,
+            ...(input.reason ? { reason: input.reason } : {}),
+          },
+        },
+        tx,
+      );
+
+      return { changed: true, booking: updated };
+    });
+  }
+
+  /**
+   * *** ADDITIVE (M-14). THE CONSULT LIFECYCLE'S TWO MIDDLE STATUS MOVES. ***
+   *
+   *   `scheduled`   -> `in_progress`             the call started
+   *   `in_progress` -> `awaiting_documentation`  the call ended
+   *
+   * `consultation_status` has carried both values since migration 0000 and
+   * NOTHING in this codebase set either one before M-14: this module moves a
+   * consultation to `scheduled`, `cancelled`, `no_show` and `expired`, M-13
+   * moves it through `awaiting_doctor`/`pending_payment`/`expired`, and M-15
+   * will set `completed` when the clinical record is finalised. The two states
+   * in the middle are facts about a VIDEO SESSION, which is why M-14 owns the
+   * rule and this method exists to let it apply that rule without writing
+   * `consultations` itself.
+   *
+   * ── WHY THIS IS A SIBLING OF `transitionInstantConsultation` AND NOT A
+   *    WIDENING OF IT ────────────────────────────────────────────────────────
+   *
+   * That method could not be reused, for two independent reasons, and both are
+   * load-bearing:
+   *
+   *   1. Its `to` is type-narrowed to `'awaiting_doctor' | 'pending_payment' |
+   *      'expired'`, so neither of M-14's targets can even be expressed. That
+   *      narrowing is deliberate — it is what stops it becoming a general
+   *      status setter — and widening it would hand M-13's sweeps the ability
+   *      to drive a consultation into `in_progress`.
+   *   2. It REFUSES any row whose `mode` is not `'instant'`, which its own
+   *      comment calls "the whole reason this is safe to expose". M-14 must
+   *      work for BOTH modes: a scheduled consultation is the ordinary case of
+   *      a video call, and the instant one is the exception.
+   *
+   * So the two share a shape and not an implementation. The split is the same
+   * one M-05 makes for `doctors.presence`: *** THE CALLER SUPPLIES THE LEGAL
+   * FROM-STATES, THIS MODULE TAKES THE ROW LOCK AND ENFORCES THEM. *** M-14
+   * holds `LEGAL_VIDEO_STATUS_TRANSITIONS`; M-11 holds the row.
+   *
+   * ── WHAT KEEPS IT FROM BECOMING A GENERAL STATUS SETTER ───────────────────
+   *
+   * The mode restriction is gone, so something else has to do that job, and
+   * the `to` narrowing does: the only two reachable targets are states no
+   * other path in this module writes and no policy hangs off. A caller cannot
+   * reach `cancelled` (and skip the refund policy), `no_show` (and skip
+   * `markNoShow`'s rules), `scheduled` (and confirm a booking nobody paid for)
+   * or `completed` (and close a case with no clinical record) through here.
+   *
+   * NON-THROWING for a refused move, like its sibling: the caller is a WEBHOOK
+   * handler that must answer 2xx, and a redelivered `participant_joined` for a
+   * consultation that has since ended is an ordinary event, not an error.
+   */
+  async transitionConsultationStatus(
+    input: ConsultationStatusTransitionInput,
+  ): Promise<ConsultationStatusTransitionResult> {
+    return this.db.transaction(async (tx) => {
+      const row = await this.repo.findByIdForUpdate(input.consultationId, tx);
+      if (!row) return { changed: false, booking: null, refusal: 'not_found' as const };
+
+      // Idempotent no-op — a redelivered webhook must not look like a state
+      // change in the audit log. Checked before the guarded UPDATE so that
+      // "already there" and "cannot get there" stay distinguishable.
+      if (row.status === input.to) {
+        return { changed: false, booking: row };
+      }
+
+      const updated = await this.repo.updateStatusIfIn(input.consultationId, input.from, { status: input.to }, tx);
+      if (!updated) {
+        return { changed: false, booking: row, refusal: 'illegal_transition' as const };
+      }
+
+      await this.audit.write(
+        {
+          actorType: 'system',
+          actorId: null,
+          action: 'update',
+          entityType: BOOKING_AUDIT_ENTITY_TYPES.CONSULTATION,
+          entityId: input.consultationId,
+          consultationId: input.consultationId,
+          metadata: {
+            change: 'consultation_status_transition',
             before: row.status,
             after: input.to,
             ...(input.reason ? { reason: input.reason } : {}),

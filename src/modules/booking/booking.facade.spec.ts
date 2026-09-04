@@ -49,7 +49,11 @@ function buildHarness() {
     listConsultationIdsBetween: jest.fn(async () => []),
     listConsultationIdsForPatient: jest.fn(async () => []),
   };
-  const service = { createInstantBooking: jest.fn(async () => makeRow()), assignDoctor: jest.fn(async () => makeRow()) };
+  const service = {
+    createInstantBooking: jest.fn(async () => makeRow()),
+    assignDoctor: jest.fn(async () => makeRow()),
+    transitionConsultationStatus: jest.fn(async () => ({ changed: true, booking: makeRow({ status: 'in_progress' }) })),
+  };
   const holds = { confirmPayment: jest.fn(async () => makeRow({ status: 'scheduled', holdExpiresAt: null })) };
 
   const facade = new BookingFacade(repo as never, service as never, holds as never);
@@ -89,5 +93,69 @@ describe('BookingFacade — the M-12 seam', () => {
     const h = buildHarness();
     h.holds.confirmPayment.mockRejectedValueOnce(Object.assign(new Error('nope'), { status: 404 }));
     await expect(h.facade.confirmPayment(CONSULTATION_ID)).rejects.toMatchObject({ status: 404 });
+  });
+});
+
+/**
+ * ADDITIVE (M-14). The one method the video module needed, and the reason it
+ * did not have to reach into `consultations` itself.
+ */
+describe('BookingFacade — the M-14 seam', () => {
+  it('exposes transitionConsultationStatus, passing the caller-supplied from-set straight through', async () => {
+    const h = buildHarness();
+
+    const result = await h.facade.transitionConsultationStatus({
+      consultationId: CONSULTATION_ID,
+      to: 'in_progress',
+      from: ['scheduled'],
+      reason: 'video_participant_joined',
+    });
+
+    expect(h.service.transitionConsultationStatus).toHaveBeenCalledWith({
+      consultationId: CONSULTATION_ID,
+      to: 'in_progress',
+      from: ['scheduled'],
+      reason: 'video_participant_joined',
+    });
+    expect(result).toMatchObject({ changed: true, booking: { id: CONSULTATION_ID, status: 'in_progress' } });
+  });
+
+  it('returns the mapped view, never the raw row', async () => {
+    const h = buildHarness();
+
+    const result = await h.facade.transitionConsultationStatus({
+      consultationId: CONSULTATION_ID,
+      to: 'in_progress',
+      from: ['scheduled'],
+    });
+
+    // `hold_expires_at` is this module's internal slot mechanism and must not
+    // cross the facade, least of all to a module that receives webhooks.
+    expect(result.booking).not.toHaveProperty('holdExpiresAt');
+  });
+
+  it('carries a refusal across rather than throwing — the caller must answer 2xx', async () => {
+    const h = buildHarness();
+    h.service.transitionConsultationStatus.mockResolvedValueOnce({
+      changed: false,
+      booking: null,
+      refusal: 'not_found',
+    } as never);
+
+    await expect(
+      h.facade.transitionConsultationStatus({ consultationId: CONSULTATION_ID, to: 'in_progress', from: ['scheduled'] }),
+    ).resolves.toEqual({ changed: false, booking: null, refusal: 'not_found' });
+  });
+
+  it('omits `refusal` entirely on success, so a caller can test for its presence', async () => {
+    const h = buildHarness();
+
+    const result = await h.facade.transitionConsultationStatus({
+      consultationId: CONSULTATION_ID,
+      to: 'in_progress',
+      from: ['scheduled'],
+    });
+
+    expect(Object.prototype.hasOwnProperty.call(result, 'refusal')).toBe(false);
   });
 });
