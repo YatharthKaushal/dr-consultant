@@ -140,9 +140,23 @@ function createService() {
     transaction: jest.fn(async (cb: (tx: unknown) => unknown) => cb(db)),
   } as unknown as jest.Mocked<Database>;
 
-  const service = new PatientFileService(db, repo, reportRequestRepo, consultationLookup, storage, appConfig, audit);
+  // Only reached for an admin downloading a `prescription_pdf`. Defaults to
+  // GRANTED so every pre-existing test keeps its old meaning; the tests that
+  // care about the gate override it.
+  const identity = { hasPermission: jest.fn().mockResolvedValue(true) };
 
-  return { service, db, repo, reportRequestRepo, consultationLookup, storage, appConfig, audit };
+  const service = new PatientFileService(
+    db,
+    repo,
+    reportRequestRepo,
+    consultationLookup,
+    storage,
+    appConfig,
+    audit,
+    identity as never,
+  );
+
+  return { service, db, repo, reportRequestRepo, consultationLookup, storage, appConfig, audit, identity };
 }
 
 describe('PatientFileService.upload', () => {
@@ -510,6 +524,61 @@ describe('PatientFileService.listOwn', () => {
 });
 
 describe('PatientFileService.getDownloadUrl', () => {
+  /* ------------------------------------------------------------------ */
+  /* THE ADMIN BRANCH. This was `return true` with no check at all.       */
+  /* ------------------------------------------------------------------ */
+
+  /**
+   * *** THE HOLE THIS CLOSES. *** `clinical.read_records` is described in the
+   * catalogue as "Read a consultation's clinical notes AND PRESCRIPTION", and
+   * `care_coordinator` deliberately lacks it under SRS §6.2's
+   * minimum-necessary rule. But a prescription PDF carries the diagnosis, the
+   * risk category, the referral note, every medicine line and the whole advice
+   * plan — so without this gate that content walked out to any admin at all,
+   * including one with an empty permission set.
+   */
+  it('*** REFUSES AN ADMIN WITHOUT clinical.read_records A PRESCRIPTION PDF ***', async () => {
+    const { service, repo, identity, storage } = createService();
+    repo.findById.mockResolvedValue(fileRow({ patientId: PATIENT_ID, fileCategory: 'prescription_pdf' }));
+    identity.hasPermission.mockResolvedValue(false);
+
+    await expect(service.getDownloadUrl(auth('admin', 'admin-1'), 'file-1')).rejects.toMatchObject({
+      status: 404,
+      response: { code: DOCUMENT_ERROR_CODES.FILE_NOT_FOUND },
+    });
+    // Refused BEFORE the object store is touched — no signed URL is ever minted.
+    expect(storage.getSignedUrl).not.toHaveBeenCalled();
+  });
+
+  it('allows an admin who DOES hold clinical.read_records', async () => {
+    const { service, repo, identity, storage } = createService();
+    repo.findById.mockResolvedValue(fileRow({ patientId: PATIENT_ID, fileCategory: 'prescription_pdf' }));
+    identity.hasPermission.mockResolvedValue(true);
+    storage.getSignedUrl.mockResolvedValue('https://signed.example/rx');
+
+    await expect(service.getDownloadUrl(auth('admin', 'admin-1'), 'file-1')).resolves.toMatchObject({
+      url: 'https://signed.example/rx',
+    });
+    expect(identity.hasPermission).toHaveBeenCalledWith('admin-1', 'clinical.read_records');
+  });
+
+  /**
+   * Narrowed to `prescription_pdf` deliberately. An admin reading a patient's
+   * uploaded report is the ordinary support and governance case; a generated
+   * clinical document is not. Widening this is a separate decision.
+   */
+  it.each(['medical_history', 'report', 'photo'] as const)(
+    'does not gate an admin reading a %s — the permission check is not even consulted',
+    async (category) => {
+      const { service, repo, identity, storage } = createService();
+      repo.findById.mockResolvedValue(fileRow({ patientId: PATIENT_ID, fileCategory: category }));
+      storage.getSignedUrl.mockResolvedValue('https://signed.example/file');
+
+      await expect(service.getDownloadUrl(auth('admin', 'admin-1'), 'file-1')).resolves.toBeDefined();
+      expect(identity.hasPermission).not.toHaveBeenCalled();
+    },
+  );
+
   it('allows the owning patient', async () => {
     const { service, repo, storage } = createService();
     repo.findById.mockResolvedValue(fileRow({ patientId: PATIENT_ID }));

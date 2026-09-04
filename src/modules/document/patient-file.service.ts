@@ -42,6 +42,8 @@ import { toSafePatientFileRow, type SafePatientFileRow } from './document.mapper
 import { PatientFileRepository } from './patient-file.repository';
 import { ReportRequestRepository } from './report-request.repository';
 import { consultationNotFound, reportRequestNotFound, reportRequestNotOpen } from './report-request.service';
+import { IdentityFacade } from '../identity/identity.facade';
+import { PERMISSIONS } from '../../shared/auth/permission.catalog';
 import { AppConfigService } from '../../shared/app-config/app-config.service';
 
 /** What the controller hands the service after `multipart-file.util.ts` has already read the file off the wire — `category`/`consultationId`/`reportRequestId` are still raw, unvalidated strings at this point. */
@@ -73,6 +75,8 @@ export class PatientFileService {
     @Inject(DOCUMENT_STORAGE_PORT) private readonly storage: DocumentStoragePort,
     private readonly appConfig: AppConfigService,
     private readonly audit: AuditService,
+    /** Only for the prescription-PDF permission check in `canAccessForDownload`. */
+    private readonly identity: IdentityFacade,
   ) {}
 
   /**
@@ -463,8 +467,45 @@ export class PatientFileService {
     return reportRequest;
   }
 
+  /**
+   * *** WHO MAY DOWNLOAD A FILE. READ THE ADMIN BRANCH BEFORE CHANGING IT. ***
+   *
+   * The admin branch used to be a bare `return true`, with no permission check
+   * of any kind, and M-15 justified having no download route of its own by
+   * asserting this method "admits the owning patient, the treating doctor and
+   * an admin, and admits nobody else". That was wrong, and the consequence was
+   * a privacy hole in a mental-health product.
+   *
+   * `clinical.read_records` — described in the catalogue as "Read a
+   * consultation's clinical notes AND PRESCRIPTION" — is held only by
+   * `super_admin` and `clinical_governance`. `care_coordinator` deliberately
+   * lacks it, and `permission.catalog.ts` argues that at length under SRS §6.2's
+   * minimum-necessary rule: a coordinator acts on an alert, they do not read
+   * the consultation note.
+   *
+   * But a `prescription_pdf` carries the diagnosis and its provisional flag,
+   * the risk category, the referral note, every medicine line and the whole
+   * advice and warning-signs plan. So the exact content that permission exists
+   * to protect walked out of this softer door to a `care_coordinator`,
+   * `operations`, `finance` or `content` admin — or one with an empty
+   * permission set.
+   *
+   * The check lives HERE rather than in M-15 on purpose. M-15 refuses to become
+   * a second place that decides who may read a prescription, which is right —
+   * `patient_files` is this module's table and one owner decides. `M-10` simply
+   * has to decide correctly.
+   *
+   * NARROWED TO `prescription_pdf` DELIBERATELY. An admin reading a patient's
+   * uploaded report or photo is the ordinary support and governance case that
+   * `admins.read`-level access has always covered; a generated clinical
+   * document is not. Widening this to every category is a separate decision
+   * with its own blast radius, and is not made here.
+   */
   private async canAccessForDownload(auth: AuthContext, file: PatientFileRow): Promise<boolean> {
-    if (auth.accountType === 'admin') return true;
+    if (auth.accountType === 'admin') {
+      if (file.fileCategory !== 'prescription_pdf') return true;
+      return this.identity.hasPermission(auth.accountId, PERMISSIONS.CLINICAL_READ_RECORDS);
+    }
     if (auth.accountType === 'patient') return file.patientId === auth.accountId;
     if (auth.accountType === 'doctor') {
       if (!file.patientId) return false;
