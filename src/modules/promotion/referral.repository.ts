@@ -1,5 +1,5 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { and, asc, count, desc, eq, inArray, type SQL } from 'drizzle-orm';
+import { and, asc, count, desc, eq, inArray, sql, type SQL } from 'drizzle-orm';
 import { DATABASE } from '../../config/db/database.module';
 import type { Database, DatabaseTransaction } from '../../config/db/database.config';
 import { referralEventsTable, type NewReferralEventRow, type ReferralEventRow } from '../../schema/referral-events.schema';
@@ -78,6 +78,44 @@ export class ReferralRepository {
         ),
       );
     return row?.value ?? 0;
+  }
+
+  /**
+   * One event, unlocked.
+   *
+   * Exists so `qualify` can learn WHICH REFERRER an event belongs to before it
+   * takes any lock — `referrer_patient_id` is immutable once written, so reading
+   * it without a lock is safe, and the lock order that follows
+   * (`lockReferrerGuard` -> the event row) is the one that matters.
+   */
+  async findEventById(id: string, executor: Executor = this.db): Promise<ReferralEventRow | null> {
+    const [row] = await executor.select().from(referralEventsTable).where(eq(referralEventsTable.id, id)).limit(1);
+    return row ?? null;
+  }
+
+  /**
+   * *** THE PER-REFERRER LOCK. `maxQualifiedReferralsPerReferrer` DEPENDS ON IT. ***
+   *
+   * `countQualifiedForReferrer` is a COUNT ACROSS MANY EVENT ROWS, and a row
+   * lock on ONE of them serialises nothing: two of the same referrer's referrals
+   * qualifying at the same moment lock two DIFFERENT `referral_events` rows,
+   * both read a count that excludes the other, and both mint — so a cap of 1
+   * pays out twice. That is not hypothetical: two API instances sweep
+   * concurrently by design (`promotion-sweep.service.ts`: "Two processes
+   * sweeping at once is harmless"), which is exactly the arrangement that
+   * produces it.
+   *
+   * A counted cap needs a lock over the SET it counts, and there is no single
+   * row that represents "this referrer". So this takes a NAMED ADVISORY LOCK for
+   * the lifetime of the caller's transaction — the same `pg_advisory_xact_lock`
+   * pattern `availability-rule.service.ts#lockDateGuard` and
+   * `identity-access.repository.ts#lockSuperAdminGuard` use, and for the same
+   * stated reason: the invariant spans rows, so no unique index can express it.
+   *
+   * MUST be taken BEFORE the event's own row lock, and before the count.
+   */
+  async lockReferrerGuard(referrerPatientId: string, tx: DatabaseTransaction): Promise<void> {
+    await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${`promotion.referrer_guard:${referrerPatientId}`}))`);
   }
 
   /** The row lock the qualification transition takes, so two sweeps cannot both mint a reward for one referral. */
