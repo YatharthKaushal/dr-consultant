@@ -243,6 +243,29 @@ export interface BookingContract {
   }): Promise<{ changed: boolean; booking: BookingView | null; refusal?: 'not_found' | 'illegal_transition' }>;
 
   /**
+   * *** ADDITIVE (M-15). THE MOVE TO `completed`, AND ONLY THAT MOVE. ***
+   *
+   * A third sibling rather than a widening of the method above, deliberately.
+   * That one's `to` excludes `completed` so no caller can route around the
+   * policy that owns it — and the policy that owns it is FR-11.5's completion
+   * gate in M-15: a case is complete only once the clinical record is
+   * finalised. Widening the sibling would hand that power to M-14's webhook.
+   *
+   * There is no `to` parameter: there is nothing to choose. The caller supplies
+   * the legal FROM-states and this module takes the row lock and enforces them.
+   *
+   * Returns a STATUS rather than a `BookingView`, unlike its siblings — the
+   * caller needs only to know whether the move landed. NON-THROWING for a
+   * refused move; M-15 calls this after its own transaction has already
+   * committed a finalised record.
+   */
+  completeConsultation(input: {
+    consultationId: string;
+    from: readonly ConsultationStatus[];
+    reason?: string;
+  }): Promise<{ changed: boolean; status: ConsultationStatus | null; refusal?: 'not_found' | 'illegal_transition' }>;
+
+  /**
    * ADDITIVE (M-13): instant consultations sitting in `pending_payment` past
    * their hold — the candidate query behind M-13's post-acceptance payment
    * sweep, the failure mode with no equivalent in the scheduled flow (a

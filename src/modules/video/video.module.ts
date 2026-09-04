@@ -7,6 +7,8 @@ import { LivekitClient } from './livekit.client';
 import { UnavailableConsentProvider } from './unavailable-consent.provider';
 import { VideoAdminController } from './video-admin.controller';
 import { VideoConfigService } from './video-config.service';
+import { ConsentFacade } from '../consent/consent.facade';
+import { ConsentModule } from '../consent/consent.module';
 import { CONSENT_PORT } from './video.constants';
 import { VideoController } from './video.controller';
 import { VideoFacade } from './video.facade';
@@ -55,12 +57,17 @@ import { VideoWebhookService } from './video-webhook.service';
  * ---------------------------------------------------------------------------
  * *** `CONSENT_PORT` IS THE M-03 SEAM, AND IT FAILS CLOSED. ***
  *
- * Bound to `UnavailableConsentProvider` until `modules/consent` (M-03) merges;
- * the COORDINATOR then rebinds it to `ConsentFacade`, which will satisfy
+ * *** REBOUND. *** Now bound to `ConsentFacade` (M-03 merged), which satisfies
  * `ConsentPort` structurally — no adapter, no cast — because this module's
  * local mirror in `video-consent.contract.ts` and M-03's own contract were
- * frozen to the same shape before either was written. The handover is one line
- * in the `providers` array below.
+ * frozen to the same shape before either was written. M-03 additionally keeps
+ * a `consent.port-conformance.spec.ts` that re-declares this mirror and
+ * assigns its facade to it, so a rename on that side fails `tsc` THERE rather
+ * than here.
+ *
+ * `UnavailableConsentProvider` stays in the tree, unbound: it is the null
+ * object this module was built and tested against, and rebinding it is the
+ * hard kill-switch that takes video out of service at the DI level.
  *
  * *** UNLIKE M-13's NOTIFICATION PORT, THIS NULL OBJECT REFUSES. *** M-13 is
  * fully functional without push. M-14 is NOT functional without consent, and
@@ -97,7 +104,7 @@ import { VideoWebhookService } from './video-webhook.service';
  * exactly what FR-8.6 asks this module not to do.
  */
 @Module({
-  imports: [BookingModule, PaymentModule, PatientModule, InstantModule],
+  imports: [BookingModule, PaymentModule, PatientModule, InstantModule, ConsentModule],
   controllers: [VideoController, VideoAdminController, VideoWebhookController],
   providers: [
     VideoRepository,
@@ -105,7 +112,7 @@ import { VideoWebhookService } from './video-webhook.service';
     // *** REFUSES. *** The coordinator swaps this line for
     // `{ provide: CONSENT_PORT, useExisting: ConsentFacade }` (and adds
     // `ConsentModule` to `imports`) once M-03 merges.
-    { provide: CONSENT_PORT, useClass: UnavailableConsentProvider },
+    { provide: CONSENT_PORT, useExisting: ConsentFacade },
     VideoConfigService,
     VideoService,
     VideoWebhookService,

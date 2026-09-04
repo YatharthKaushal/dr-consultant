@@ -15,8 +15,8 @@ import { ClinicalService } from './clinical.service';
 import { ClinicalTemplateController } from './clinical-template.controller';
 import { ClinicalTemplateRepository } from './clinical-template.repository';
 import { ClinicalTemplateService } from './clinical-template.service';
+import { BookingFacade } from '../booking/booking.facade';
 import { CLINICAL_BOOKING_PORT } from './clinical.constants';
-import { ConsultationCompletionProvider } from './consultation-completion.provider';
 
 /**
  * M-15: Clinical Records.
@@ -49,51 +49,29 @@ import { ConsultationCompletionProvider } from './consultation-completion.provid
  * ---------------------------------------------------------------------------
  * *** `CLINICAL_BOOKING_PORT` IS THE ONE THING THE COORDINATOR MUST LOOK AT. ***
  *
- * Bound to `ConsultationCompletionProvider`, which delegates its READ to the
- * real `BookingFacade` and performs ONE write — the move to `completed` —
- * itself, because `BookingContract` has no method that can express it
- * (`transitionInstantConsultation` is narrowed to three other target statuses
- * and refuses non-instant rows) and M-14 is being built in a parallel worktree
- * this one cannot import from.
+ * *** REBOUND. *** Now bound to `BookingFacade`, which satisfies
+ * `ClinicalBookingPort` structurally: `ClinicalConsultationView` is a strict
+ * subset of `BookingView`, and M-11 grew a `completeConsultation` sibling at
+ * merge whose shape this port already named.
  *
- * *** POST-MERGE: change one line here. *** Once `BookingFacade` carries a
- * `completeConsultation` matching `clinical-booking.contract.ts`:
+ * `ConsultationCompletionProvider` — the placeholder that performed the guarded
+ * UPDATE on `consultations` itself — HAS BEEN DELETED rather than kept unbound,
+ * unlike every other null object in this codebase. Those are safe to keep: they
+ * refuse, or they return nothing. This one WROTE ANOTHER MODULE'S TABLE, which
+ * is precisely what `README.md` §2 forbids and what the port exists to stop. A
+ * class like that left in the tree is a loaded gun, not a kill-switch.
  *
- *     { provide: CLINICAL_BOOKING_PORT, useExisting: BookingFacade }
- *
- * and `ConsultationCompletionProvider` can be deleted or kept unbound as the
- * placeholder this module was built and tested against — the same disposal
- * `document.module.ts` describes for `UnavailableDocumentStorageProvider` and
- * `instant.module.ts` for `UnavailableNotificationProvider`. Because TypeScript
- * is structural, a signature drift on either side surfaces at that binding as a
- * `tsc` error rather than a runtime surprise. Read
- * `clinical-booking.contract.ts` for the exact assumed signature.
- *
- * ---------------------------------------------------------------------------
- * *** NO IMPORT CYCLE, AND NONE POSSIBLE TODAY. ***
- *
- * This module imports six others and NOTHING imports it. `InstantModule`
- * already imports `BookingModule`/`DoctorModule`, and `DocumentModule` imports
- * `StorageModule`; adding this module on top of all of them closes no loop
- * because the dependency runs strictly one way. The first module to import
- * `ClinicalModule` will be M-16 — also one way.
- *
- * ---------------------------------------------------------------------------
- * *** THE SWEEP IS A PROVIDER, NOT A CRON JOB. ***
- *
- * `ClinicalGateSweepService` starts its own `setInterval` in `onModuleInit` and
- * clears it in `onApplicationShutdown`. `@nestjs/schedule` is NOT installed and
- * this module does not add it — `booking-slot-hold.service.ts` makes that
- * argument in full and this module copies it verbatim, down to the `.unref()`
- * and the re-entrancy guard.
- */
+ * *** THE MOVE TO `completed` IS A THIRD SIBLING, NOT A WIDENING. *** M-14's
+ * `transitionConsultationStatus` deliberately excludes `completed` so that no
+ * caller can close a consultation and route around FR-11.5's completion gate —
+ * the gate that lives in THIS module. */
 @Module({
   imports: [BookingModule, CatalogueModule, DoctorModule, DocumentModule, InstantModule, PatientModule],
   controllers: [ClinicalController, ClinicalTemplateController, ClinicalAdminController],
   providers: [
     ClinicalRepository,
     ClinicalTemplateRepository,
-    { provide: CLINICAL_BOOKING_PORT, useClass: ConsultationCompletionProvider },
+    { provide: CLINICAL_BOOKING_PORT, useExisting: BookingFacade },
     ClinicalTemplateService,
     ClinicalPdfService,
     ClinicalService,

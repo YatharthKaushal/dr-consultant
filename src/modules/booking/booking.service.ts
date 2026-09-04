@@ -74,6 +74,24 @@ export interface ConsultationStatusTransitionInput {
 }
 
 /** ADDITIVE (M-14) — see `BookingService#transitionConsultationStatus`. */
+/** ADDITIVE (M-15) — see `BookingService#completeConsultation`. */
+export interface CompleteConsultationResult {
+  /** `false` for both an idempotent no-op (already `completed`) and a refusal — `refusal` tells them apart. */
+  changed: boolean;
+  /**
+   * The status the row is in AFTER the call, or `null` when it does not exist.
+   *
+   * Deliberately a STATUS and not a `BookingView`, unlike its two siblings. The
+   * caller is M-15's finalise path, which needs to know only whether the move
+   * landed; handing it the whole row would be more coupling than the seam
+   * needs, and `README.md` §2 asks facade methods to pass the smallest
+   * JSON-safe thing that answers the question. It also lets `BookingFacade`
+   * satisfy `ClinicalBookingPort` structurally, with no adapter.
+   */
+  status: ConsultationStatus | null;
+  refusal?: 'not_found' | 'illegal_transition';
+}
+
 export interface ConsultationStatusTransitionResult {
   /** `false` for both an idempotent no-op (already in `to`) and a refusal — `refusal` tells them apart. */
   changed: boolean;
@@ -484,6 +502,79 @@ export class BookingService {
       );
 
       return { changed: true, booking: updated };
+    });
+  }
+
+  /**
+   * *** ADDITIVE (M-15). THE MOVE TO `completed`, AND ONLY THAT MOVE. ***
+   *
+   * A THIRD sibling rather than a widening of `transitionConsultationStatus`,
+   * and the distinction is the whole point. That method's `to` deliberately
+   * excludes `completed` so that "no caller can reach `cancelled`, `no_show`,
+   * `scheduled` or `completed` through here and route around the policy that
+   * owns each". Adding `completed` to it would hand every holder of that method
+   * — M-14's webhook among them — the ability to close a consultation, which is
+   * exactly the bypass FR-11.5 forbids: a case is complete only once the
+   * clinical record is finalised, and that rule lives in M-15.
+   *
+   * So this method exists to be callable by ONE caller with ONE meaning, and
+   * carries no `to` parameter at all — there is nothing to choose.
+   *
+   * Same rule/write split as its siblings and as `DoctorContract
+   * #transitionPresence`: the caller supplies the legal FROM-states, this
+   * module takes the `SELECT ... FOR UPDATE` and enforces them. What stops it
+   * being a general status setter is that its target is fixed.
+   *
+   * NON-THROWING for a refused move: M-15 calls this AFTER its own transaction
+   * has committed a finalised record, so a throw here would leave a finalised
+   * record reported as a failure, and its reconciling sweep already treats a
+   * missed move as the ordinary case.
+   */
+  async completeConsultation(input: {
+    consultationId: string;
+    from: readonly ConsultationStatus[];
+    reason?: string;
+  }): Promise<CompleteConsultationResult> {
+    return this.db.transaction(async (tx) => {
+      const row = await this.repo.findByIdForUpdate(input.consultationId, tx);
+      if (!row) return { changed: false, status: null, refusal: 'not_found' as const };
+
+      // Idempotent no-op — M-15's sweep retries this, and a retry must not look
+      // like a state change in the audit log. Checked before the guarded UPDATE
+      // so "already there" and "cannot get there" stay distinguishable.
+      if (row.status === 'completed') {
+        return { changed: false, status: row.status };
+      }
+
+      const updated = await this.repo.updateStatusIfIn(
+        input.consultationId,
+        input.from,
+        { status: 'completed' },
+        tx,
+      );
+      if (!updated) {
+        return { changed: false, status: row.status, refusal: 'illegal_transition' as const };
+      }
+
+      await this.audit.write(
+        {
+          actorType: 'system',
+          actorId: null,
+          action: 'update',
+          entityType: BOOKING_AUDIT_ENTITY_TYPES.CONSULTATION,
+          entityId: input.consultationId,
+          consultationId: input.consultationId,
+          metadata: {
+            change: 'consultation_completed',
+            before: row.status,
+            after: 'completed',
+            ...(input.reason ? { reason: input.reason } : {}),
+          },
+        },
+        tx,
+      );
+
+      return { changed: true, status: updated.status };
     });
   }
 
