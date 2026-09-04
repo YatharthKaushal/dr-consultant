@@ -57,6 +57,13 @@
       "when": 1788459424674,
       "tag": "0007_pricing_and_promotions",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1788505806060,
+      "tag": "0008_followup_assignments",
+      "breakpoints": true
     }
   ]
 }
