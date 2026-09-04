@@ -394,9 +394,14 @@ export const PROMOTION_PAID_CONSULTATION_STATUSES = [
  *
  * Matching is therefore TOLERANT (substring, case-insensitive) rather than an
  * exact-equality table that would break silently on a rename. And when no
- * component matches, the commission base falls back to the redemption's OWN
- * snapshot (`discountable_base - discount_amount`) rather than guessing — see
- * `affiliate.service.ts#resolveNetPlatformMargin`.
+ * component matches, the commission is SKIPPED — see
+ * `affiliate.service.ts#resolveBasePaise`.
+ *
+ * *** IT MUST NOT FALL BACK TO `discount_redemptions.discountable_base`. *** It
+ * once did, and that was a defect: pricing names `discountableAmount` as the
+ * WHOLE ORDER'S GROSS (doctor fee INCLUDED), not the convenience fee, so the
+ * fallback put the doctor's own fee into a commission base FR-7.4 keeps it out
+ * of. That reasoning is written out in full at `resolveBasePaise`.
  *
  * CONFIRM THESE AT MERGE. A mismatch cannot mis-price a patient's bill (this
  * module never computes tax or fees) — the blast radius is confined to an
