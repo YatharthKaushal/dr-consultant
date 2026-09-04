@@ -33,6 +33,63 @@ function invalidAnswers(message: string): BadRequestException {
 }
 
 /**
+ * *** WHAT `RedFlagRule.reason`'s DOC COMMENT PROMISES, MADE REAL. ***
+ * `followup-question.types.ts#RedFlagRule.reason` has claimed, since this
+ * module was written, "Enforced on write — see `assertReasonNamesNoDiagnosis`"
+ * — a function that did not exist anywhere in this codebase until this one
+ * was added. Nothing before this stopped an admin-authored rule from naming
+ * a diagnosis in the very string `safety_alerts.reason`'s own schema comment
+ * says must "NEVER name a diagnosis": that string reaches the admin alert
+ * queue (`GET /admin/safety-alerts`) and the doctor/admin push notification's
+ * log line verbatim.
+ *
+ * A small, explicit blocklist — not fuzzy NLP — is the right proportion HERE
+ * specifically, unlike M-17's doctor-authored free text
+ * (`clarification.constants.ts#DEIDENTIFICATION_NOTICE`'s header explains why
+ * THAT field cannot be machine-checked): `reason` is short (<=255 chars),
+ * fixed-purpose (describes which answer/risk fired, not clinical narrative),
+ * and authored only by `clinical_governance` admins through
+ * `POST /admin/followup-pathways` — a small, trusted, low-volume surface a
+ * blocklist can realistically cover without false positives crowding out
+ * genuine reasons. FR-13.5's seven red-flag categories (self-harm thoughts,
+ * severe worsening, confusion or agitation, violence risk, severe
+ * withdrawal, medication side effects, feeling unsafe) are all
+ * behaviours/symptoms, not diagnoses, so none of them collide with this list.
+ */
+const DIAGNOSIS_TERMS: readonly string[] = [
+  'depression',
+  'depressive disorder',
+  'major depressive disorder',
+  'anxiety disorder',
+  'generalized anxiety disorder',
+  'panic disorder',
+  'bipolar',
+  'psychosis',
+  'psychotic disorder',
+  'schizophrenia',
+  'schizoaffective',
+  'substance use disorder',
+  'substance abuse disorder',
+  'alcohol use disorder',
+  'addiction',
+  'post-traumatic stress disorder',
+  'ptsd',
+  'obsessive-compulsive disorder',
+  'borderline personality disorder',
+  'insomnia disorder',
+];
+
+function assertReasonNamesNoDiagnosis(reason: string, ruleId: string): void {
+  const lower = reason.toLowerCase();
+  const match = DIAGNOSIS_TERMS.find((term) => lower.includes(term));
+  if (match) {
+    throw invalidRedFlagRules(
+      `Rule "${ruleId}"'s reason must not name a diagnosis (found "${match}") — safety_alerts.reason describes the answer or risk that fired, never a diagnostic label.`,
+    );
+  }
+}
+
+/**
  * Validates an admin-authored question array on WRITE (pathway version
  * create). Deliberately strict — a malformed question set must never reach a
  * patient's check-in screen, and this is the only gate it passes through
@@ -156,6 +213,7 @@ export function validateRedFlagRules(value: unknown, questions: readonly Followu
       // than as a 500 from the insert two layers down.
       throw invalidRedFlagRules(`Rule "${r.id}"'s reason must be at most 255 characters.`);
     }
+    assertReasonNamesNoDiagnosis(r.reason, r.id);
 
     rules.push({
       id: r.id,

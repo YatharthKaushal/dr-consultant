@@ -78,6 +78,18 @@ export class IdentityAccessRepository {
    * checks it: a suspended admin's role link is never removed, so an
    * unfiltered query would keep notifying someone who cannot act on it.
    *
+   * *** THE super_admin BRANCH ALSO REQUIRES `key` TO EXIST IN
+   * `permissions`. *** `listEffectivePermissions`'s own "unconditional
+   * grant" only ever selects rows that are genuinely IN the `permissions`
+   * table — a key with no such row contributes nothing there either. This
+   * branch joins against `permissionsTable` filtered to `key` for the same
+   * reason: without it, ANY string (a typo, a key retired by a migration, a
+   * stale constant left behind after a rename) would resolve to every active
+   * super_admin, which is over-broad in exactly the direction a permission
+   * check must never be. `permissions.key` is `unique()`
+   * (`permissions.schema.ts`), so this join can add at most one row per
+   * super_admin — never a duplicate, never a cartesian blow-up.
+   *
    * Built for `followup`'s `ADMIN_DIRECTORY_PORT` (FR-13.4's alert fan-out),
    * but shaped as a general "who can act on this permission" read — nothing
    * about it is follow-up-specific.
@@ -89,6 +101,7 @@ export class IdentityAccessRepository {
         .from(adminRolesTable)
         .innerJoin(rolesTable, eq(rolesTable.id, adminRolesTable.roleId))
         .innerJoin(adminsTable, eq(adminsTable.id, adminRolesTable.adminId))
+        .innerJoin(permissionsTable, eq(permissionsTable.key, key))
         .where(and(eq(rolesTable.code, 'super_admin'), eq(adminsTable.status, 'active'))),
       executor
         .select({ adminId: adminRolesTable.adminId })

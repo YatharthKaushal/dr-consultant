@@ -119,6 +119,54 @@ describe('followup-scoring.util', () => {
         ),
       ).toThrow(BadRequestException);
     });
+
+    /**
+     * *** `safety_alerts.reason`'s own schema comment: "NEVER names a
+     * diagnosis." `RedFlagRule.reason`'s doc comment in
+     * `followup-question.types.ts` goes further and claims this is "Enforced
+     * on write — see `assertReasonNamesNoDiagnosis`" — a function that did
+     * not exist anywhere in this codebase until this test made it real.
+     * Nothing before this test could ever fail here: an admin authoring a
+     * rule whose reason read "Patient meets criteria for major depressive
+     * disorder" passed straight through to `safety_alerts.reason`, visible on
+     * the admin alert queue and in the doctor-facing notification, in
+     * flat contradiction of the schema's own guarantee. ***
+     */
+    it('rejects a reason that names a diagnosis, matching `safety_alerts.reason`\'s "NEVER names a diagnosis" guarantee', () => {
+      expect(() =>
+        validateRedFlagRules(
+          [
+            {
+              id: 'x',
+              questionId: 'self_harm',
+              matchValues: ['yes'],
+              severity: 'red',
+              reason: 'Patient meets criteria for major depressive disorder.',
+            },
+          ],
+          QUESTIONS,
+        ),
+      ).toThrow(BadRequestException);
+    });
+
+    it('is case-insensitive and catches a diagnosis term anywhere in the reason, not just an exact match', () => {
+      expect(() =>
+        validateRedFlagRules(
+          [{ id: 'x', questionId: 'self_harm', matchValues: ['yes'], severity: 'red', reason: 'Suspected BIPOLAR disorder relapse.' }],
+          QUESTIONS,
+        ),
+      ).toThrow(BadRequestException);
+    });
+
+    it('still accepts a reason describing the answer/risk rather than a diagnosis', () => {
+      // Regression guard: the diagnosis check must not be so broad it starts
+      // rejecting the ordinary, symptom-shaped reasons this module needs —
+      // FR-13.5's seven red-flag categories are behaviours/symptoms, not
+      // diagnoses (self-harm thoughts, severe worsening, confusion or
+      // agitation, violence risk, severe withdrawal, medication side
+      // effects, feeling unsafe).
+      expect(validateRedFlagRules(RULES, QUESTIONS)).toEqual(RULES);
+    });
   });
 
   describe('validateAnswers', () => {
