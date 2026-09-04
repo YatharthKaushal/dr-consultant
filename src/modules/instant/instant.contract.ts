@@ -49,6 +49,22 @@ export interface ConsultStartView {
   refusal?: 'not_found' | 'no_doctor' | 'illegal_transition';
 }
 
+/**
+ * The outcome of putting a doctor BACK in the routing pool because a call
+ * ended. `changed: false` with no `refusal` is an idempotent no-op.
+ */
+export interface ConsultEndView {
+  changed: boolean;
+  doctorId: string | null;
+  presence: DoctorPresence | null;
+  /**
+   * `instant_consult` is not a failure — it says this consultation's way out is
+   * `markInstantConsultEnded` (gate, then `completing_notes`), which must not
+   * be skipped by putting the doctor straight back in the pool.
+   */
+  refusal?: 'not_found' | 'no_doctor' | 'instant_consult' | 'illegal_transition';
+}
+
 /** The outcome of a completion-gate write. `changed: false` with no `refusal` is an idempotent no-op, not a failure. */
 export interface CompletionGateView {
   changed: boolean;
@@ -126,6 +142,15 @@ export interface InstantContract {
    * importing them across the boundary is the deep import `README.md` §2
    * forbids. So the fix belongs here, as a sibling of the method above.
    *
+   * *** IT MOVES A DOCTOR OUT OF `available_now` AND OUT OF NOTHING ELSE. ***
+   * `available_now` is the only state an instant offer can land on
+   * (`request_pending` is reachable from no other), so it is the only state
+   * this has to protect — and, crucially, the only one `markConsultEnded` can
+   * honestly put back. Unnarrowed it also dragged `offline`, `paused` and
+   * `scheduled_only` doctors into `in_consultation`, which is a state `offline`
+   * is deliberately not reachable from: the doctors who take the most SCHEDULED
+   * calls lost their standing FR-10.3 preference on the first one.
+   *
    * MODE-AGNOSTIC and IDEMPOTENT. An instant consult is already
    * `in_consultation`, which answers `changed: false` with no refusal, so M-14
    * calls this for every call without caring which kind it is.
@@ -134,6 +159,30 @@ export interface InstantContract {
    * redelivered join for a call already under way is an ordinary event.
    */
   markConsultInProgress(consultationId: string): Promise<ConsultStartView>;
+
+  /**
+   * *** THE CALL ENDED — THE OTHER HALF OF `markConsultInProgress`. M-14 CALLS
+   * THIS. *** Puts the doctor BACK in the routing pool, from
+   * `in_consultation` to `available_now` and from nowhere else.
+   *
+   * It exists because the half above had no inverse, and the asymmetry was a
+   * one-way door: `in_consultation` is not reset by the boot sweep, is not
+   * reset when a doctor's socket drops, and `offline` is not reachable from it
+   * at all — so every doctor who finished a SCHEDULED video call was left
+   * silently out of instant routing until they noticed and re-set their own
+   * presence by hand. M-15 does not rescue them either: it clears a completion
+   * gate, and a scheduled consult never set one.
+   *
+   * *** IT REFUSES AN INSTANT CONSULT (`refusal: 'instant_consult'`), AND THAT
+   * IS THE POINT. *** That flow's way out is `markInstantConsultEnded` — set
+   * FR-10.5's gate, then `completing_notes` — and going straight back to
+   * `available_now` would be exactly the documentation bypass the gate exists
+   * to prevent.
+   *
+   * NON-THROWING, and idempotent: a doctor who is not `in_consultation` is
+   * left exactly where they are.
+   */
+  markConsultEnded(consultationId: string): Promise<ConsultEndView>;
 
   /**
    * *** CLEARS THE COMPLETION GATE (FR-10.5). M-15 CALLS THIS. *** Addressed

@@ -18,7 +18,7 @@ import {
   NOTIFICATION_PORT,
   ROUTING_CANDIDATE_FETCH,
 } from './instant.constants';
-import type { CompletionGateView, ConsultStartView, InstantConsultView, InstantRequestView } from './instant.contract';
+import type { CompletionGateView, ConsultEndView, ConsultStartView, InstantConsultView, InstantRequestView } from './instant.contract';
 import { toInstantRequestView } from './instant.mapper';
 import { InstantRepository } from './instant.repository';
 
@@ -885,7 +885,61 @@ export class InstantService {
       doctorId: booking.doctorId,
       to: 'in_consultation',
       actor: SYSTEM_ACTOR,
+      // *** OUT OF THE POOL, NEVER OUT OF A STATE THE DOCTOR CHOSE. *** See
+      // the header, and `InstantPresenceService#transition`'s own account of
+      // why a system move is not an override. `available_now` is the only
+      // state an offer can land on, so it is the only one worth taking away —
+      // and the only one `markConsultEnded` can honestly give back.
+      onlyFrom: ['available_now'],
       reason: 'consult_started',
+    });
+
+    return {
+      changed: result.changed,
+      doctorId: booking.doctorId,
+      presence: result.after,
+      ...(result.refusal ? { refusal: 'illegal_transition' as const } : {}),
+    };
+  }
+
+  /**
+   * *** THE CALL ENDED (M-14). *** Puts the doctor back in the routing pool.
+   *
+   * The inverse of `markConsultInProgress`, and it had none — which made that
+   * method a one-way door. `in_consultation` survives the boot sweep on
+   * purpose, survives a dropped socket on purpose, and cannot reach `offline`
+   * at all, so nothing anywhere moved a doctor out of it after a SCHEDULED
+   * call. They were simply gone from instant routing until they re-set their
+   * own presence.
+   *
+   * *** AN INSTANT CONSULT IS REFUSED, NOT SERVED. *** Its way out is
+   * `markInstantConsultEnded` — FR-10.5's gate, then `completing_notes` — and
+   * answering `available_now` here would be the documentation bypass that gate
+   * exists to prevent.
+   *
+   * `onlyFrom: ['in_consultation']` for the reason `clearCompletionGate` has
+   * the same narrowing: `available_now`'s legal `from` set also contains
+   * `offline`, `paused` and `scheduled_only`, and this method gives back a
+   * doctor it was holding — it does not decide that a doctor is available.
+   *
+   * Non-throwing: the caller is a webhook handler that must answer 2xx.
+   */
+  async markConsultEnded(consultationId: string): Promise<ConsultEndView> {
+    const booking = await this.bookings.getBooking(consultationId);
+    if (!booking) return { changed: false, doctorId: null, presence: null, refusal: 'not_found' };
+    if (booking.mode === 'instant') {
+      return { changed: false, doctorId: booking.doctorId, presence: null, refusal: 'instant_consult' };
+    }
+    if (!booking.doctorId) {
+      return { changed: false, doctorId: null, presence: null, refusal: 'no_doctor' };
+    }
+
+    const result = await this.presence.transition({
+      doctorId: booking.doctorId,
+      to: 'available_now',
+      actor: SYSTEM_ACTOR,
+      onlyFrom: ['in_consultation'],
+      reason: 'consult_ended',
     });
 
     return {

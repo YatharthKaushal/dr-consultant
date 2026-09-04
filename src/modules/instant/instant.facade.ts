@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { InstantPresenceService } from './instant-presence.service';
 import type {
   CompletionGateView,
+  ConsultEndView,
   ConsultStartView,
   InstantConsultView,
   InstantContract,
@@ -60,6 +61,11 @@ export class InstantFacade implements InstantContract {
   /** *** M-14 CALLS THIS. *** The call started — take the doctor out of the routing pool. See `InstantContract#markConsultInProgress`. */
   async markConsultInProgress(consultationId: string): Promise<ConsultStartView> {
     return this.instant.markConsultInProgress(consultationId);
+  }
+
+  /** *** M-14 CALLS THIS. *** The call ended — put the doctor back. The inverse of the method above; see `InstantContract#markConsultEnded`. */
+  async markConsultEnded(consultationId: string): Promise<ConsultEndView> {
+    return this.instant.markConsultEnded(consultationId);
   }
 
   /** *** M-15 CALLS THIS. *** See `InstantContract#clearCompletionGate`. */

@@ -182,6 +182,28 @@ describe('deriveSession', () => {
       expect(session.patient.connectedSeconds).toBe(0);
       expect(session.durationSeconds).toBe(0);
     });
+
+    /**
+     * *** THE SAME CLAMP, IN THE ONE PLACE IT WAS NOT APPLIED. ***
+     *
+     * `intervalsFor` clamped an inverted row so it could not subtract from a
+     * duration; `latestLeftAt` read the very same `left_at` raw. So one row
+     * whose leave preceded its join made the view report a call that ENDED
+     * five minutes BEFORE it began — `firstJoinedAt` after `lastLeftAt`, on a
+     * screen an operator adjudicates a refund from. Both figures come out of
+     * the same row, so both have to read it the same way.
+     */
+    it('*** NEVER REPORTS A CALL THAT ENDED BEFORE IT BEGAN ***', () => {
+      const session = deriveSession(CONSULTATION_ID, [row('patient', AT(10), AT(5))], NOW);
+
+      expect(session.firstJoinedAt).toEqual(AT(10));
+      expect(session.lastLeftAt).toEqual(AT(10));
+      expect(session.patient.lastLeftAt).toEqual(AT(10));
+      expect(session.lastLeftAt!.getTime()).toBeGreaterThanOrEqual(session.firstJoinedAt!.getTime());
+      // The ROW itself is still what LiveKit said — the evidence is not edited,
+      // only the figures derived from it.
+      expect(session.connections[0].leftAt).toEqual(AT(5));
+    });
   });
 
   describe('a live call', () => {
