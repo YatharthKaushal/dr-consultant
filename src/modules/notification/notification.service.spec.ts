@@ -57,7 +57,7 @@ describe('NotificationService', () => {
       markFailed: jest.fn(async () => undefined),
       listForAudience: jest.fn(async () => []),
       countUnread: jest.fn(async () => 0),
-      markRead: jest.fn(async () => true),
+      markRead: jest.fn(async () => new Date('2026-02-02T09:00:00Z')),
       markAllRead: jest.fn(async () => 0),
     } as unknown as jest.Mocked<NotificationRepository>;
 
@@ -342,6 +342,23 @@ describe('NotificationService', () => {
     });
 
     /**
+     * *** NESTING WAS A ONE-LINE WAY AROUND THIS SCREEN. *** The deep-link
+     * walk gave up below six levels and returned nothing, so this payload
+     * screened clean and the phrase reached `deep_link_data`, the client (via
+     * `notification.mapper.ts`) and the FCM `data` block.
+     */
+    it('suppresses a diagnosis buried deeper than the old deep-link depth cap', async () => {
+      const result = await service.notify({
+        ...bookingRequest(),
+        deepLinkData: { a: { b: { c: { d: { e: { f: { g: 'you have diabetes' } } } } } } },
+      });
+
+      expect(result).toEqual({ queued: false, notificationId: null, reason: 'suppressed' });
+      expect(repo.insert).not.toHaveBeenCalled();
+      expect(push.send).not.toHaveBeenCalled();
+    });
+
+    /**
      * *** LAYER 2 — THE STRUCTURAL GUARANTEE, NOT THE DENY-LIST. ***
      *
      * An UNDECLARED variable is dropped before anything screens it, so a
@@ -621,7 +638,7 @@ describe('NotificationService', () => {
      * existence oracle over other people's notification ids.
      */
     it('404s identically for a missing row and for someone else-s row', async () => {
-      repo.markRead.mockResolvedValue(false);
+      repo.markRead.mockResolvedValue(null);
 
       await expect(service.markRead(patient(), 41)).rejects.toMatchObject({
         status: 404,
@@ -683,6 +700,227 @@ describe('NotificationService', () => {
       await expect(service.unregisterDevice(admin())).rejects.toMatchObject({
         response: { code: 'NOTIFICATION_DEVICE_TOKEN_NOT_SUPPORTED' },
       });
+    });
+  });
+
+  /* ====================================================================== */
+
+  /**
+   * *** THE HANDLER THAT CATCHES EVERYTHING USED TO THROW. ***
+   *
+   * `notify`'s catch block builds its log line out of the caller's own
+   * request, and INTERPOLATION IS ITSELF A THROWING OPERATION: `${x}` on a
+   * symbol raises "Cannot convert a Symbol value to a string", and `String()`
+   * on a null-prototype object or one with a throwing `toString` raises
+   * "Cannot convert object to primitive value". Each of the three below was
+   * observed escaping `notify` and reaching the caller — the exact failure
+   * the method's own doc comment says must not happen.
+   */
+  describe('the failure handler is itself a place that can throw', () => {
+    it('survives a templateCode that is a symbol', async () => {
+      await expect(
+        service.notify({ templateCode: Symbol('evil'), audience: { kind: 'patient', id: PATIENT_ID } } as never),
+      ).resolves.toEqual({ queued: false, notificationId: null, reason: 'provider_unavailable' });
+    });
+
+    it('survives a templateCode whose toString throws', async () => {
+      const hostile = {
+        toString() {
+          throw new Error('boom');
+        },
+      };
+      await expect(
+        service.notify({ templateCode: hostile, audience: { kind: 'patient', id: PATIENT_ID } } as never),
+      ).resolves.toEqual({ queued: false, notificationId: null, reason: 'provider_unavailable' });
+    });
+
+    /** A dependency is free to reject with something that is not an `Error` — `fcm-push.classifier.ts` already guards this exact shape. */
+    it('survives a dependency rejecting with a null-prototype object', async () => {
+      templates.findTemplate.mockRejectedValue(Object.create(null));
+      await expect(service.notify(bookingRequest())).resolves.toEqual({
+        queued: false,
+        notificationId: null,
+        reason: 'provider_unavailable',
+      });
+    });
+
+    /** Nothing about a failed log line may reach the caller. */
+    it('survives a logger that throws', async () => {
+      jest.spyOn(Logger.prototype, 'error').mockImplementation(() => {
+        throw new Error('log sink down');
+      });
+      repo.insert.mockRejectedValue(new Error('deadlock detected'));
+
+      await expect(service.notify(bookingRequest())).resolves.toEqual({
+        queued: false,
+        notificationId: null,
+        reason: 'provider_unavailable',
+      });
+    });
+  });
+
+  /* ====================================================================== */
+
+  /**
+   * `variables: null` is not the same thing as no variables, and the
+   * difference used to be an entire lost notification: `Object.keys(null)`
+   * threw inside `renderTemplate` and `notify` reported
+   * `provider_unavailable` with no row written.
+   */
+  describe('a caller who passes null variables', () => {
+    it('still queues the notification, with the placeholders unresolved', async () => {
+      const result = await service.notify({
+        templateCode: 'booking_confirmed',
+        audience: { kind: 'patient', id: PATIENT_ID },
+        variables: null,
+      } as never);
+
+      expect(result).toEqual({ queued: true, notificationId: 41 });
+      expect(repo.insert).toHaveBeenCalledWith(
+        expect.objectContaining({ body: 'Your consultation with is confirmed for. Tap to see the details.' }),
+      );
+    });
+  });
+
+  /* ====================================================================== */
+
+  /**
+   * *** AN AUDIENCE KIND THIS MODULE CANNOT ROUTE MUST NOT BECOME A DOCTOR. ***
+   *
+   * `audience.kind` is three literals in the type system and nothing else
+   * enforced it, so a fourth value fell through every `=== 'patient'` ternary
+   * to the doctor side: a row with all three owner columns null, a token read
+   * from `doctors`, and a push sent with the DOCTOR app's Firebase
+   * credentials. M-13 binds to a MIRROR of this contract that this code
+   * cannot see, which is exactly the seam a fourth value arrives through.
+   */
+  describe('an audience kind that is not one of the three', () => {
+    const unroutable = () =>
+      ({ templateCode: 'booking_confirmed', audience: { kind: 'nurse', id: 'n1' } }) as never;
+
+    it('writes no row, reads no token and sends no push', async () => {
+      const result = await service.notify(unroutable());
+
+      expect(result).toEqual({ queued: false, notificationId: null, reason: 'provider_unavailable' });
+      expect(repo.insert).not.toHaveBeenCalled();
+      expect(devices.findPushToken).not.toHaveBeenCalled();
+      expect(push.send).not.toHaveBeenCalled();
+    });
+
+    /**
+     * `FcmPushAdapter.readCredentials` and `NotificationDeviceRepository`
+     * both branch on `=== 'patient'`, so anything else that reaches them is
+     * treated as a DOCTOR. The provider must never be asked about a key that
+     * is not one of its two.
+     */
+    it('never hands an unroutable kind on to the push provider as an app key', async () => {
+      await service.notify(unroutable());
+      expect(push.isConfigured).not.toHaveBeenCalled();
+      expect(push.send).not.toHaveBeenCalled();
+    });
+
+    it.each([[null], [undefined], [{}], [{ id: PATIENT_ID }]])(
+      'refuses the malformed audience %s the same way',
+      async (audience) => {
+        const result = await service.notify({ templateCode: 'booking_confirmed', audience } as never);
+        expect(result).toEqual({ queued: false, notificationId: null, reason: 'provider_unavailable' });
+        expect(repo.insert).not.toHaveBeenCalled();
+      },
+    );
+  });
+
+  /* ====================================================================== */
+
+  /**
+   * FR-16.2 reaches the CODE as well as the copy. `template_code` is stored
+   * on the row, put in the FCM `data` block and projected straight back to
+   * the app by `notification.mapper.ts` — the same three properties that put
+   * `deepLinkData` under the screen. `TEMPLATE_CODE_PATTERN` happily accepts
+   * `you_have_diabetes`, and underscores normalise to spaces.
+   */
+  describe('FR-16.2 — the template code is part of the notification', () => {
+    it('suppresses a notification whose CODE names a diagnosis, even with clean copy', async () => {
+      templates.findTemplate.mockResolvedValue({ title: 'An update', body: 'Tap to open the app.' });
+
+      const result = await service.notify({
+        templateCode: 'you_have_diabetes',
+        audience: { kind: 'patient', id: PATIENT_ID },
+      });
+
+      expect(result).toEqual({ queued: false, notificationId: null, reason: 'suppressed' });
+      expect(repo.insert).not.toHaveBeenCalled();
+      expect(push.send).not.toHaveBeenCalled();
+    });
+
+    it('leaves the nine shipped codes alone', async () => {
+      for (const code of Object.keys(NOTIFICATION_TEMPLATE_DEFAULTS)) {
+        expect(screenForDiagnosis(code)).toEqual({ clean: true, construction: null });
+      }
+    });
+  });
+
+  /* ====================================================================== */
+
+  /**
+   * *** A ROW THAT EXISTS MUST NOT BE REPORTED AS NEVER WRITTEN. ***
+   *
+   * `buildDataPayload` runs AFTER the insert, and `JSON.stringify` throws on
+   * a circular structure and on a `BigInt`. That throw unwound into `notify`'s
+   * handler, which answered `queued: false, notificationId: null` for a
+   * notification that has a row — contradicting the contract's "`queued`
+   * means A ROW WAS WRITTEN" and leaving that row stuck at `queued` with no
+   * `failure_reason`.
+   */
+  describe('a deep-link payload that cannot be json-encoded', () => {
+    const circular = () => {
+      const payload: Record<string, unknown> = { screen: 'consultation' };
+      payload.self = payload;
+      return payload;
+    };
+
+    it('still reports the row it wrote', async () => {
+      const result = await service.notify({ ...bookingRequest(), deepLinkData: circular() });
+      expect(result).toEqual({ queued: true, notificationId: 41 });
+    });
+
+    it('drops the payload from the push envelope rather than losing the notification', async () => {
+      await service.notify({ ...bookingRequest(), deepLinkData: circular() });
+
+      expect(push.send).toHaveBeenCalledWith('patient', expect.objectContaining({ token: 'tok_1' }));
+      expect(push.send.mock.calls[0]?.[1].data).not.toHaveProperty('deepLinkData');
+      expect(repo.markSent).toHaveBeenCalledWith(41, expect.any(Date));
+    });
+
+    it('does the same for a BigInt, which JSON.stringify also refuses', async () => {
+      const result = await service.notify({
+        ...bookingRequest(),
+        deepLinkData: { attempt: BigInt(1) },
+      } as never);
+      expect(result).toEqual({ queued: true, notificationId: 41 });
+    });
+  });
+
+  /* ====================================================================== */
+
+  /**
+   * Re-reading an already-read notification KEEPS the first read's timestamp
+   * (`notification.repository.ts`'s `coalesce`), so answering with this
+   * method's own `new Date()` told the client the row said something it did
+   * not.
+   */
+  describe('markRead reports the timestamp the row holds', () => {
+    it('returns the stored readAt, not the one it proposed', async () => {
+      const stored = new Date('2026-01-05T08:00:00Z');
+      repo.markRead.mockResolvedValue(stored);
+
+      const result = await service.markRead(patient(), 41);
+
+      expect(result).toEqual({ id: 41, readAt: stored });
+      expect(repo.markRead).toHaveBeenCalledWith(
+        { kind: 'patient', id: PATIENT_ID },
+        41,
+        expect.any(Date),
+      );
     });
   });
 });

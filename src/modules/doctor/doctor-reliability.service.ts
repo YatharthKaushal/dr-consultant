@@ -9,7 +9,11 @@ import { doctorNotFound } from './doctor.service';
 import { DoctorRepository } from './doctor.repository';
 
 export interface DoctorReliabilityMetrics {
-  /** `instant_consultancy`: accepted / total offered. `null` when nothing has ever been offered (0/0), never `NaN`. */
+  /**
+   * `instant_consultancy`: accepted / offers this doctor could actually have
+   * ANSWERED. `null` when there have been none (0/0), never `NaN`. See
+   * `getAcceptanceRate` for what the denominator deliberately leaves out.
+   */
   acceptanceRate: number | null;
   /** `consultations`: count(status='no_show') / count(status in ('completed','no_show')). `null` when the denominator is 0. */
   noShowRate: number | null;
@@ -51,18 +55,43 @@ export class DoctorReliabilityService {
     return { acceptanceRate: acceptance, noShowRate: noShow, caseSummaryCompletionRate: caseSummary };
   }
 
+  /**
+   * FR-18.6's acceptance rate.
+   *
+   * *** THE DENOMINATOR IS THE OFFERS THIS DOCTOR COULD HAVE ANSWERED, NOT
+   * `count(*)`. *** It used to be `count(*)`, which quietly counted two
+   * outcomes against the doctor that say nothing about them:
+   *
+   *   `superseded`  the request stopped being routable for a reason that has
+   *                 nothing to do with the doctor — the patient cancelled it,
+   *                 or it was released. `instant.repository.ts
+   *                 #supersedePendingAttempts` exists precisely so that case
+   *                 is not written down as `declined` ("which the doctor did
+   *                 not do") or `timed_out` ("which is not what happened") —
+   *                 and then the metric put it in the denominator anyway, so
+   *                 the distinction bought the doctor nothing.
+   *   `pending`     an offer that is on their screen RIGHT NOW. Counting an
+   *                 unanswered question as a failure to answer means a
+   *                 doctor's rate visibly dips for the sixty seconds they are
+   *                 deciding, and dips further the more work they are sent.
+   *
+   * What is left — `accepted`, `declined`, `timed_out` — is exactly the set of
+   * offers that reached the doctor and got an answer or ran out of time, which
+   * is the question "how often does this doctor take an instant request"
+   * actually asks.
+   */
   private async getAcceptanceRate(doctorId: string): Promise<number | null> {
     const [row] = await this.db
       .select({
-        total: sql<string>`count(*)`,
+        answerable: sql<string>`count(*) filter (where ${instantConsultancyTable.outcome} in ('accepted', 'declined', 'timed_out'))`,
         accepted: sql<string>`count(*) filter (where ${instantConsultancyTable.outcome} = 'accepted')`,
       })
       .from(instantConsultancyTable)
       .where(eq(instantConsultancyTable.doctorId, doctorId));
 
-    const total = Number(row?.total ?? 0);
-    if (total === 0) return null;
-    return Number(row?.accepted ?? 0) / total;
+    const answerable = Number(row?.answerable ?? 0);
+    if (answerable === 0) return null;
+    return Number(row?.accepted ?? 0) / answerable;
   }
 
   private async getNoShowRate(doctorId: string): Promise<number | null> {

@@ -144,6 +144,7 @@ export class NotificationTemplateService {
   ): Promise<AdminNotificationTemplate> {
     this.assertOwnedKey(NOTIFICATION_CONFIG_KEYS.TEMPLATES);
     this.assertValidCode(code);
+    this.assertCodeNamesNoDiagnosis(code);
     const validated = this.assertValidTemplate(template);
     this.assertNamesNoDiagnosis(validated);
 
@@ -267,6 +268,30 @@ export class NotificationTemplateService {
       throw new BadRequestException({
         code: NOTIFICATION_ERROR_CODES.TEMPLATE_CODE_INVALID,
         message: 'templateCode must be 3-80 characters of lower-case letters, digits and underscores, starting with a letter.',
+      });
+    }
+  }
+
+  /**
+   * *** FR-16.2 APPLIES TO THE CODE, NOT ONLY TO THE COPY. ***
+   *
+   * `TEMPLATE_CODE_PATTERN` accepts any lower_snake_case word, so an admin
+   * could store `you_have_diabetes` and the screen below would never see it:
+   * only `title` and `body` were checked. The code is not private bookkeeping
+   * — `notification.service.ts` writes it to `notifications.template_code`,
+   * puts it in the FCM `data` block, and `notification.mapper.ts` projects it
+   * straight back to the app, which is the same "it travels with the
+   * notification" argument that already puts `deepLinkData` under the screen.
+   *
+   * Underscores normalise to spaces (`notification-diagnosis.util.ts`), so a
+   * code screens as the phrase it spells.
+   */
+  private assertCodeNamesNoDiagnosis(code: string): void {
+    const screening = screenForDiagnosis(code);
+    if (!screening.clean) {
+      throw new ConflictException({
+        code: NOTIFICATION_ERROR_CODES.TEMPLATE_NAMES_DIAGNOSIS,
+        message: `Notification copy must not name a diagnosis (FR-16.2). The template code contains "${screening.construction ?? ''}".`,
       });
     }
   }

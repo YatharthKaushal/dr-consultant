@@ -220,6 +220,34 @@ describe('FcmPushAdapter', () => {
       expect(getMessaging).toHaveBeenCalledWith({ name: 'notification-doctor' });
     });
 
+    /* -------------------------------------------------------------------- *
+     * *** THE DOCTOR PROJECT IS NOT A FALLBACK. ***
+     *
+     * `readCredentials` was `app === 'patient' ? patientEnv : doctorEnv`, so
+     * ANY key that was not `'patient'` — a fourth audience kind arriving
+     * through M-13's mirror of the contract, say — was handed the DOCTOR
+     * app's service account and sent through the doctor's Firebase project.
+     * That is precisely the cross-app delivery two separate store listings
+     * exist to prevent. An unrecognised key is unconfigured, which the module
+     * already degrades safely.
+     * -------------------------------------------------------------------- */
+    it('treats an unrecognised app key as unconfigured rather than as the doctor app', () => {
+      expect(adapter.isConfigured('nurse' as never)).toBe(false);
+      expect(adapter.configuredApps()).toEqual(['patient', 'doctor']);
+    });
+
+    it('does not initialise or send through the doctor project for an unrecognised app key', async () => {
+      const result = await adapter.send('nurse' as never, MESSAGE);
+
+      expect(result).toEqual({
+        delivered: false,
+        failure: { kind: 'not_configured', detail: 'FCM is not configured for the nurse app' },
+      });
+      expect(initializeApp).not.toHaveBeenCalled();
+      expect(cert).not.toHaveBeenCalled();
+      expect(send).not.toHaveBeenCalled();
+    });
+
     /** Lazy and memoized: initialising is not free, and `initializeApp` throws on a duplicate name. */
     it('initialises once and reuses the app on later sends', async () => {
       await adapter.send('patient', MESSAGE);

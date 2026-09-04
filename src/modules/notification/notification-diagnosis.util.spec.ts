@@ -305,12 +305,42 @@ describe('collectStrings — the deep-link payload is part of the notification',
     expect(screenAllForDiagnosis(collectStrings(undefined)).clean).toBe(true);
   });
 
-  /** An unbounded walk over caller-supplied JSON is a denial-of-service shape. */
-  it('stops at the depth cap rather than recursing without bound', () => {
+  /**
+   * *** NESTING WAS A ONE-LINE WAY AROUND THE SEND-TIME SCREEN. ***
+   *
+   * The walk used to give up at depth 6 and return NOTHING for anything
+   * below it, so `{a:{b:{c:{d:{e:{f:{g:'you have diabetes'}}}}}}}` screened
+   * clean — and was then written to `deep_link_data`, projected back to the
+   * client by `notification.mapper.ts` and put in the FCM `data` block. The
+   * bound is on nodes visited now, not on depth.
+   */
+  it('screens a string buried below the old depth cap', () => {
+    const buried = { a: { b: { c: { d: { e: { f: { g: 'you have diabetes' } } } } } } };
+    expect(collectStrings(buried)).toContain('you have diabetes');
+    expect(screenAllForDiagnosis(collectStrings(buried)).clean).toBe(false);
+  });
+
+  /** An unbounded walk over caller-supplied JSON is a denial-of-service shape — and the walk is iterative, so depth cannot overflow the stack either. */
+  it('terminates on a pathologically deep payload, and still sees what is at the bottom', () => {
     let deep: unknown = 'diabetes';
     for (let i = 0; i < 40; i += 1) deep = { next: deep };
     expect(() => collectStrings(deep)).not.toThrow();
-    expect(collectStrings(deep)).not.toContain('diabetes');
+    expect(collectStrings(deep)).toContain('diabetes');
+  });
+
+  it('terminates on a very deep payload without a stack overflow', () => {
+    let deep: unknown = 'diabetes';
+    for (let i = 0; i < 50_000; i += 1) deep = { next: deep };
+    expect(() => collectStrings(deep)).not.toThrow();
+  });
+
+  /** A self-referential payload used to terminate only by running out of depth, re-collecting the same strings six times over. */
+  it('walks a cyclic payload once', () => {
+    const cyclic: Record<string, unknown> = { screen: 'consultation' };
+    cyclic.self = cyclic;
+    const found = collectStrings(cyclic);
+    expect(found.filter((entry) => entry === 'consultation')).toHaveLength(1);
+    expect(() => collectStrings(cyclic)).not.toThrow();
   });
 });
 

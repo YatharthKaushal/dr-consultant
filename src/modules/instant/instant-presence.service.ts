@@ -149,6 +149,44 @@ export class InstantPresenceService implements OnModuleInit {
    * from being none.
    */
   async setOwnPresence(doctorId: string, to: SelfSettablePresence): Promise<InstantPresenceView> {
+    return this.setDeclaredPresence(doctorId, to, { actorType: 'doctor', actorId: doctorId }, 'doctor_self_service');
+  }
+
+  /**
+   * *** THE OPERATOR OVERRIDE, THROUGH THE SAME RULE. ***
+   *
+   * `PUT /admin/instant-consults/doctors/:id/presence`. Its controller's
+   * comment says it is "restricted to the same `SELF_SETTABLE_PRESENCE` set a
+   * doctor gets" — and it was, in `AdminSetPresenceDto`'s `@IsIn` and nowhere
+   * else. It called `transition` directly, so the ONLY thing standing between
+   * an admin and `completing_notes` (an admin signing off clinical
+   * documentation) was a decorator on a DTO. `instant.dto.ts` states the rule
+   * this breaks in its own comment on the doctor's DTO: "The service re-checks
+   * this — the DTO is the first line, not the rule (`backend/README.md`:
+   * services hold the rules, not just the HTTP layer)." Now both paths go
+   * through one method, and the check cannot be true of one and not the other.
+   */
+  async setPresenceAsAdmin(doctorId: string, to: SelfSettablePresence, adminId: string): Promise<InstantPresenceView> {
+    return this.setDeclaredPresence(doctorId, to, { actorType: 'admin', actorId: adminId }, 'admin_override');
+  }
+
+  /**
+   * The shared body of the two DECLARED presence changes — a doctor's own and
+   * an operator's.
+   *
+   * THREE GUARDS, IN THIS ORDER, AND THE ORDER MATTERS — see `setOwnPresence`
+   * above for what each one is for. The third, the completion gate, is applied
+   * by `transition` as a predicate inside the same atomic UPDATE, and it
+   * applies to the admin path exactly as it does to the doctor's: an operator
+   * forcing a gated doctor to `available_now` is refused with
+   * `COMPLETION_GATE_ACTIVE`.
+   */
+  private async setDeclaredPresence(
+    doctorId: string,
+    to: SelfSettablePresence,
+    actor: PresenceActor,
+    reason: string,
+  ): Promise<InstantPresenceView> {
     if (!(SELF_SETTABLE_PRESENCE as readonly DoctorPresence[]).includes(to)) {
       throw new ConflictException({
         code: INSTANT_ERROR_CODES.PRESENCE_NOT_SELF_SETTABLE,
@@ -156,12 +194,7 @@ export class InstantPresenceService implements OnModuleInit {
       });
     }
 
-    const result = await this.transition({
-      doctorId,
-      to,
-      actor: { actorType: 'doctor', actorId: doctorId },
-      reason: 'doctor_self_service',
-    });
+    const result = await this.transition({ doctorId, to, actor, reason });
 
     this.throwForRefusal(result);
     return this.getOwnPresence(doctorId);
@@ -179,17 +212,46 @@ export class InstantPresenceService implements OnModuleInit {
    * M-05's result unchanged, including its `refusal`, because the two classes
    * of caller want opposite things from a refusal: a controller turns it into
    * an error, and a sweep ignores it and moves to the next candidate.
+   *
+   * ── `onlyFrom`: *** A SYSTEM RELEASE IS NOT AN OVERRIDE. *** ─────────────
+   *
+   * `LEGAL_PRESENCE_TRANSITIONS[to]` answers "may a doctor EVER get here from
+   * there", which is the right question for a doctor asking for a state and
+   * the WRONG one for the system handing a doctor back. Half a dozen call
+   * sites here mean something much narrower than "make this doctor
+   * `available_now`" — they mean "give back the doctor THIS request was
+   * holding". Without a narrowing they were, in effect, force-writes:
+   *
+   *   the acceptance sweep timing an offer out moved the doctor to
+   *   `available_now` from ANY of `offline`/`paused`/`scheduled_only` — so a
+   *   doctor who was offered a request and then deliberately tapped Pause was
+   *   dragged back into the routing pool 60 seconds later and immediately
+   *   offered the next one;
+   *
+   *   `clearCompletionGate` did the same, in direct contradiction of its own
+   *   doc comment ("a doctor who finished their notes at midnight and closed
+   *   the app is `offline`, and dragging them back into the routing pool
+   *   because they filed some paperwork would be exactly wrong").
+   *
+   * `onlyFrom` is INTERSECTED with the transition table, never unioned, so it
+   * can only ever narrow: a caller cannot invent a transition FR-10.4 does not
+   * allow, and a state that is illegal stays illegal however it is passed.
    */
   async transition(input: {
     doctorId: string;
     to: DoctorPresence;
     actor: PresenceActor;
     reason?: string;
+    /** Narrows the legal `from` set for this one call. Intersected with the table — it can never widen it. */
+    onlyFrom?: readonly DoctorPresence[];
   }): Promise<PresenceTransitionResult> {
+    const legal = LEGAL_PRESENCE_TRANSITIONS[input.to];
+    const from = input.onlyFrom ? legal.filter((state) => input.onlyFrom!.includes(state)) : legal;
+
     const result = await this.doctors.transitionPresence({
       doctorId: input.doctorId,
       to: input.to,
-      from: LEGAL_PRESENCE_TRANSITIONS[input.to],
+      from,
       requireNotGated: (PRESENCE_REQUIRING_NO_GATE as readonly DoctorPresence[]).includes(input.to),
       actor: input.actor,
       reason: input.reason,

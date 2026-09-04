@@ -25,7 +25,7 @@ describe('DoctorReliabilityService', () => {
   it('returns null (not NaN, not 0) for every rate when the doctor has zero denominator on all three queries', async () => {
     const { service, select } = createDeps();
     select
-      .mockReturnValueOnce(selectChain([{ total: '0', accepted: '0' }]))
+      .mockReturnValueOnce(selectChain([{ answerable: '0', accepted: '0' }]))
       .mockReturnValueOnce(selectChain([{ denominator: '0', noShow: '0' }]))
       .mockReturnValueOnce(selectChain([{ total: '0', finalised: '0' }]));
 
@@ -34,10 +34,16 @@ describe('DoctorReliabilityService', () => {
     expect(result).toEqual({ acceptanceRate: null, noShowRate: null, caseSummaryCompletionRate: null });
   });
 
-  it('computes the acceptance rate as accepted/total', async () => {
+  // *** `accepted / answerable`, NOT `accepted / count(*)`. *** The
+  // denominator deliberately excludes `superseded` (the patient cancelled —
+  // nothing to do with the doctor) and `pending` (an offer that is on their
+  // screen right now). This spec mocks the row the query returns, so it can
+  // only prove the arithmetic; the WHERE clause itself is proved against real
+  // SQL in `instant/instant.routing-race.integration.spec.ts`.
+  it('computes the acceptance rate as accepted/answerable', async () => {
     const { service, select } = createDeps();
     select
-      .mockReturnValueOnce(selectChain([{ total: '4', accepted: '3' }]))
+      .mockReturnValueOnce(selectChain([{ answerable: '4', accepted: '3' }]))
       .mockReturnValueOnce(selectChain([{ denominator: '0', noShow: '0' }]))
       .mockReturnValueOnce(selectChain([{ total: '0', finalised: '0' }]));
 
@@ -49,7 +55,7 @@ describe('DoctorReliabilityService', () => {
   it('computes the no-show rate as noShow/(completed+no_show)', async () => {
     const { service, select } = createDeps();
     select
-      .mockReturnValueOnce(selectChain([{ total: '0', accepted: '0' }]))
+      .mockReturnValueOnce(selectChain([{ answerable: '0', accepted: '0' }]))
       .mockReturnValueOnce(selectChain([{ denominator: '10', noShow: '2' }]))
       .mockReturnValueOnce(selectChain([{ total: '0', finalised: '0' }]));
 
@@ -61,7 +67,7 @@ describe('DoctorReliabilityService', () => {
   it('computes case-summary completion as finalised/total', async () => {
     const { service, select } = createDeps();
     select
-      .mockReturnValueOnce(selectChain([{ total: '0', accepted: '0' }]))
+      .mockReturnValueOnce(selectChain([{ answerable: '0', accepted: '0' }]))
       .mockReturnValueOnce(selectChain([{ denominator: '0', noShow: '0' }]))
       .mockReturnValueOnce(selectChain([{ total: '5', finalised: '5' }]));
 

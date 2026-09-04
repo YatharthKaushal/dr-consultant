@@ -16,6 +16,7 @@ import {
 import {
   NOTIFICATION_RESULT_REASONS,
   type NotificationAudience,
+  type NotificationAudienceKind,
   type NotificationRequest,
   type NotificationResult,
   type NotificationResultReason,
@@ -83,21 +84,63 @@ export class NotificationService {
     try {
       return await this.deliver(request);
     } catch (error: unknown) {
-      // *** THE HANDLER ITSELF MUST NOT THROW. ***
-      // It is reached with whatever the caller passed, INCLUDING a null or
-      // half-built request — a caller mid-failure is exactly the caller most
-      // likely to hand us one. Reading `request.templateCode` directly here
-      // threw a TypeError on `notify(null)` and turned the one method
-      // documented as never throwing into one that did.
-      const detail = error instanceof Error ? error.message : String(error);
-      const templateCode = request?.templateCode ?? 'unknown';
-      const audienceKind = request?.audience?.kind ?? 'unknown';
-      this.logger.error(`notify failed for template ${templateCode} (audience ${audienceKind}): ${detail}`);
+      this.logNotifyFailure(request, error);
       return { queued: false, notificationId: null, reason: NOTIFICATION_RESULT_REASONS.PROVIDER_UNAVAILABLE };
     }
   }
 
+  /**
+   * *** THE HANDLER ITSELF MUST NOT THROW. ***
+   *
+   * It is reached with whatever the caller passed, INCLUDING a null or
+   * half-built request — a caller mid-failure is exactly the caller most
+   * likely to hand us one. Reading `request.templateCode` directly threw a
+   * TypeError on `notify(null)` and turned the one method documented as never
+   * throwing into one that did; `?.` fixed that case and left three others.
+   *
+   * *** INTERPOLATING A VALUE IS ITSELF A THROWING OPERATION. *** `${x}` on a
+   * SYMBOL raises "Cannot convert a Symbol value to a string", and `String()`
+   * on an object with a null prototype or a throwing `toString` raises
+   * "Cannot convert object to primitive value" — all three were reproduced
+   * escaping `notify` (`templateCode: Symbol(...)`, a `templateCode` whose
+   * `toString` throws, and a dependency rejecting with `Object.create(null)`).
+   * `fcm-push.classifier.ts#readMessage` already documents and guards exactly
+   * this hazard on the push path; the same guard belongs here, on the path
+   * whose invariant is the strictest in the module.
+   *
+   * So every field is rendered through `describeSafely`, and the whole body is
+   * wrapped as well: logging is not allowed to be the thing that breaks the
+   * contract logging exists to report on.
+   */
+  private logNotifyFailure(request: NotificationRequest | undefined, error: unknown): void {
+    try {
+      const detail = describeSafely(error instanceof Error ? error.message : error, 'unreadable error');
+      const templateCode = describeSafely(request?.templateCode, 'unknown');
+      const audienceKind = describeSafely(request?.audience?.kind, 'unknown');
+      this.logger.error(`notify failed for template ${templateCode} (audience ${audienceKind}): ${detail}`);
+    } catch {
+      // Deliberately empty. See above.
+    }
+  }
+
   private async deliver(request: NotificationRequest): Promise<NotificationResult> {
+    /* --- AN AUDIENCE THIS MODULE CANNOT ROUTE IS REFUSED BEFORE ANYTHING
+     * IS WRITTEN ---------------------------------------------------------
+     * `audience.kind` is three literals in the type system, but `notify` is
+     * the module's boundary and is documented as reaching us with whatever a
+     * caller passed — and M-13 binds to a LOCAL MIRROR of this contract that
+     * this code cannot see. Without this guard a fourth kind fell through
+     * every `=== 'patient'` ternary in the module to the DOCTOR side of it:
+     * `repo.insert` wrote a row with all three owner columns null (nobody's
+     * notification, readable by nobody), `NotificationDeviceRepository` read
+     * a token from `doctors`, and `FcmPushAdapter` sent it with the DOCTOR
+     * app's Firebase credentials. That is the cross-app delivery the separate
+     * store listings exist to prevent, so it stops here. */
+    const requestedKind: unknown = request?.audience?.kind;
+    if (!isRoutableAudience(request?.audience)) {
+      throw new Error(`unroutable audience kind ${describeSafely(requestedKind, 'undefined')}`);
+    }
+
     const template = await this.templates.findTemplate(request.templateCode);
     if (template === null) {
       // Not an error the caller can act on, and not a reason to fail their
@@ -112,8 +155,8 @@ export class NotificationService {
     /* --- FR-16.2, AT SEND TIME ----------------------------------------- *
      * Screened against the FULLY RENDERED copy — the exact bytes that would
      * be stored in `notifications.body` and pushed to a lock screen — plus
-     * every string reachable in the deep-link payload, which travels with the
-     * notification and is readable by the app.
+     * the template code and every string reachable in the deep-link payload,
+     * both of which travel with the notification and are readable by the app.
      *
      * A hit writes NO ROW. `notifications.body`'s own schema comment says the
      * stored copy "MUST NOT name a diagnosis, FR-16.2", so a row recording
@@ -128,11 +171,20 @@ export class NotificationService {
     const screening = screenAllForDiagnosis([
       rendered.title,
       rendered.body,
+      // The CODE travels too. It is stored in `notifications.template_code`,
+      // handed to the app in the FCM `data` block, and projected straight
+      // back to the client by `notification.mapper.ts` — the same three
+      // properties that put `deepLinkData` in this list. An admin may create
+      // any code matching `TEMPLATE_CODE_PATTERN`, and `you_have_diabetes`
+      // matches it; the write path now refuses one, and this catches a code
+      // stored before that check existed. Underscores normalise to spaces, so
+      // a code screens as the phrase it spells.
+      ...(typeof request.templateCode === 'string' ? [request.templateCode] : []),
       ...collectStrings(request.deepLinkData),
     ]);
     if (!screening.clean) {
       this.logger.error(
-        `*** FR-16.2 *** Suppressed notification "${request.templateCode}" for a ${request.audience.kind}: copy names a diagnosis ("${screening.construction ?? ''}"). No row written, no push sent.`,
+        `*** FR-16.2 *** Suppressed notification "${request.templateCode}" for a ${request.audience.kind}: the copy, the code or the deep link names a diagnosis ("${screening.construction ?? ''}"). No row written, no push sent.`,
       );
       return { queued: false, notificationId: null, reason: NOTIFICATION_RESULT_REASONS.SUPPRESSED };
     }
@@ -301,11 +353,16 @@ export class NotificationService {
    * belonging to someone else are the SAME 404 — telling them apart would
    * turn this endpoint into an existence oracle over other people's
    * notification ids.
+   *
+   * The `readAt` reported is the one the ROW now holds, not the one this
+   * method proposed: re-reading an already-read notification keeps the first
+   * read's timestamp (`notification.repository.ts`'s `coalesce`), and
+   * answering with `new Date()` would hand the client a time the database
+   * never stored.
    */
   async markRead(auth: AuthContext, id: number): Promise<{ id: number; readAt: Date }> {
-    const readAt = new Date();
-    const updated = await this.repo.markRead(toAudience(auth), id, readAt);
-    if (!updated) {
+    const readAt = await this.repo.markRead(toAudience(auth), id, new Date());
+    if (readAt === null) {
       throw new NotFoundException({
         code: NOTIFICATION_ERROR_CODES.NOT_FOUND,
         message: 'Notification not found.',
@@ -390,6 +447,61 @@ export function buildDataPayload(notificationId: number, request: NotificationRe
     templateCode: request.templateCode,
   };
   if (request.consultationId !== undefined) data.consultationId = request.consultationId;
-  if (request.deepLinkData !== undefined) data.deepLinkData = JSON.stringify(request.deepLinkData);
+  if (request.deepLinkData !== undefined) {
+    // *** THIS RUNS AFTER THE ROW HAS BEEN WRITTEN. *** `JSON.stringify`
+    // throws on a circular structure and on a `BigInt`, and a throw here does
+    // not merely lose the deep link: it unwinds into `notify`'s handler,
+    // which reports `queued: false, notificationId: null` for a notification
+    // that HAS a row — contradicting `notification.contract.ts` ("`queued`
+    // means A ROW WAS WRITTEN") and leaving that row stuck at `queued` with
+    // no `failure_reason`. A payload we cannot encode is dropped from the
+    // push envelope instead; the row still carries it, and the in-app
+    // notification is unaffected.
+    const encoded = encodeDeepLink(request.deepLinkData);
+    if (encoded !== null) data.deepLinkData = encoded;
+  }
   return data;
+}
+
+function encodeDeepLink(value: unknown): string | null {
+  try {
+    return JSON.stringify(value) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * `String()` that cannot itself raise — see `logNotifyFailure`. A symbol, an
+ * object with a null prototype and an object whose `toString` throws all reach
+ * this from a caller's request or from a rejected dependency.
+ */
+function describeSafely(value: unknown, fallback: string): string {
+  if (typeof value === 'string') return value;
+  if (value === undefined || value === null) return fallback;
+  try {
+    return String(value);
+  } catch {
+    return fallback;
+  }
+}
+
+/**
+ * The three audience kinds this module can actually route, as a runtime set.
+ *
+ * `satisfies Record<NotificationAudienceKind, true>` is the point: adding a
+ * fourth kind to `notification.contract.ts` without adding it here is a `tsc`
+ * error, which is the same discipline `toAudience` is written out longhand
+ * for.
+ */
+const ROUTABLE_AUDIENCE_KINDS = {
+  patient: true,
+  doctor: true,
+  admin: true,
+} as const satisfies Record<NotificationAudienceKind, true>;
+
+function isRoutableAudience(audience: NotificationAudience | undefined | null): audience is NotificationAudience {
+  if (audience === null || audience === undefined) return false;
+  const kind: unknown = audience.kind;
+  return typeof kind === 'string' && Object.prototype.hasOwnProperty.call(ROUTABLE_AUDIENCE_KINDS, kind);
 }

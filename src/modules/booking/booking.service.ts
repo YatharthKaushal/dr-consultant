@@ -382,6 +382,14 @@ export class BookingService {
     return this.repo.listExpiredInstantHolds(now, limit);
   }
 
+  /** ADDITIVE (M-13) — see `BookingRepository#listStaleAwaitingDoctorRequests`. */
+  async listStaleAwaitingDoctorRequests(
+    staleBefore: Date,
+    limit: number,
+  ): Promise<Array<{ consultationId: string; patientId: string; updatedAt: Date }>> {
+    return this.repo.listStaleAwaitingDoctorRequests(staleBefore, limit);
+  }
+
   /* ── Cancel ───────────────────────────────────────────────────────────── */
 
   /**

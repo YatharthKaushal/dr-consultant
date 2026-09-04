@@ -223,4 +223,23 @@ export interface BookingContract {
     doctorId: string | null;
     holdExpiresAt: Date | null;
   }>>;
+
+  /**
+   * ADDITIVE (M-13): instant consultations that have been sitting in
+   * `awaiting_doctor` since before `staleBefore`.
+   *
+   * `awaiting_doctor` is the one live instant status with no
+   * `hold_expires_at`, so neither this module's hold sweep nor M-13's payment
+   * sweep can see it, and M-13's acceptance sweep only sees offers that are
+   * still `pending`. A request whose re-route failed after a decline, a
+   * timeout or a rolled-back accept was therefore reachable by nothing at all.
+   * This is the candidate query for the sweep that closes that.
+   *
+   * See `booking.repository.ts#listStaleAwaitingDoctorRequests`.
+   */
+  listStaleAwaitingDoctorRequests(staleBefore: Date, limit: number): Promise<Array<{
+    consultationId: string;
+    patientId: string;
+    updatedAt: Date;
+  }>>;
 }
