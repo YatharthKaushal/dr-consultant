@@ -2,6 +2,8 @@ import { Module } from '@nestjs/common';
 import { BookingModule } from '../booking/booking.module';
 import { ClinicalModule } from '../clinical/clinical.module';
 import { DoctorModule } from '../doctor/doctor.module';
+import { FeedbackFacade } from '../feedback/feedback.facade';
+import { FeedbackModule } from '../feedback/feedback.module';
 import { FollowupModule } from '../followup/followup.module';
 import { PatientModule } from '../patient/patient.module';
 import { GOVERNANCE_COMPLAINTS_PORT } from './governance-complaints.contract';
@@ -54,18 +56,14 @@ import { UnavailableComplaintsProvider } from './unavailable-complaints.provider
  *
  * ── The one M-19 (Feedback and Complaints) seam ──────────────────────────
  *
- * `modules/feedback` is being built in a PARALLEL WORKTREE and does not
- * exist here. `GOVERNANCE_COMPLAINTS_PORT` is bound to the null object,
- * `UnavailableComplaintsProvider` (every `ComplaintStatus` at `0`), exactly
- * the pattern `pricing.module.ts` documents for `DISCOUNT_PORT`.
- *
- * *** THE COORDINATOR REBINDS THIS ONE LINE POST-MERGE: ***
- *   `{ provide: GOVERNANCE_COMPLAINTS_PORT, useExisting: <the M-19 facade> }`
- * — importing the feedback module here first, the same one-line handover
- * every other port in this codebase gets.
+ * `GOVERNANCE_COMPLAINTS_PORT` is bound to the real `FeedbackFacade` (M-19,
+ * rebound post-merge from `UnavailableComplaintsProvider`, which stays in
+ * the tree unbound as the kill-switch every other port in this codebase
+ * keeps). `FeedbackFacade` satisfies `GovernanceComplaintsPort` with the
+ * exact `countComplaintsByStatus` shape specified up front — no adapter.
  */
 @Module({
-  imports: [BookingModule, ClinicalModule, DoctorModule, FollowupModule, PatientModule],
+  imports: [BookingModule, ClinicalModule, DoctorModule, FeedbackModule, FollowupModule, PatientModule],
   controllers: [GovernanceAdminController],
   providers: [
     GovernanceEnrichmentService,
@@ -73,7 +71,12 @@ import { UnavailableComplaintsProvider } from './unavailable-complaints.provider
     GovernanceQualityService,
     GovernanceExportService,
     // *** THE ONE LINE THE M-19 HANDOVER CHANGES. ***
-    { provide: GOVERNANCE_COMPLAINTS_PORT, useClass: UnavailableComplaintsProvider },
+    // Rebound from `UnavailableComplaintsProvider` post-merge: `FeedbackFacade`
+    // (M-19) satisfies `GovernanceComplaintsPort` with the exact
+    // `countComplaintsByStatus` shape specified up front, no adapter needed.
+    // The provider class stays in the tree, unbound, as the kill-switch
+    // every other port in this codebase keeps.
+    { provide: GOVERNANCE_COMPLAINTS_PORT, useExisting: FeedbackFacade },
   ],
 })
 export class GovernanceModule {}
