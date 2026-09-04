@@ -511,6 +511,16 @@ async function teardown(db: Database, fixtures: Fixtures): Promise<void> {
   );
 
   await db.execute(sql`delete from notifications where consultation_id = any(${consultationList})`);
+
+  // *** M-16's follow-up chain. ADDED once the demo/dev database started
+  // seeding a real `general` pathway — before that seed existed, `finalise`
+  // during this run always hit `PATHWAY_NOT_FOUND` and never actually wrote
+  // any of these three rows, so their absence here was invisible. Order
+  // matters: `safety_alerts.checkin_response_id` is a nullable FK onto
+  // `checkin_responses`, so alerts go first.
+  await db.execute(sql`delete from safety_alerts where consultation_id = any(${consultationList})`);
+  await db.execute(sql`delete from checkin_responses where consultation_id = any(${consultationList})`);
+  await db.execute(sql`delete from followup_assignments where consultation_id = any(${consultationList})`);
   // `outbox_events.aggregate_id` and `audit_log.entity_id` are VARCHAR, not
   // uuid — comparing them against a `uuid[]` errors, and casting the COLUMN to
   // uuid would blow up on any other module's non-uuid aggregate id. Compare as
