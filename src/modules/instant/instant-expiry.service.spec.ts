@@ -28,6 +28,7 @@ const DOCTOR_ID = '22222222-2222-4222-8222-222222222222';
 const CONSULTATION_ID = '33333333-3333-4333-8333-333333333333';
 const OTHER_CONSULTATION_ID = '3b3b3b3b-3333-4333-8333-333333333333';
 const ATTEMPT_ID = '44444444-4444-4444-8444-444444444444';
+const PAYMENT_ID = '55555555-5555-4555-8555-555555555555';
 
 function makeAttempt(overrides: Partial<InstantConsultancyRow> = {}): InstantConsultancyRow {
   return {
@@ -81,10 +82,17 @@ function buildHarness() {
     listExpiredInstantHolds: jest.fn(async () => []),
     listStaleAwaitingDoctorRequests: jest.fn(async () => []),
     getBooking: jest.fn(async () => makeBooking()),
+    confirmPayment: jest.fn(async () => makeBooking({ status: 'scheduled' })),
   };
 
   const doctors: Record<string, Fn> = {
     clearCompletionGate: jest.fn(async () => ({ changed: true, doctorId: DOCTOR_ID, blockedByConsultationId: null })),
+  };
+
+  // Default: the patient never paid, which is the case this sweep exists for.
+  const payments: Record<string, Fn> = {
+    getByConsultationId: jest.fn(async () => ({ paymentId: PAYMENT_ID, status: 'created', paidAt: null })),
+    reconcileWithGateway: jest.fn(async () => ({ status: 'created', changed: false })),
   };
 
   const presence: Record<string, Fn> = {
@@ -99,11 +107,12 @@ function buildHarness() {
     instant as never,
     bookings as never,
     doctors as never,
+    payments as never,
     presence as never,
     audit as never,
   );
 
-  return { service, repo, instant, bookings, doctors, presence, audit };
+  return { service, repo, instant, bookings, doctors, payments, presence, audit };
 }
 
 describe('InstantExpiryService', () => {
@@ -397,6 +406,7 @@ describe('InstantExpiryService', () => {
         examined: 0,
         released: 0,
         skipped: 0,
+        confirmed: 0,
         failed: 0,
       });
       expect(instant.releaseRequest).not.toHaveBeenCalled();
@@ -532,6 +542,102 @@ describe('InstantExpiryService', () => {
       });
 
       await expect(h.service.sweepStrandedRequests()).resolves.toMatchObject({ examined: 2, failed: 1, rerouted: 1 });
+    });
+  });
+  describe('*** the released instant consult leaves M-11 backstop, so this sweep asks the gateway itself ***', () => {
+    /**
+     * DEFECT. The class header claimed the money was "handed to a mechanism
+     * that already exists". The mechanism it named — `payment.captured` ->
+     * `BookingPaymentListener` -> `confirmPayment` -> `confirmLateCapture` —
+     * is emitted only by M-12's WEBHOOK, and
+     * `booking-payment.listener.ts` says of itself, in bold, that it is "a
+     * fast path, not the guarantee": the durable guarantee is M-11's Tier 2,
+     * which reconciles every expired hold against Razorpay.
+     *
+     * Tier 2 is driven off `consultations.status = 'pending_payment'` — and
+     * releasing to `expired` is exactly what takes a row OUT of it.
+     * `PaymentRepository.listStale` describes a payment-side reconciliation
+     * sweep, but nothing in the codebase calls it. So a lost webhook (the
+     * precise failure Tier 2 exists to cover) left the money captured at
+     * Razorpay, `payments.status = 'created'`, the consultation `expired`,
+     * nothing filed for an operator, and no sweep anywhere that would look
+     * again.
+     */
+    function expiredHold(h: ReturnType<typeof buildHarness>) {
+      h.bookings.listExpiredInstantHolds.mockResolvedValue([
+        { consultationId: CONSULTATION_ID, patientId: PATIENT_ID, doctorId: DOCTOR_ID, holdExpiresAt: new Date() },
+      ]);
+    }
+
+    it('*** ASKS THE GATEWAY BEFORE RELEASING *** — and confirms instead of releasing when it says paid', async () => {
+      const h = buildHarness();
+      expiredHold(h);
+      h.payments.reconcileWithGateway.mockResolvedValue({ status: 'paid', changed: true });
+
+      const result = await h.service.sweepUnpaidAcceptedRequests();
+
+      expect(h.payments.reconcileWithGateway).toHaveBeenCalledWith(PAYMENT_ID);
+      expect(h.bookings.confirmPayment).toHaveBeenCalledWith(CONSULTATION_ID);
+      // The doctor is NOT handed back and the request is NOT released: the
+      // patient paid for this consultation.
+      expect(h.presence.transition).not.toHaveBeenCalled();
+      expect(h.instant.releaseRequest).not.toHaveBeenCalled();
+      expect(result).toMatchObject({ examined: 1, released: 0, confirmed: 1 });
+    });
+
+    it('asks BEFORE the doctor is freed, not after — the order is the whole fix', async () => {
+      const h = buildHarness();
+      expiredHold(h);
+      const order: string[] = [];
+      h.payments.reconcileWithGateway.mockImplementation(async () => {
+        order.push('reconcile');
+        return { status: 'created', changed: false };
+      });
+      h.presence.transition.mockImplementation(async () => {
+        order.push('freeDoctor');
+        return { changed: true, before: 'in_consultation', after: 'available_now' };
+      });
+
+      await h.service.sweepUnpaidAcceptedRequests();
+
+      expect(order).toEqual(['reconcile', 'freeDoctor']);
+    });
+
+    it('skips the gateway entirely when the payment is already paid locally — no round trip to be told what we know', async () => {
+      const h = buildHarness();
+      expiredHold(h);
+      h.payments.getByConsultationId.mockResolvedValue({ paymentId: PAYMENT_ID, status: 'paid', paidAt: new Date() });
+
+      await expect(h.service.sweepUnpaidAcceptedRequests()).resolves.toMatchObject({ confirmed: 1 });
+      expect(h.payments.reconcileWithGateway).not.toHaveBeenCalled();
+      expect(h.bookings.confirmPayment).toHaveBeenCalledWith(CONSULTATION_ID);
+    });
+
+    it('*** STILL RELEASES ON AN UNKNOWN ANSWER *** — M-13 inverts M-11 default, and that is untouched', async () => {
+      const h = buildHarness();
+      expiredHold(h);
+      h.payments.reconcileWithGateway.mockResolvedValue({ status: 'pending', changed: false });
+
+      await expect(h.service.sweepUnpaidAcceptedRequests()).resolves.toMatchObject({ released: 1, confirmed: 0 });
+      expect(h.instant.releaseRequest).toHaveBeenCalled();
+    });
+
+    it('*** STILL RELEASES WHEN THE GATEWAY IS UNREACHABLE *** — a gateway we cannot reach must not pin a doctor', async () => {
+      const h = buildHarness();
+      expiredHold(h);
+      h.payments.reconcileWithGateway.mockRejectedValue(new Error('razorpay is down'));
+
+      await expect(h.service.sweepUnpaidAcceptedRequests()).resolves.toMatchObject({ released: 1 });
+      expect(h.presence.transition).toHaveBeenCalledWith(expect.objectContaining({ to: 'available_now' }));
+    });
+
+    it('does not call the gateway at all when no payment row exists — M-11 Tier 1, and no money can be in flight', async () => {
+      const h = buildHarness();
+      expiredHold(h);
+      h.payments.getByConsultationId.mockResolvedValue(null);
+
+      await expect(h.service.sweepUnpaidAcceptedRequests()).resolves.toMatchObject({ released: 1 });
+      expect(h.payments.reconcileWithGateway).not.toHaveBeenCalled();
     });
   });
 });

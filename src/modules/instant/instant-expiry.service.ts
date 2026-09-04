@@ -1,6 +1,7 @@
 import { Injectable, Logger, type OnApplicationShutdown, type OnModuleInit } from '@nestjs/common';
 import { BookingFacade } from '../booking/booking.facade';
 import { DoctorFacade } from '../doctor/doctor.facade';
+import { PaymentFacade } from '../payment/payment.facade';
 import { InstantPresenceService, SYSTEM_ACTOR, describeError } from './instant-presence.service';
 import {
   ACCEPTANCE_SWEEP_INTERVAL_MS,
@@ -27,6 +28,8 @@ export interface PaymentSweepResult {
   examined: number;
   released: number;
   skipped: number;
+  /** The gateway said the money was already in. Confirmed rather than released — see `askTheGatewayFirst`. */
+  confirmed: number;
   failed: number;
 }
 
@@ -96,21 +99,50 @@ export interface StrandedSweepResult {
  *   M-11:  unknown payment state -> KEEP the hold. Protect the money.
  *   M-13:  window elapsed        -> RELEASE the doctor. Protect the supply.
  *
- * What makes that safe rather than reckless is that the money is NOT dropped
- * — it is handed to a mechanism that already exists. If the payment lands
- * after the release, M-12 emits `payment.captured`, `BookingPaymentListener`
- * calls `confirmPayment`, and M-11's `confirmLateCapture` re-acquires the
- * consultation. For an instant row that re-acquire cannot fail on a slot
- * clash, because there is no `scheduled_start_at` and the partial unique
- * index does not apply; and if it cannot be re-acquired for any other reason
- * it goes to the admin resolution queue WITH THE MONEY HELD, never
- * auto-refunded. No new payment machinery is added here, and none is needed.
+ * What makes that safe rather than reckless is that the money is not dropped.
+ * If the payment lands after the release, M-12's WEBHOOK emits
+ * `payment.captured`, `BookingPaymentListener` calls `confirmPayment`, and
+ * M-11's `confirmLateCapture` re-acquires the consultation. For an instant row
+ * that re-acquire cannot fail on a slot clash, because there is no
+ * `scheduled_start_at` and the partial unique index does not apply.
  *
- * The residual exposure is a patient who paid for a consultation whose doctor
- * has since taken another one. That is a human decision, it lands in the queue
- * an operator already watches, and it is bounded by
- * `instant.payment_window_seconds` — which is in `app_config` precisely so an
- * operator can retune this trade without a release.
+ * *** BUT THAT CHAIN IS A FAST PATH, NOT A GUARANTEE, AND THIS SWEEP USED TO
+ * TREAT IT AS ONE. READ THIS BEFORE TRUSTING IT. ***
+ *
+ * `booking-payment.listener.ts` says so itself, in its own header: "This is a
+ * fast path, not the guarantee ... The durable guarantee lives in
+ * `BookingSlotHoldService`'s two-tier sweep: every expired hold that has a
+ * gateway order is reconciled against Razorpay." That backstop is driven off
+ * `consultations.status = 'pending_payment'`. *** RELEASING TO `expired` IS
+ * EXACTLY WHAT TAKES A ROW OUT OF IT. *** `PaymentRepository.listStale`
+ * describes a payment-side reconciliation sweep, but nothing calls it, so
+ * there is no second net underneath.
+ *
+ * So for a released instant consultation the ONLY route from a real capture
+ * back to the patient was one in-process event. Lose the webhook — the precise
+ * failure Tier 2 exists to cover — or be restarting when it arrives, and the
+ * money sat captured at Razorpay with `payments.status = 'created'`, the
+ * consultation `expired`, nothing filed for an operator, and nothing anywhere
+ * that would ever look at it again.
+ *
+ * `askTheGatewayFirst` below closes that: before releasing, this sweep does
+ * for an instant hold what Tier 2 does for a scheduled one — it ASKS. The
+ * inversion is untouched, because it only ever applied to an UNKNOWN answer:
+ * `paid` confirms, and every other answer, including an unreachable gateway,
+ * still releases the doctor on M-13's own clock.
+ *
+ * The residual exposure is a patient whose money lands in the seconds between
+ * the gateway answering "not paid" and this sweep committing the release. That
+ * one still goes down the late-capture path, and it is worth being precise
+ * about where it ends up: `confirmLateCapture` re-acquires an `expired`
+ * instant row to `scheduled` and files NOTHING for a human — the admin
+ * resolution queue is only reached when the row cannot be re-acquired at all.
+ * So the patient gets a confirmed consultation whose doctor may by then be
+ * `in_consultation` with somebody else, and nobody is told. That is a real
+ * gap, it belongs to M-11/M-14 rather than here, and it is written down rather
+ * than implied. It is bounded by `instant.payment_window_seconds`, which is in
+ * `app_config` precisely so an operator can retune this trade without a
+ * release.
  *
  * ═══════════════════════════════════════════════════════════════════════════
  * SWEEP 3 — THE STRANDED REQUEST
@@ -157,6 +189,7 @@ export class InstantExpiryService implements OnModuleInit, OnApplicationShutdown
     private readonly instant: InstantService,
     private readonly bookings: BookingFacade,
     private readonly doctors: DoctorFacade,
+    private readonly payments: PaymentFacade,
     private readonly presence: InstantPresenceService,
     private readonly audit: AuditService,
   ) {}
@@ -266,9 +299,10 @@ export class InstantExpiryService implements OnModuleInit, OnApplicationShutdown
     this.paymentSweepInFlight = true;
     try {
       const result = await this.sweepUnpaidAcceptedRequests();
-      if (result.released > 0 || result.failed > 0) {
+      if (result.released > 0 || result.confirmed > 0 || result.failed > 0) {
         this.logger.log(
-          `Instant payment sweep: ${result.released} released, ${result.skipped} skipped, ${result.failed} failed.`,
+          `Instant payment sweep: ${result.released} released, ${result.confirmed} confirmed from the gateway, ` +
+            `${result.skipped} skipped, ${result.failed} failed.`,
         );
       }
     } catch (error) {
@@ -292,12 +326,13 @@ export class InstantExpiryService implements OnModuleInit, OnApplicationShutdown
    */
   async sweepUnpaidAcceptedRequests(now: Date = new Date()): Promise<PaymentSweepResult> {
     const candidates = await this.bookings.listExpiredInstantHolds(now, SWEEP_BATCH_SIZE);
-    const result: PaymentSweepResult = { examined: candidates.length, released: 0, skipped: 0, failed: 0 };
+    const result: PaymentSweepResult = { examined: candidates.length, released: 0, skipped: 0, confirmed: 0, failed: 0 };
 
     for (const candidate of candidates) {
       try {
-        const released = await this.releaseUnpaidRequest(candidate.consultationId, candidate.doctorId);
-        if (released) result.released += 1;
+        const outcome = await this.releaseUnpaidRequest(candidate.consultationId, candidate.doctorId);
+        if (outcome === 'released') result.released += 1;
+        else if (outcome === 'confirmed') result.confirmed += 1;
         else result.skipped += 1;
       } catch (error) {
         result.failed += 1;
@@ -308,6 +343,59 @@ export class InstantExpiryService implements OnModuleInit, OnApplicationShutdown
     }
 
     return result;
+  }
+
+  /**
+   * *** THE ONE THING THIS SWEEP BORROWS FROM M-11's TIER 2. ***
+   *
+   * Returns `true` when the money is already in and the consultation has been
+   * confirmed instead of released.
+   *
+   * WHY THIS IS NOT THE "NEVER RELEASE UNDER A LIVE PAYMENT" RULE COMING BACK.
+   * That rule is about an UNKNOWN answer, and M-11's default on one is to keep
+   * holding. This sweep's default on an unknown answer is unchanged: release,
+   * and protect the supply. A gateway that says `paid` is not a live payment,
+   * it is a finished one — and releasing a consultation the patient has
+   * already paid for was never the trade being made.
+   *
+   * Everything is best-effort and every failure falls through to the release.
+   * A gateway we cannot reach must not be able to pin a doctor: that is the
+   * whole point of this sweep, and it is the one place M-13 and M-11 genuinely
+   * disagree.
+   *
+   * `reconcileWithGateway` marks the payment `paid` locally but deliberately
+   * does NOT emit `PAYMENT_CAPTURED_EVENT` (see `payment.service.ts`, which
+   * says its only caller confirms the booking itself). So this confirms the
+   * booking itself, as that comment requires of any second caller.
+   */
+  private async askTheGatewayFirst(consultationId: string): Promise<boolean> {
+    try {
+      const payment = await this.payments.getByConsultationId(consultationId);
+      // No payment row means no money can be in flight — M-11's Tier 1, and no
+      // gateway call is warranted.
+      if (!payment) return false;
+
+      const status =
+        payment.status === 'paid'
+          ? 'paid'
+          : (await this.payments.reconcileWithGateway(payment.paymentId)).status;
+      if (status !== 'paid') return false;
+
+      await this.bookings.confirmPayment(consultationId);
+      this.logger.log(
+        `Instant consultation ${consultationId} was already PAID when its payment window elapsed; confirmed instead of released.`,
+      );
+      return true;
+    } catch (error) {
+      // Deliberately swallowed. The doctor is released below, which is this
+      // sweep's whole reason for existing, and a capture that lands anyway
+      // still reaches `confirmLateCapture`.
+      this.logger.warn(
+        `Could not reconcile the payment for instant consultation ${consultationId} before releasing it; ` +
+          `releasing on M-13's own clock. ${describeError(error)}`,
+      );
+      return false;
+    }
   }
 
   /* ── Sweep 3: the stranded request ─────────────────────────────────────── */
@@ -364,7 +452,10 @@ export class InstantExpiryService implements OnModuleInit, OnApplicationShutdown
    * reaches `markInstantConsultEnded` — but the call is unconditional because
    * a stuck gate is the one state a doctor cannot get themselves out of.
    */
-  private async releaseUnpaidRequest(consultationId: string, doctorId: string | null): Promise<boolean> {
+  private async releaseUnpaidRequest(
+    consultationId: string,
+    doctorId: string | null,
+  ): Promise<'released' | 'confirmed' | 'skipped'> {
     // The un-gate stays UNCONDITIONAL and stays FIRST — see the header. It is
     // addressed by consultation, so it is a no-op unless this consultation is
     // the one gating this doctor, and a stuck gate is the one state a doctor
@@ -393,7 +484,12 @@ export class InstantExpiryService implements OnModuleInit, OnApplicationShutdown
     // problem rather than this sweep's; the exposure went from "the whole
     // batch, plus two facade round trips per candidate" to "two statements".
     const candidate = await this.bookings.getBooking(consultationId);
-    if (!candidate || candidate.status !== 'pending_payment') return false;
+    if (!candidate || candidate.status !== 'pending_payment') return 'skipped';
+
+    // *** ASK THE GATEWAY BEFORE RELEASING, EXACTLY AS M-11's TIER 2 DOES. ***
+    // See the class header for why the fast-path event alone was not a
+    // backstop. `paid` is the only answer that changes what happens here.
+    if (await this.askTheGatewayFirst(consultationId)) return 'confirmed';
 
     if (doctorId) {
       // `in_consultation` -> `available_now` is the whole point of this sweep.
@@ -438,10 +534,10 @@ export class InstantExpiryService implements OnModuleInit, OnApplicationShutdown
         // Written down in the audit trail because this is the one place the
         // instant flow knowingly parts company with M-11's "never release
         // under a live payment" rule.
-        note: 'payment window elapsed; M-11 confirmLateCapture covers a payment that lands after this',
+        note: 'payment window elapsed; the gateway was asked and did not say paid; M-11 confirmLateCapture covers a payment that lands after this',
       },
     });
 
-    return true;
+    return 'released';
   }
 }
