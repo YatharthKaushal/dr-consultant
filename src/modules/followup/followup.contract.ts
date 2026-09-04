@@ -139,4 +139,21 @@ export interface FollowupContract {
 
   /** FR-14.1/FR-14.2. See `CarePlanView`'s header — reads through M-15/M-11/M-18, stores nothing. */
   getCarePlan(consultationId: string): Promise<CarePlanView>;
+
+  /**
+   * ADDITIVE (M-20/governance and quality): FR-18.5's "high-risk alerts" and
+   * "follow-up alerts" working queues are ONE underlying feed —
+   * `safety_alerts` rows with neither `acknowledgedAt` nor `closedAt` set,
+   * newest first — split by `alertType` on the READING side, not by two
+   * separate queries: `red_flag` reads as "high-risk alerts", the other four
+   * types (`amber`, `missed_checkin`, `medication_side_effect`,
+   * `followup_due`) read as "follow-up alerts". This exposes exactly what
+   * `admin/safety-alerts` (`followup-alert-admin.controller.ts`) already
+   * serves internally as `listOpenAlertsForAdmin`, through the facade so
+   * governance can compose it without a deep import.
+   */
+  listOpenAlerts(limit: number, offset: number): Promise<SafetyAlertView[]>;
+
+  /** ADDITIVE (M-20/governance and quality): the dashboard-number companion to `listOpenAlerts` — FR-18.6's "red flags"/"follow-up alerts" figures. See `followup.repository.ts#countOpenAlertsByType`. */
+  countOpenAlertsByType(): Promise<Partial<Record<SafetyAlertType, number>>>;
 }

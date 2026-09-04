@@ -36,4 +36,14 @@ export class ClinicalFacade implements ClinicalContract {
   async getCarePlanInputs(consultationId: string): Promise<ClinicalCarePlanView | null> {
     return this.clinical.getCarePlanInputs(consultationId);
   }
+
+  /** ADDITIVE (M-20/governance and quality) — see `ClinicalContract#listPendingCaseSummaries`. */
+  async listPendingCaseSummaries(limit: number, offset: number): Promise<ClinicalRecordView[]> {
+    return this.clinical.listPendingCaseSummaries(limit, offset);
+  }
+
+  /** ADDITIVE (M-20/governance and quality) — see `ClinicalContract#countPendingCaseSummaries`. */
+  async countPendingCaseSummaries(): Promise<number> {
+    return this.clinical.countPendingCaseSummaries();
+  }
 }

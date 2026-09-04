@@ -133,6 +133,20 @@ export interface ClinicalContract {
 
   /** The Care Plan projection, or `null` when there is no record or it is not finalised yet. */
   getCarePlanInputs(consultationId: string): Promise<ClinicalCarePlanView | null>;
+
+  /**
+   * ADDITIVE (M-20/governance and quality): FR-18.5's "pending case
+   * summaries" working queue — every DRAFT clinical record
+   * (`finalisedAt: null`), oldest first, so the longest-outstanding
+   * documentation surfaces first. Includes drafts, whatever the underlying
+   * consultation's status; this module has no opinion on booking status.
+   * Governance enriches each item with `BookingFacade.getBooking` for the
+   * doctor/patient identity this table does not carry.
+   */
+  listPendingCaseSummaries(limit: number, offset: number): Promise<ClinicalRecordView[]>;
+
+  /** ADDITIVE (M-20/governance and quality): the dashboard-number companion to `listPendingCaseSummaries` — FR-18.6's "pending summaries" figure. Same predicate, no page. */
+  countPendingCaseSummaries(): Promise<number>;
 }
 
 /**

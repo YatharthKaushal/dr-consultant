@@ -16,6 +16,7 @@ import { DoctorModule } from './modules/doctor/doctor.module';
 import { DocumentModule } from './modules/document/document.module';
 import { FeedbackModule } from './modules/feedback/feedback.module';
 import { FollowupModule } from './modules/followup/followup.module';
+import { GovernanceModule } from './modules/governance/governance.module';
 import { IdentityModule } from './modules/identity/identity.module';
 import { InstantModule } from './modules/instant/instant.module';
 import { McpModule } from './modules/mcp/mcp.module';
@@ -183,6 +184,17 @@ import { ErrorsModule } from './shared/errors/errors.module';
     // pre-existing table this module is the first to use; `feedback` is new
     // — see `src/schema/feedback.schema.ts`.
     FeedbackModule,
+    // M-20: Governance and Quality. Depends on M-11 to M-19
+    // (`docs/MODULES.md`) — imports `BookingModule`, `ClinicalModule`,
+    // `DoctorModule`, `FollowupModule` and `PatientModule` for their facades
+    // and composes every queue/dashboard number live across them; it owns no
+    // table of its own. `ClarificationModule` is deliberately not imported —
+    // see `governance.module.ts`'s header.
+    //
+    // `GOVERNANCE_COMPLAINTS_PORT` is rebound to the real `FeedbackFacade`
+    // (M-19, listed just above) in `governance.module.ts` post-merge — the
+    // standard one-line handover.
+    GovernanceModule,
     HealthModule,
   ],
 })

@@ -396,6 +396,17 @@ export class ClinicalService {
     return row ? toClinicalCarePlanView(row) : null;
   }
 
+  /** ADDITIVE (M-20/governance and quality) — see `clinical.repository.ts#listDrafts`. */
+  async listPendingCaseSummaries(limit: number, offset: number): Promise<ClinicalRecordView[]> {
+    const rows = await this.repo.listDrafts(limit, offset);
+    return rows.map(toClinicalRecordView);
+  }
+
+  /** ADDITIVE (M-20/governance and quality) — see `clinical.repository.ts#countDrafts`. */
+  async countPendingCaseSummaries(): Promise<number> {
+    return this.repo.countDrafts();
+  }
+
   /**
    * *** THE `clinical.read_records` READ (SRS §6.2). ***
    *

@@ -1,5 +1,5 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { and, desc, eq, gte, isNotNull, isNull, lt, or } from 'drizzle-orm';
+import { and, desc, eq, gte, isNotNull, isNull, lt, or, sql } from 'drizzle-orm';
 import { DATABASE } from '../../config/db/database.module';
 import type { Database, DatabaseTransaction } from '../../config/db/database.config';
 import { auditLogTable } from '../../schema/audit-log.schema';
@@ -140,6 +140,42 @@ export class ClinicalRepository {
       .where(and(eq(clinicalRecordsTable.consultationId, consultationId), isNull(clinicalRecordsTable.finalisedAt)))
       .returning();
     return row ?? null;
+  }
+
+  /* ── ADDITIVE (M-20/governance and quality) ─────────────────────────────── */
+
+  /**
+   * FR-18.5's "pending case summaries" working queue: every DRAFT record
+   * (`finalised_at IS NULL`), OLDEST first — the opposite ordering from
+   * `listFinalisedSince` below, and deliberately so. That sweep re-examines a
+   * fixed set and needs the newest end; this is an operational backlog an
+   * admin is meant to work down, and the item that has been sitting longest
+   * un-finalised is the one that should surface first.
+   *
+   * Returns every draft regardless of the underlying consultation's status —
+   * this module holds no opinion on whether the call has ended
+   * (`awaiting_documentation`) or is still running (`in_progress`); a caller
+   * wanting that distinction already gets `BookingView.status` from
+   * `BookingFacade.getBooking` per item, same as the doctor/patient identity
+   * this table does not carry either.
+   */
+  async listDrafts(limit: number, offset: number, executor: Executor = this.db): Promise<ClinicalRecordRow[]> {
+    return executor
+      .select()
+      .from(clinicalRecordsTable)
+      .where(isNull(clinicalRecordsTable.finalisedAt))
+      .orderBy(clinicalRecordsTable.createdAt)
+      .limit(limit)
+      .offset(offset);
+  }
+
+  /** The dashboard-number companion to `listDrafts` — FR-18.6's "pending summaries" figure. Same predicate, no ordering, no page. */
+  async countDrafts(executor: Executor = this.db): Promise<number> {
+    const [row] = await executor
+      .select({ count: sql<string>`count(*)` })
+      .from(clinicalRecordsTable)
+      .where(isNull(clinicalRecordsTable.finalisedAt));
+    return Number(row?.count ?? 0);
   }
 
   /* ── The reconciling sweep ────────────────────────────────────────────── */
