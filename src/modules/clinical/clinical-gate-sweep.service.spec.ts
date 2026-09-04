@@ -2,6 +2,7 @@ import type { ClinicalRecordRow } from '../../schema/clinical-records.schema';
 import type { InstantFacade } from '../instant/instant.facade';
 import type { ClinicalBookingPort, ClinicalConsultationView } from './clinical-booking.contract';
 import { ClinicalGateSweepService } from './clinical-gate-sweep.service';
+import { CLINICAL_GATE_SWEEP_MAX_BATCHES } from './clinical.constants';
 import type { ClinicalRepository } from './clinical.repository';
 
 const CONSULTATION_ID = '11111111-1111-4111-8111-111111111111';
@@ -208,13 +209,73 @@ describe('ClinicalGateSweepService', () => {
       expect(result).toMatchObject({ examined: 2, failed: 1, gatesCleared: 1 });
     });
 
-    it('bounds its candidate window and its batch size', async () => {
+    it('bounds its candidate window, and opens the first page with no cursor', async () => {
       const deps = createDeps();
       const now = new Date('2026-09-02T00:00:00Z');
 
       await deps.service.sweepFinalisedRecords(now, 60_000);
 
-      expect(deps.repo.listFinalisedSince).toHaveBeenCalledWith(new Date('2026-09-01T23:59:00Z'), 100);
+      expect(deps.repo.listFinalisedSince).toHaveBeenCalledWith(new Date('2026-09-01T23:59:00Z'), 100, null);
+    });
+
+    /* ═════════════════════════════════════════════════════════════════════ */
+    /* *** THE BATCH IS A PAGE, NOT A CEILING ON THE PASS. ***               */
+    /*                                                                       */
+    /* Nothing this sweep does removes a record from "finalised inside the   */
+    /* window", and the ordering is newest first — so a single bounded query */
+    /* re-read the same newest rows on every tick and never reached the      */
+    /* rest. See `clinical.repository.ts#listFinalisedSince`.                */
+    /* ═════════════════════════════════════════════════════════════════════ */
+
+    it('*** KEEPS PAGING PAST A FULL BATCH, KEYSET ON (finalised_at, id) ***', async () => {
+      const deps = createDeps();
+      const older = { ...finalisedRecord(OTHER_CONSULTATION_ID), id: 'record-2', finalisedAt: new Date('2026-09-01T10:00:00Z') };
+      deps.repo.listFinalisedSince
+        .mockResolvedValueOnce([finalisedRecord()])
+        .mockResolvedValueOnce([older])
+        .mockResolvedValue([]);
+      deps.bookings.getBooking.mockResolvedValue(consultation());
+      deps.instant.getPresence.mockResolvedValue(null);
+
+      const result = await deps.service.sweepFinalisedRecords(new Date('2026-09-02T00:00:00Z'), 60_000, 1);
+
+      expect(result.examined).toBe(2);
+      expect(deps.repo.listFinalisedSince).toHaveBeenNthCalledWith(1, expect.any(Date), 1, null);
+      expect(deps.repo.listFinalisedSince).toHaveBeenNthCalledWith(2, expect.any(Date), 1, {
+        finalisedAt: new Date('2026-09-01T11:00:00Z'),
+        id: 'record-1',
+      });
+      expect(deps.repo.listFinalisedSince).toHaveBeenNthCalledWith(3, expect.any(Date), 1, {
+        finalisedAt: new Date('2026-09-01T10:00:00Z'),
+        id: 'record-2',
+      });
+      expect(result.truncated).toBe(false);
+    });
+
+    it('stops paging on a SHORT page — a page that is not full is the end of the window', async () => {
+      const deps = createDeps();
+      deps.repo.listFinalisedSince.mockResolvedValue([finalisedRecord()]);
+      deps.bookings.getBooking.mockResolvedValue(consultation());
+      deps.instant.getPresence.mockResolvedValue(null);
+
+      await deps.service.sweepFinalisedRecords(new Date(), 60_000, 100);
+
+      expect(deps.repo.listFinalisedSince).toHaveBeenCalledTimes(1);
+    });
+
+    it('*** REPORTS `truncated` RATHER THAN SILENTLY ABSORBING A BACKLOG *** when it runs out of batches', async () => {
+      const deps = createDeps();
+      // Every page comes back full, so the pass can only ever be stopped by
+      // `CLINICAL_GATE_SWEEP_MAX_BATCHES`.
+      deps.repo.listFinalisedSince.mockResolvedValue([finalisedRecord()]);
+      deps.bookings.getBooking.mockResolvedValue(consultation());
+      deps.instant.getPresence.mockResolvedValue(null);
+
+      const result = await deps.service.sweepFinalisedRecords(new Date(), 60_000, 1);
+
+      expect(result.truncated).toBe(true);
+      expect(result.examined).toBe(CLINICAL_GATE_SWEEP_MAX_BATCHES);
+      expect(deps.repo.listFinalisedSince).toHaveBeenCalledTimes(CLINICAL_GATE_SWEEP_MAX_BATCHES);
     });
   });
 

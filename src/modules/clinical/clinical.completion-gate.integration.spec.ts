@@ -60,7 +60,7 @@
  * no proof.
  */
 import { randomUUID } from 'node:crypto';
-import { and, eq, inArray } from 'drizzle-orm';
+import { and, eq, inArray, isNotNull } from 'drizzle-orm';
 import {
   connectDatabase,
   disconnectDatabase,
@@ -89,7 +89,7 @@ import { PromotionConsultationLookupProvider } from '../promotion/consultation-l
 import { PROMOTION_DEFAULT_QUALIFYING_STATUSES } from '../promotion/promotion.constants';
 import type { ClinicalBookingPort } from './clinical-booking.contract';
 import { ClinicalGateSweepService } from './clinical-gate-sweep.service';
-import { CLINICAL_ERROR_CODES } from './clinical.constants';
+import { CLINICAL_ERROR_CODES, CLINICAL_GATE_SWEEP_MAX_BATCHES } from './clinical.constants';
 import type { ClinicalPdfService } from './clinical-pdf.service';
 import { ClinicalRepository } from './clinical.repository';
 import { ClinicalService } from './clinical.service';
@@ -125,6 +125,10 @@ interface Fixtures {
   draftRaceConsultationId: string;
   /** For two simultaneous finalises. */
   finaliseRaceConsultationId: string;
+  /** A third doctor, gated by `pagingStrandedConsultationId`, for the sweep-paging test only. */
+  pagingDoctorId: string;
+  pagingDecoyConsultationId: string;
+  pagingStrandedConsultationId: string;
 }
 
 async function seedFixtures(db: Database): Promise<Fixtures> {
@@ -178,6 +182,7 @@ async function seedFixtures(db: Database): Promise<Fixtures> {
 
   const doctorId = await makeDoctor('Gated Doctor');
   const otherDoctorId = await makeDoctor('Other Gated Doctor');
+  const pagingDoctorId = await makeDoctor('Paging Doctor');
 
   let referenceSeq = 100;
   async function makeConsultation(specialtyId: string, assignedDoctorId: string): Promise<string> {
@@ -204,6 +209,8 @@ async function seedFixtures(db: Database): Promise<Fixtures> {
   const flipConsultationId = await makeConsultation(flip.id, doctorId);
   const draftRaceConsultationId = await makeConsultation(prescribing.id, doctorId);
   const finaliseRaceConsultationId = await makeConsultation(prescribing.id, doctorId);
+  const pagingDecoyConsultationId = await makeConsultation(prescribing.id, pagingDoctorId);
+  const pagingStrandedConsultationId = await makeConsultation(prescribing.id, pagingDoctorId);
 
   // *** THE COMPLETION GATE, SET. *** This is the state FR-10.5 leaves a doctor
   // in when a consult ends and the notes are still owed.
@@ -215,6 +222,10 @@ async function seedFixtures(db: Database): Promise<Fixtures> {
     .update(doctorsTable)
     .set({ blockedByConsultationId: otherConsultationId })
     .where(eq(doctorsTable.id, otherDoctorId));
+  await db
+    .update(doctorsTable)
+    .set({ blockedByConsultationId: pagingStrandedConsultationId })
+    .where(eq(doctorsTable.id, pagingDoctorId));
 
   return {
     runId,
@@ -232,6 +243,9 @@ async function seedFixtures(db: Database): Promise<Fixtures> {
     flipConsultationId,
     draftRaceConsultationId,
     finaliseRaceConsultationId,
+    pagingDoctorId,
+    pagingDecoyConsultationId,
+    pagingStrandedConsultationId,
   };
 }
 
@@ -246,8 +260,10 @@ async function teardown(db: Database, fixtures: Fixtures): Promise<void> {
     fixtures.flipConsultationId,
     fixtures.draftRaceConsultationId,
     fixtures.finaliseRaceConsultationId,
+    fixtures.pagingDecoyConsultationId,
+    fixtures.pagingStrandedConsultationId,
   ];
-  const doctorIds = [fixtures.doctorId, fixtures.otherDoctorId];
+  const doctorIds = [fixtures.doctorId, fixtures.otherDoctorId, fixtures.pagingDoctorId];
 
   await db.delete(auditLogTable).where(inArray(auditLogTable.consultationId, consultationIds));
   await db
@@ -927,4 +943,90 @@ describe('M-15 finalisation, against a real database', () => {
       expect(rows).toHaveLength(1);
     });
   });
+  /* ═══════════════════════════════════════════════════════════════════════ */
+  /* 6. *** THE SWEEP'S BATCH WAS A BLIND SPOT, NOT A BACKLOG DRAIN. ***     */
+  /*                                                                         */
+  /* `listFinalisedSince` selects records finalised inside the window,       */
+  /* NEWEST FIRST, and nothing the sweep does removes a record from that     */
+  /* set. So a fixed `limit` did not "drain a backlog steadily" the way      */
+  /* `booking-slot-hold.service.ts`'s does — it re-read the same newest      */
+  /* rows every tick, forever, and a gate stranded on the next one was       */
+  /* reachable by NOTHING.                                                   */
+  /*                                                                         */
+  /* Driven with `batchSize: 1` and a three-second window rather than 100    */
+  /* and a day, because the shape of the failure is the same at any scale    */
+  /* and seeding 101 finalised consultations to prove it would be a slower   */
+  /* test that proved less.                                                  */
+  /* ═══════════════════════════════════════════════════════════════════════ */
+
+  describe('the sweep pages across its whole window', () => {
+    it('*** REPAIRS A GATE THAT IS NOT IN THE FIRST BATCH ***', async () => {
+      const anchor = new Date();
+
+      // Every other record this run finalised is pushed out of the way, so the
+      // narrow window below contains exactly the two rows under test and this
+      // spec does not depend on how long the tests above happened to take.
+      await db
+        .update(clinicalRecordsTable)
+        .set({ finalisedAt: new Date(anchor.getTime() - 10 * 60 * 1000) })
+        .where(
+          and(
+            isNotNull(clinicalRecordsTable.finalisedAt),
+            inArray(clinicalRecordsTable.consultationId, [
+              fixtures.consultationId,
+              fixtures.otherConsultationId,
+              fixtures.nonPrescribingConsultationId,
+              fixtures.raceConsultationId,
+              fixtures.forcedRaceConsultationId,
+              fixtures.flipConsultationId,
+              fixtures.draftRaceConsultationId,
+              fixtures.finaliseRaceConsultationId,
+            ]),
+          ),
+        );
+
+      // The rows are written directly: the sweep reads `clinical_records` and
+      // nothing else, and going through `finalise` would clear the very gate
+      // this test needs left behind.
+      for (const [consultationId, finalisedAt] of [
+        [fixtures.pagingDecoyConsultationId, anchor],
+        [fixtures.pagingStrandedConsultationId, new Date(anchor.getTime() - 1000)],
+      ] as const) {
+        await db.insert(clinicalRecordsTable).values({
+          consultationId,
+          chiefComplaint: 'Documented already.',
+          riskCategory: 'low',
+          caseSummary: 'Closed.',
+          finalisedAt,
+        });
+        await db
+          .update(consultationsTable)
+          .set({ status: 'completed' })
+          .where(eq(consultationsTable.id, consultationId));
+      }
+
+      // The crash state: the record is final, but the doctor is still gated by
+      // it — and it is the SECOND row in a newest-first ordering.
+      expect(await readDoctorGate(fixtures.pagingDoctorId)).toBe(fixtures.pagingStrandedConsultationId);
+
+      const result = await sweep.sweepFinalisedRecords(anchor, 3_000, 1);
+
+      // Before the fix the sweep stopped after one batch of one, examined only
+      // the decoy, and left the gate exactly where it was.
+      expect(result.examined).toBe(2);
+      expect(result.gatesCleared).toBe(1);
+      expect(await readDoctorGate(fixtures.pagingDoctorId)).toBeNull();
+    });
+
+    it('reports `truncated` instead of silently absorbing a backlog it could not finish', async () => {
+      // One batch of one, and `CLINICAL_GATE_SWEEP_MAX_BATCHES` pages, against
+      // a window that still holds both rows: the pass ends cleanly either way,
+      // and `truncated` is the honest signal for the case where it does not.
+      const result = await sweep.sweepFinalisedRecords(new Date(), 24 * 60 * 60 * 1000, 1);
+
+      expect(result.truncated).toBe(result.examined >= CLINICAL_GATE_SWEEP_MAX_BATCHES);
+      expect(result.failed).toBe(0);
+    });
+  });
+
 });
