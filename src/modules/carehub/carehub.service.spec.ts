@@ -292,6 +292,34 @@ describe('CarehubService', () => {
       expect(result).toHaveLength(1);
       expect(result[0]!.contentItem.id).toBe(CONTENT_ID);
     });
+
+    it('*** NEVER surfaces a recommendation whose content item is no longer published *** — archived after the doctor recommended it, same invariant listPublished/getPublishedById hold', async () => {
+      const { service, bookings, repo } = createService();
+      bookings.getBooking.mockResolvedValue(booking({ patientId: PATIENT_ID }));
+      repo.listRecommendationsForConsultation.mockResolvedValue([recommendation()]);
+      repo.findByIds.mockResolvedValue([contentItem({ reviewStatus: 'archived' })]);
+
+      const result = await service.listRecommendationsForPatient(CONSULTATION_ID, PATIENT_ID);
+
+      expect(result).toEqual([]);
+    });
+
+    it('drops an item reverted to draft for revision, while a sibling still-published item in the same list stays visible', async () => {
+      const { service, bookings, repo } = createService();
+      bookings.getBooking.mockResolvedValue(booking({ patientId: PATIENT_ID }));
+      repo.listRecommendationsForConsultation.mockResolvedValue([
+        recommendation({ id: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb1', contentItemId: CONTENT_ID }),
+        recommendation({ id: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb2', contentItemId: OTHER_CONTENT_ID }),
+      ]);
+      repo.findByIds.mockResolvedValue([
+        contentItem({ id: CONTENT_ID, reviewStatus: 'draft' }),
+        contentItem({ id: OTHER_CONTENT_ID, reviewStatus: 'published' }),
+      ]);
+
+      const result = await service.listRecommendationsForPatient(CONSULTATION_ID, PATIENT_ID);
+
+      expect(result.map((r) => r.contentItem.id)).toEqual([OTHER_CONTENT_ID]);
+    });
   });
 
   describe('getRecommendedForConsultation (the CareHubContract/CareHubPort read)', () => {
@@ -319,6 +347,14 @@ describe('CarehubService', () => {
       const [result] = await service.getRecommendedForConsultation(CONSULTATION_ID);
 
       expect(result).toEqual({ contentId: CONTENT_ID, title: 'Breathing exercise', kind: 'self_help_tool' });
+    });
+
+    it('*** NEVER hands a since-unpublished item to a trusted caller (e.g. M-16 followup) *** — the caller does not re-check status itself', async () => {
+      const { service, repo } = createService();
+      repo.listRecommendationsForConsultation.mockResolvedValue([recommendation()]);
+      repo.findByIds.mockResolvedValue([contentItem({ reviewStatus: 'archived' })]);
+
+      await expect(service.getRecommendedForConsultation(CONSULTATION_ID)).resolves.toEqual([]);
     });
   });
 
