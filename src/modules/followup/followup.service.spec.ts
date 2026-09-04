@@ -13,6 +13,7 @@ import type { ClinicalFacade } from '../clinical/clinical.facade';
 import type { CareHubPort } from './followup-care-hub.contract';
 import { FollowupAlertService } from './followup-alert.service';
 import { FollowupPathwayService } from './followup-pathway.service';
+import { FOLLOWUP_ERROR_CODES } from './followup.constants';
 import type { SafetyAlertView } from './followup.contract';
 import { FollowupService } from './followup.service';
 import { FollowupRepository } from './followup.repository';
@@ -236,6 +237,51 @@ describe('FollowupService', () => {
           actorPatientId: 'someone-else',
         }),
       ).rejects.toThrow(NotFoundException);
+    });
+
+    /**
+     * *** THE OWNERSHIP CHECK MUST RUN BEFORE ANY ASSIGNMENT/WINDOW CHECK. ***
+     * Otherwise a stranger probing a consultation id that is NOT theirs can
+     * use this route as an oracle: the assignment-existence and
+     * assignment-status checks ran (and produced a DIFFERENT error) before
+     * ownership was ever checked, leaking whether that foreign consultation
+     * has an active follow-up window at all — exactly the "same 404 a
+     * stranger gets" leak `clarification.service.spec.ts#getAssignedCase
+     * 404s with the SAME code` guards against in M-17. Both cases below MUST
+     * 404 with `CONSULTATION_NOT_FOUND`, identical to the already-covered
+     * "someone else's consultation, active assignment" case above — never a
+     * 403, and never `ASSIGNMENT_NOT_FOUND`.
+     */
+    it('refuses a check-in for someone else\'s consultation with the SAME 404 even when THEIR assignment is not active — a stranger must not be able to tell an inactive foreign window from a nonexistent one', async () => {
+      repo.findAssignmentByConsultationId.mockResolvedValue(assignmentRow({ status: 'completed' }));
+
+      const rejection = await service
+        .submitCheckin({
+          consultationId: CONSULTATION_ID,
+          checkinDate: '2026-01-02',
+          answers: { mood: '4', self_harm: 'no' },
+          actorPatientId: 'someone-else',
+        })
+        .catch((e) => e);
+
+      expect(rejection).toBeInstanceOf(NotFoundException);
+      expect(rejection.response.code).toBe(FOLLOWUP_ERROR_CODES.CONSULTATION_NOT_FOUND);
+    });
+
+    it('refuses a check-in for someone else\'s consultation with the SAME 404 even when no assignment has been made for it at all — not FOLLOWUP_ASSIGNMENT_NOT_FOUND, which would tell a stranger the consultation exists but is unassigned', async () => {
+      repo.findAssignmentByConsultationId.mockResolvedValue(null);
+
+      const rejection = await service
+        .submitCheckin({
+          consultationId: CONSULTATION_ID,
+          checkinDate: '2026-01-02',
+          answers: { mood: '4', self_harm: 'no' },
+          actorPatientId: 'someone-else',
+        })
+        .catch((e) => e);
+
+      expect(rejection).toBeInstanceOf(NotFoundException);
+      expect(rejection.response.code).toBe(FOLLOWUP_ERROR_CODES.CONSULTATION_NOT_FOUND);
     });
 
     it('refuses a date outside the pinned window', async () => {

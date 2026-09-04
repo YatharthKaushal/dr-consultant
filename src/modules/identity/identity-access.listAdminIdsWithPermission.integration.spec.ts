@@ -148,4 +148,24 @@ describe('IdentityAccessRepository#listAdminIdsWithPermission (real database)', 
 
     expect(ids.sort()).toEqual([superAdminId, unrelatedAdminId].sort());
   });
+
+  /**
+   * *** THE super_admin BRANCH MUST REQUIRE THE PERMISSION TO ACTUALLY
+   * EXIST. *** `listEffectivePermissions` (the forward direction: "what can
+   * THIS admin do") grants super_admin every permission unconditionally, but
+   * only by selecting every row that genuinely exists in `permissions` — a
+   * key with no such row contributes nothing. `listAdminIdsWithPermission`
+   * (the reverse direction) must be consistent with that: a permission key
+   * that does not exist in the catalog at all — a typo, a key removed by a
+   * migration, a stale constant left over after a rename — must resolve to
+   * `[]`, the same as any other unmatched key, NOT to every active
+   * super_admin. Before this test, the super_admin branch's `WHERE` clause
+   * never referenced `key` at all, so ANY string (real permission or not)
+   * matched every active super_admin — silently over-broad in exactly the
+   * direction a permission check must never be.
+   */
+  it('resolves to [] for a permission key that does not exist in the catalog at all — including for super_admin, not just role/grant holders', async () => {
+    const ids = await repo.listAdminIdsWithPermission(permKey('does-not-exist') as never);
+    expect(ids).toEqual([]);
+  });
 });
