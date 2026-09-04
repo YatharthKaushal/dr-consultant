@@ -22,6 +22,10 @@ export class IdentityFacade implements IdentityContract {
     return this.accessService.hasAllPermissions(adminId, [key as PermissionKey]);
   }
 
+  async listAdminIdsWithPermission(key: string): Promise<string[]> {
+    return this.accessService.listAdminIdsWithPermission(key as PermissionKey);
+  }
+
   async revokeAllSessions(accountType: AccountType, id: string, actor?: AuditActorOverride): Promise<void> {
     await this.identityService.logoutAll(accountType, id, actor);
   }

@@ -70,6 +70,49 @@ export class IdentityAccessRepository {
   }
 
   /**
+   * The reverse of `listEffectivePermissions`: every ACTIVE admin who holds
+   * `key`, by any of the same three routes — `super_admin` (which
+   * `listEffectivePermissions` grants every permission unconditionally),
+   * a role carrying it, or a direct grant. `admins.status = 'active'` is
+   * checked in every branch for the same reason `countSuperAdminHolders`
+   * checks it: a suspended admin's role link is never removed, so an
+   * unfiltered query would keep notifying someone who cannot act on it.
+   *
+   * Built for `followup`'s `ADMIN_DIRECTORY_PORT` (FR-13.4's alert fan-out),
+   * but shaped as a general "who can act on this permission" read — nothing
+   * about it is follow-up-specific.
+   */
+  async listAdminIdsWithPermission(key: PermissionKey, executor: Executor = this.db): Promise<string[]> {
+    const [superAdmins, fromRoles, fromGrants] = await Promise.all([
+      executor
+        .select({ adminId: adminRolesTable.adminId })
+        .from(adminRolesTable)
+        .innerJoin(rolesTable, eq(rolesTable.id, adminRolesTable.roleId))
+        .innerJoin(adminsTable, eq(adminsTable.id, adminRolesTable.adminId))
+        .where(and(eq(rolesTable.code, 'super_admin'), eq(adminsTable.status, 'active'))),
+      executor
+        .select({ adminId: adminRolesTable.adminId })
+        .from(rolePermissionsTable)
+        .innerJoin(permissionsTable, eq(permissionsTable.id, rolePermissionsTable.permissionId))
+        .innerJoin(adminRolesTable, eq(adminRolesTable.roleId, rolePermissionsTable.roleId))
+        .innerJoin(adminsTable, eq(adminsTable.id, adminRolesTable.adminId))
+        .where(and(eq(permissionsTable.key, key), eq(adminsTable.status, 'active'))),
+      executor
+        .select({ adminId: adminPermissionGrantsTable.adminId })
+        .from(adminPermissionGrantsTable)
+        .innerJoin(permissionsTable, eq(permissionsTable.id, adminPermissionGrantsTable.permissionId))
+        .innerJoin(adminsTable, eq(adminsTable.id, adminPermissionGrantsTable.adminId))
+        .where(and(eq(permissionsTable.key, key), eq(adminsTable.status, 'active'))),
+    ]);
+
+    const ids = new Set<string>();
+    for (const row of superAdmins) ids.add(row.adminId);
+    for (const row of fromRoles) ids.add(row.adminId);
+    for (const row of fromGrants) ids.add(row.adminId);
+    return Array.from(ids);
+  }
+
+  /**
    * Counts admins who can ACTUALLY exercise super_admin right now — role
    * link AND `status = 'active'`. Deliberately joined against `admins`
    * rather than counting bare `admin_roles` rows: a suspended or deleted

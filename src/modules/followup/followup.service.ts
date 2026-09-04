@@ -52,8 +52,11 @@ export class FollowupService {
   /* ---------------------------------------------------------------------- */
 
   /**
-   * *** THE M-15/COMPLETION -> M-16 SEAM. NO CALLER EXISTS IN THIS WORKTREE.
-   * READ IN FULL BEFORE WIRING THE CALL SITE. ***
+   * *** THE M-15/COMPLETION -> M-16 SEAM. WIRED POST-MERGE: see
+   * `followup-clinical.listener.ts`, `@OnEvent(CLINICAL_RECORD_FINALISED_EVENT)`.
+   * The rest of this comment is this worktree's original account of the gap,
+   * kept because the reasoning it gives still explains why this method takes
+   * a pre-resolved `pathwayCode` rather than doing that resolution itself. ***
    *
    * `docs/MODULES.md` M-16: "When a consultation completes... a pathway is
    * assigned." M-15's `ClinicalService#finalise` is the natural caller — it

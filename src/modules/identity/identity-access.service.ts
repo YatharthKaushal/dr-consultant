@@ -46,6 +46,11 @@ export class IdentityAccessService {
     return this.accessRepo.hasAllPermissions(adminId, keys);
   }
 
+  /** ADDITIVE (M-16): see `identity-access.repository.ts#listAdminIdsWithPermission`. */
+  async listAdminIdsWithPermission(key: PermissionKey): Promise<string[]> {
+    return this.accessRepo.listAdminIdsWithPermission(key);
+  }
+
   /* ---------------------------------------------------------------------- */
   /* Catalog reads                                                           */
   /* ---------------------------------------------------------------------- */

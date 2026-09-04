@@ -60,6 +60,7 @@
  * no proof.
  */
 import { randomUUID } from 'node:crypto';
+import type { EventEmitter2 } from '@nestjs/event-emitter';
 import { and, eq, inArray, isNotNull } from 'drizzle-orm';
 import {
   connectDatabase,
@@ -395,6 +396,7 @@ describe('M-15 finalisation, against a real database', () => {
       templates,
       pdf,
       audit,
+      { emit: () => {} } as unknown as EventEmitter2,
     );
     sweep = new ClinicalGateSweepService(clinicalRepo, bookings, instant);
     // The sweep's timer is never started here: `sweepFinalisedRecords` is

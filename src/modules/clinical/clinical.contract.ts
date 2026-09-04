@@ -134,3 +134,41 @@ export interface ClinicalContract {
   /** The Care Plan projection, or `null` when there is no record or it is not finalised yet. */
   getCarePlanInputs(consultationId: string): Promise<ClinicalCarePlanView | null>;
 }
+
+/**
+ * *** THE M-15 -> M-16 SEAM. *** Emitted once, from `ClinicalService#finalise`,
+ * as the fourth of finalising's cross-module consequences (after moving the
+ * consultation to `completed`, clearing the completion gate, and generating
+ * the PDF). `followup`'s listener (`followup-clinical.listener.ts`) resolves
+ * a `pathwayCode` from `concernId` and calls `FollowupFacade.assignPathway`.
+ *
+ * An event rather than a direct call for the same reason
+ * `booking-payment.listener.ts` gives for `PAYMENT_CAPTURED_EVENT`: `followup`
+ * already depends on `ClinicalFacade` (to read the prescription and warning
+ * signs for the Care Plan), so a direct `clinical -> followup` call would
+ * close a module cycle. `EventsModule` is `@Global()`, so no import is needed
+ * to listen.
+ *
+ * *** FIRE-AND-FORGET, WITH NO RECONCILING SWEEP BEHIND IT. *** Unlike
+ * `PAYMENT_CAPTURED_EVENT` (backed by `booking-slot-hold.service.ts`'s
+ * two-tier sweep) or the completion gate (idempotent and re-triggerable), a
+ * dropped or failing delivery of this event today means that consultation's
+ * pathway is simply never assigned — nothing retries it. Acceptable for this
+ * round because `assignPathway` itself remains directly callable (an admin or
+ * a future retry path can call `FollowupFacade.assignPathway` by hand), but
+ * this is a real gap, not a designed degradation, and should be closed before
+ * this is relied on in production.
+ */
+export const CLINICAL_RECORD_FINALISED_EVENT = 'clinical.record_finalised';
+
+/**
+ * Payload of {@link CLINICAL_RECORD_FINALISED_EVENT}. JSON-safe, like every
+ * value on this surface. Deliberately just the id: `ClinicalConsultationView`
+ * (what `finalise` actually has in hand) carries `specialtyId` but not
+ * `concernId` — widening that port's shape for one event felt like the wrong
+ * cost, since the listener already has a direct `BookingFacade` dependency
+ * and can read the full `BookingView` (specialty AND concern) itself.
+ */
+export interface ClinicalRecordFinalisedEvent {
+  consultationId: string;
+}
