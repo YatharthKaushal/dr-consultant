@@ -182,7 +182,17 @@ export class CarehubService {
     return this.listRecommendations(consultationId);
   }
 
-  /** *** THE `CareHubContract`/`CareHubPort` READ. *** No ownership check — a trusted module-to-module call, the caller authorizes (see `carehub.contract.ts`). */
+  /**
+   * *** THE `CareHubContract`/`CareHubPort` READ. *** No ownership check — a
+   * trusted module-to-module call, the caller authorizes (see
+   * `carehub.contract.ts`). Still filtered to CURRENTLY `published` items —
+   * see `listRecommendations`'s own comment for why: a recommendation
+   * written while an item was published must stop surfacing the moment that
+   * item is retired, reverted to draft, or edited back for revision, the
+   * same "published only" invariant `listPublished`/`getPublishedById` hold
+   * for the browse surface. This trusted caller does not re-check status
+   * itself, so this module must never hand it a non-published item.
+   */
   async getRecommendedForConsultation(consultationId: string): Promise<RecommendedContentItem[]> {
     const rows = await this.repo.listRecommendationsForConsultation(consultationId);
     if (rows.length === 0) return [];
@@ -190,7 +200,7 @@ export class CarehubService {
     const byId = new Map(items.map((item) => [item.id, item]));
     return rows
       .map((row) => byId.get(row.contentItemId))
-      .filter((item): item is ContentItemRow => item !== undefined)
+      .filter((item): item is ContentItemRow => item !== undefined && item.reviewStatus === 'published')
       .map(toRecommendedContentItem);
   }
 
@@ -203,13 +213,28 @@ export class CarehubService {
     return this.repo.countRecommendationsForConsultations(consultationIds);
   }
 
+  /**
+   * *** PUBLISHED-ONLY, THE SAME INVARIANT `listPublished`/`getPublishedById`
+   * HOLD. *** `addRecommendations` only lets a doctor recommend an item that
+   * is `published` AT THE TIME OF WRITE, but `content_recommendations` rows
+   * outlive the content item's own review state — an admin can retire,
+   * revert-to-draft, or otherwise unpublish that same item afterward. Without
+   * this filter, both the patient's own "what my doctor recommended" read
+   * (`listRecommendationsForPatient`) and the doctor's own list
+   * (`listRecommendationsForDoctor`) would keep surfacing full item content
+   * (title/summary/body) for something no longer meant to be patient-facing
+   * — exactly the kind of "browse endpoint reachable through another path"
+   * gap this module's design otherwise closes for `listPublished`/
+   * `getPublishedById`. Filtered here, once, so no caller of this shared
+   * private method needs to remember to re-check status itself.
+   */
   private async listRecommendations(consultationId: string): Promise<RecommendationView[]> {
     const rows = await this.repo.listRecommendationsForConsultation(consultationId);
     if (rows.length === 0) return [];
     const items = await this.repo.findByIds(rows.map((row) => row.contentItemId));
     const byId = new Map(items.map((item) => [item.id, item]));
     return rows
-      .filter((row) => byId.has(row.contentItemId))
+      .filter((row) => byId.get(row.contentItemId)?.reviewStatus === 'published')
       .map((row) => toRecommendationView(row, byId.get(row.contentItemId)!));
   }
 
