@@ -196,6 +196,46 @@ export interface PaymentContract {
   getCheckoutHandles(consultationId: string): Promise<CreatedOrder | null>;
   /** Ask the gateway what actually happened — for the reconciled hold sweep. Never trusts local state. */
   reconcileWithGateway(paymentId: string): Promise<{ status: string; changed: boolean }>;
-  /** Booking calls this on an in-policy cancellation. `initiatedByAdminId: null` = automatic. */
-  createRefund(input: { paymentId: string; amount: string; reason: string; initiatedByAdminId: string | null; isAutomatic: boolean }): Promise<{ refundId: string; status: string }>;
+  /**
+   * Booking calls this on an in-policy cancellation. `initiatedByAdminId: null`
+   * = automatic.
+   *
+   * *** `refundPct` IS PART OF THIS CONTRACT, NOT AN EXTRA BOOKING SMUGGLES IN. ***
+   *
+   * It was missing here while `booking-payment.contract.ts` — the blind mirror
+   * this file exists to be checked against — declared it, and while
+   * `RefundService.createRefund` read it. Booking's calls kept working only
+   * because `PaymentFacade` forwards its argument object BY REFERENCE, so a
+   * property this type does not mention survived the trip anyway. The field that
+   * redefines the refund base was travelling through a hole in the very contract
+   * whose stated job is to make a signature drift "surface as a `tsc` error
+   * rather than as a runtime surprise" — and any refactor of the facade into an
+   * explicit destructure would have silently reverted the base change to the
+   * consultation fee, on live cancellations, with nothing red.
+   *
+   * A caller typed against THIS interface also could not ask for the new base at
+   * all: an object literal carrying `refundPct` was an excess-property error.
+   */
+  createRefund(input: {
+    paymentId: string;
+    amount: string;
+    reason: string;
+    initiatedByAdminId: string | null;
+    isAutomatic: boolean;
+    /**
+     * *** OPTIONAL, AND IT REDEFINES THE REFUND BASE. ***
+     *
+     * When present AND the payment was priced by the pricing engine, `amount` is
+     * ignored and the refund is computed as this percentage of the CAPTURED
+     * TOTAL rather than of the consultation fee — a 100% tier returns the whole
+     * 618.00 instead of the 500.00 fee.
+     *
+     * *** THIS IS A COMMERCIAL CHANGE, NOT A BUG FIX, AND IT NEEDS THE CLIENT'S
+     * SIGN-OFF. *** See `refund.service.ts` and `pricing-refund.service.ts`.
+     *
+     * `amount` is still authoritative for a LEGACY payment (no quote), which has
+     * no per-component breakdown to apportion against.
+     */
+    refundPct?: number;
+  }): Promise<{ refundId: string; status: string }>;
 }

@@ -410,6 +410,28 @@ export class PaymentService {
       const failed = gatewayPayments.some((candidate) => candidate.status === 'failed');
       if (failed && gatewayPayments.every((candidate) => candidate.status === 'failed')) {
         const changed = (await this.payments.markFailedIfNotPaid(payment.id, 'Payment attempt failed at the gateway.')) > 0;
+        if (changed) {
+          // *** THE PAYMENT DEFINITIVELY FAILED, SO RELEASE THE PRICE. ***
+          //
+          // The same act as `payment-webhook.service.ts#handlePaymentFailed`,
+          // and it must do the same thing. That one releases the quote; this one
+          // used to mark the payment `failed` and stop — leaving a PINNED quote
+          // holding a discount reservation with nothing left that would ever free
+          // it. The stale-draft sweep deliberately skips pinned quotes (one may
+          // have a live payment behind it), so the only two releases on the
+          // unhappy path are the webhook's and this one.
+          //
+          // And this is precisely the path that exists BECAUSE THE WEBHOOK NEVER
+          // ARRIVED — M-11's expiry sweep calls it for exactly that case — so the
+          // branch that was missing the release is the one where nothing else can
+          // supply it.
+          //
+          // Safe by the same guard the webhook relies on: `markFailedIfNotPaid`
+          // is conditioned on `paid_at IS NULL` and only ran a row here, so no
+          // capture happened; and `abandonIfOpen` matches only `draft`/`pinned`,
+          // so it can never reverse a consumed quote.
+          await this.releaseQuote(payment.priceQuoteId, payment.consultationId, 'payment_failed');
+        }
         return { status: changed ? 'failed' : payment.status, changed };
       }
       // Still genuinely unpaid, or still in flight. Not an error.
