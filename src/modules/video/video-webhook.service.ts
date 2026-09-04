@@ -72,8 +72,25 @@ export interface VideoWebhookResult {
  * LiveKit retries a non-2xx. Once a delivery has verified, every outcome below
  * — an event we do not handle, a room that is not ours, an identity that does
  * not belong to the consultation, or a handler that threw — answers 2xx and is
- * logged. The only non-2xx this endpoint ever returns is 401 for a bad
- * signature.
+ * logged. The only non-2xx this endpoint returns is 401.
+ *
+ * *** ONE HONEST DIFFERENCE FROM THE PAYMENT WEBHOOK, CONFIRMED BY PROBING A
+ * BOOTED SERVER RATHER THAN ASSUMED. *** `payment-webhook.service.ts`
+ * deliberately answers 2xx to a correctly-signed body that is not valid JSON,
+ * recording it for a human; this route answers 401 to the same thing. That is
+ * not a choice made here — the SDK's `WebhookReceiver#receive` verifies the
+ * signature and then `JSON.parse`s in one call, so the two failures are
+ * indistinguishable from outside it, and the only way to tell them apart would
+ * be to re-implement LiveKit's verification by hand (which
+ * `livekit.client.ts` explains at length is the wrong trade).
+ *
+ * It is acceptable because the case cannot arise from a real sender: LiveKit
+ * serialises its webhook bodies with protojson, so a non-JSON body carrying a
+ * valid signature would mean the LiveKit server produced one — and a loud 401
+ * in that situation is more useful than a quiet 2xx that records nothing. The
+ * Fastify parser exemption is still doing its job either way: without it,
+ * Fastify would answer its own `400 BAD_REQUEST` before this controller ran,
+ * and `request.rawBody` would never be populated at all.
  *
  * *** THE HONEST LIMIT OF THAT CHOICE, WRITTEN DOWN. *** Unlike the payment
  * webhook, a failed delivery here is NOT durably recorded for a retry sweep to
