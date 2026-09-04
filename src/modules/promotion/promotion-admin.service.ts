@@ -6,7 +6,7 @@ import type { DiscountInstrumentStatus, DiscountValueKind } from '../../schema/e
 import { AuditService } from '../../shared/audit/audit.service';
 import { isUniqueConstraintViolation } from '../../shared/errors/postgres-error.util';
 import { toStorableCode } from './promotion-code.util';
-import { toCsvDocument } from './promotion-csv.util';
+import { toCsvDocument } from '../../shared/csv/csv.util';
 import { PromotionRepository, type InstrumentListFilter } from './promotion.repository';
 import { toInstrumentSummary } from './promotion.mapper';
 import type { DiscountInstrumentSummary } from './promotion.contract';

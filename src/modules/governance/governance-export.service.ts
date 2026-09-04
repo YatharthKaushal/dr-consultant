@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { AuditService } from '../../shared/audit/audit.service';
-import { toCsvDocument } from './governance-csv.util';
+import { toCsvDocument } from '../../shared/csv/csv.util';
 import { GOVERNANCE_AUDIT_ENTITY_TYPES, GOVERNANCE_EXPORT_MAX_ROWS } from './governance.constants';
 import { GovernanceQueueService } from './governance-queue.service';
 

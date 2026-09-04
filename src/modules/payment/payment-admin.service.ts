@@ -12,7 +12,7 @@ import {
   PAYMENT_EXPORT_MAX_ROWS,
   PAYMENT_LIST_DEFAULT_LIMIT,
 } from './payment.constants';
-import { toCsvDocument } from './payment-csv.util';
+import { toCsvDocument } from '../../shared/csv/csv.util';
 import {
   toPaymentAdminView,
   toPaymentEventView,

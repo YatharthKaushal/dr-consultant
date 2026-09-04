@@ -1,6 +1,12 @@
-import { toCsvDocument, toCsvField, toCsvRow } from './payment-csv.util';
+import { toCsvDocument, toCsvField, toCsvRow } from './csv.util';
 
-describe('payment CSV rendering', () => {
+/**
+ * The consolidated spec for `csv.util.ts` — see that file's own header for
+ * why it exists. Combines `payment-csv.util.spec.ts`'s coverage (the fuller
+ * of the three near-identical specs this replaces) with a couple of cases
+ * from `governance-csv.util.spec.ts` worth keeping distinct.
+ */
+describe('CSV rendering', () => {
   describe('toCsvField', () => {
     it('passes a plain value through', () => {
       expect(toCsvField('paid')).toBe('paid');
@@ -36,11 +42,12 @@ describe('payment CSV rendering', () => {
     /**
      * *** CSV / FORMULA INJECTION. ***
      *
-     * A financial export gets opened in Excel or Sheets, and a cell beginning
-     * `=`, `+`, `-`, `@`, tab or CR is interpreted as a FORMULA. A refund
-     * reason is free text typed by an admin — or, on other rows, text that
-     * originated at the gateway — so it is an injection vector straight into
-     * the finance team's spreadsheet.
+     * An export gets opened in Excel or Sheets, and a cell beginning `=`,
+     * `+`, `-`, `@`, tab or CR is interpreted as a FORMULA. A refund reason,
+     * a coupon label, or an audit-log actor's free-text metadata is free
+     * text typed by an admin or a patient — or, on other rows, text that
+     * originated at a gateway — so it is an injection vector straight into
+     * a spreadsheet.
      */
     describe('formula injection defusing', () => {
       it.each([
@@ -67,6 +74,12 @@ describe('payment CSV rendering', () => {
         expect(toCsvField('708.00')).toBe('708.00');
       });
 
+      it('leaves harmless clinical/safety text alone', () => {
+        expect(toCsvField('Patient reported thoughts of self-harm.')).toBe(
+          'Patient reported thoughts of self-harm.',
+        );
+      });
+
       /** A negative money value would otherwise be silently quoted — worth knowing it is, and that it is still readable. */
       it('prefixes a negative number, which is the documented trade-off', () => {
         expect(toCsvField('-100.00')).toBe("'-100.00");
@@ -90,7 +103,13 @@ describe('payment CSV rendering', () => {
 
   describe('toCsvDocument', () => {
     it('renders a header and rows, CRLF-terminated', () => {
-      const doc = toCsvDocument(['id', 'amount'], [['p1', '708.00'], ['p2', '354.00']]);
+      const doc = toCsvDocument(
+        ['id', 'amount'],
+        [
+          ['p1', '708.00'],
+          ['p2', '354.00'],
+        ],
+      );
       // Strip the BOM for the comparison.
       expect(doc.slice(1)).toBe('id,amount\r\np1,708.00\r\np2,354.00\r\n');
     });
@@ -106,11 +125,28 @@ describe('payment CSV rendering', () => {
 
     it('round-trips a realistic transactions row', () => {
       const doc = toCsvDocument(
-        ['payment_id', 'status', 'consultation_fee', 'convenience_fee', 'gst_amount', 'total_payable', 'doctor_earning', 'platform_deduction'],
+        [
+          'payment_id',
+          'status',
+          'consultation_fee',
+          'convenience_fee',
+          'gst_amount',
+          'total_payable',
+          'doctor_earning',
+          'platform_deduction',
+        ],
         [['e1f7a8d0', 'paid', '500.00', '100.00', '108.00', '708.00', '500.00', '0.00']],
       );
       // FR-7.3 and FR-7.4 both readable straight off the export.
       expect(doc).toContain('500.00,100.00,108.00,708.00,500.00,0.00');
+    });
+
+    it('round-trips a realistic audit-log row', () => {
+      const doc = toCsvDocument(
+        ['id', 'actor_type', 'actor_id', 'action', 'entity_type', 'entity_id', 'created_at'],
+        [['42', 'doctor', 'd1', 'read', 'clinical_record', 'r9', '2026-09-04T00:00:00.000Z']],
+      );
+      expect(doc).toContain('42,doctor,d1,read,clinical_record,r9,2026-09-04T00:00:00.000Z');
     });
   });
 });
