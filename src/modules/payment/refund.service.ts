@@ -11,6 +11,7 @@ import type { Database } from '../../config/db/database.config';
 import type { PaymentRow } from '../../schema/payments.schema';
 import type { RefundRow } from '../../schema/refunds.schema';
 import { AuditService } from '../../shared/audit/audit.service';
+import { PaymentEventRepository } from './payment-event.repository';
 import { PaymentRepository } from './payment.repository';
 import { PAYMENT_AUDIT_ENTITY_TYPES, PAYMENT_ERROR_CODES } from './payment.constants';
 import {
@@ -138,6 +139,12 @@ export class RefundService {
     private readonly pricing: PricingFacade,
     /** `refund_components` — owned by pricing, written here because this module owns the `refunds` row it hangs off. */
     private readonly refundComponents: RefundComponentRepository,
+    /**
+     * ADDITIVE (M-21/data rights execution): only
+     * `countDataRightsRowsForConsultations` below reads this — nothing in the
+     * refund flow itself touches `payment_events`.
+     */
+    private readonly events: PaymentEventRepository,
   ) {}
 
   /**
@@ -571,6 +578,34 @@ export class RefundService {
       const message = recordingError instanceof Error ? recordingError.message : String(recordingError);
       this.logger.error(`Refund ${refund.id} failed at the gateway AND the failure could not be recorded: ${message}`);
     }
+  }
+
+  /**
+   * ADDITIVE (M-21/data rights execution): `PaymentContract
+   * #countDataRightsRowsForConsultations` — a READ-ONLY row count of
+   * `payments`, `refunds` and `payment_events` for a patient's approved
+   * data-deletion request, without touching a single row. All three tables
+   * are RETAIN in the M-21 compliance survey (financial/statutory
+   * record-keeping under GST law and reconciliation obligations), so nothing
+   * here is ever anonymized or deleted.
+   *
+   * Lives on `RefundService` rather than `PaymentService` purely because this
+   * class already holds both `PaymentRepository` and `RefundRepository` (see
+   * the class constructor). `PaymentEventRepository` is injected for this
+   * method alone.
+   */
+  async countDataRightsRowsForConsultations(consultationIds: readonly string[]): Promise<{
+    payments: number;
+    refunds: number;
+    paymentEvents: number;
+  }> {
+    if (consultationIds.length === 0) return { payments: 0, refunds: 0, paymentEvents: 0 };
+    const [payments, refunds, paymentEvents] = await Promise.all([
+      this.payments.countByConsultationIds(consultationIds),
+      this.refunds.countByConsultationIds(consultationIds),
+      this.events.countByConsultationIds(consultationIds),
+    ]);
+    return { payments, refunds, paymentEvents };
   }
 }
 

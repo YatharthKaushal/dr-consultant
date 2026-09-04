@@ -91,4 +91,26 @@ export class DataDeletionRepository {
       .returning();
     return row ?? null;
   }
+
+  /**
+   * ADDITIVE (M-21/data rights execution). *** THE ONLY WRITE TO
+   * `executed_at`/`execution_outcome` IN THIS REPOSITORY. *** Deliberately a
+   * sibling of `updateReview`, not a widening of it — `updateReview`'s own
+   * header says those two columns "are not parameters here on purpose".
+   * Unconditional on the row's current status; `data-deletion.service.ts
+   * #recordExecutionOutcome` is what enforces "only from `approved`" before
+   * calling this.
+   */
+  async recordExecutionOutcome(
+    id: string,
+    data: { status: DeletionStatus; executionOutcome: unknown; executedAt: Date },
+    executor: Executor = this.db,
+  ): Promise<DataDeletionRequestRow | null> {
+    const [row] = await executor
+      .update(dataDeletionRequestsTable)
+      .set(data)
+      .where(eq(dataDeletionRequestsTable.id, id))
+      .returning();
+    return row ?? null;
+  }
 }

@@ -168,6 +168,10 @@ function build(overrides: {
     countRecentAttemptsByPatient: jest.fn().mockResolvedValue(0),
     countRecentAttemptsByIp: jest.fn().mockResolvedValue(0),
     listRedeemableForPatient: jest.fn().mockResolvedValue([]),
+    countDataRightsRows: jest
+      .fn()
+      .mockResolvedValue({ discountInstruments: 0, discountRedemptions: 0, promotionCodeAttempts: 0 }),
+    anonymizeCodeAttemptsForPatient: jest.fn().mockResolvedValue({ anonymizedCount: 0 }),
     ...overrides.repo,
   };
 
@@ -176,12 +180,14 @@ function build(overrides: {
     findEventByRedemption: jest.fn().mockResolvedValue(null),
     markVoidIfQualifying: jest.fn().mockResolvedValue(null),
     insertEvent: jest.fn().mockResolvedValue({ id: 'event-1' }),
+    countDataRightsRows: jest.fn().mockResolvedValue({ referralEvents: 0 }),
     ...overrides.referrals,
   };
 
   const affiliateRepo = {
     findPartnerById: jest.fn().mockResolvedValue(null),
     findActiveAttribution: jest.fn().mockResolvedValue(null),
+    countDataRightsRows: jest.fn().mockResolvedValue({ affiliateAttributions: 0, affiliateCommissions: 0 }),
     ...overrides.affiliateRepo,
   };
 
@@ -1020,6 +1026,69 @@ describe('PromotionService', () => {
         repo: { findLiveRedemptionForConsultation: jest.fn().mockResolvedValue(null) },
       });
       expect(await service.getForConsultation(CONSULTATION)).toBeNull();
+    });
+  });
+
+  describe('countDataRightsRowsForPatient — M-21', () => {
+    it('aggregates all six counts from the three owning repositories', async () => {
+      const { service, repo, referrals, affiliateRepo } = build({
+        repo: {
+          countDataRightsRows: jest
+            .fn()
+            .mockResolvedValue({ discountInstruments: 2, discountRedemptions: 3, promotionCodeAttempts: 4 }),
+        },
+        referrals: { countDataRightsRows: jest.fn().mockResolvedValue({ referralEvents: 5 }) },
+        affiliateRepo: {
+          countDataRightsRows: jest
+            .fn()
+            .mockResolvedValue({ affiliateAttributions: 6, affiliateCommissions: 7 }),
+        },
+      });
+
+      const input = { patientId: PATIENT, consultationIds: [CONSULTATION] };
+      expect(await service.countDataRightsRowsForPatient(input)).toEqual({
+        discountInstruments: 2,
+        discountRedemptions: 3,
+        promotionCodeAttempts: 4,
+        referralEvents: 5,
+        affiliateAttributions: 6,
+        affiliateCommissions: 7,
+      });
+
+      expect(repo.countDataRightsRows).toHaveBeenCalledWith(PATIENT);
+      expect(referrals.countDataRightsRows).toHaveBeenCalledWith(PATIENT);
+      expect(affiliateRepo.countDataRightsRows).toHaveBeenCalledWith(input);
+    });
+
+    it('is all zeros for a patient with no rows anywhere', async () => {
+      const { service } = build();
+      expect(await service.countDataRightsRowsForPatient({ patientId: PATIENT, consultationIds: [] })).toEqual({
+        discountInstruments: 0,
+        discountRedemptions: 0,
+        promotionCodeAttempts: 0,
+        referralEvents: 0,
+        affiliateAttributions: 0,
+        affiliateCommissions: 0,
+      });
+    });
+  });
+
+  describe('anonymizePromotionCodeAttemptsForPatient — M-21, THE ONLY WRITE', () => {
+    it('returns the exact count the repository reports', async () => {
+      const { service, repo } = build({
+        repo: { anonymizeCodeAttemptsForPatient: jest.fn().mockResolvedValue({ anonymizedCount: 3 }) },
+      });
+      expect(await service.anonymizePromotionCodeAttemptsForPatient(PATIENT)).toEqual({ anonymizedCount: 3 });
+      expect(repo.anonymizeCodeAttemptsForPatient).toHaveBeenCalledWith(PATIENT);
+    });
+
+    it('is a no-op — returns zero, never throws — when there is nothing to anonymize', async () => {
+      const { service } = build({
+        repo: { anonymizeCodeAttemptsForPatient: jest.fn().mockResolvedValue({ anonymizedCount: 0 }) },
+      });
+      await expect(service.anonymizePromotionCodeAttemptsForPatient(OTHER_PATIENT)).resolves.toEqual({
+        anonymizedCount: 0,
+      });
     });
   });
 });

@@ -194,6 +194,15 @@ export class CarehubService {
       .map(toRecommendedContentItem);
   }
 
+  /**
+   * ADDITIVE (M-21/data rights execution): see
+   * `CareHubContract#countRecommendationsForConsultations`. No ownership
+   * check — a trusted module-to-module read, the caller authorizes.
+   */
+  async countRecommendationsForConsultations(consultationIds: readonly string[]): Promise<number> {
+    return this.repo.countRecommendationsForConsultations(consultationIds);
+  }
+
   private async listRecommendations(consultationId: string): Promise<RecommendationView[]> {
     const rows = await this.repo.listRecommendationsForConsultation(consultationId);
     if (rows.length === 0) return [];

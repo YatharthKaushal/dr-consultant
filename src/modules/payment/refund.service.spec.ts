@@ -1,5 +1,6 @@
 import type { Database } from '../../config/db/database.config';
 import type { AuditService } from '../../shared/audit/audit.service';
+import type { PaymentEventRepository } from './payment-event.repository';
 import type { PaymentRepository } from './payment.repository';
 import { toHttpException } from './razorpay-error.classifier';
 import type { RazorpayClient } from './razorpay.client';
@@ -40,6 +41,7 @@ describe('RefundService', () => {
   let audit: jest.Mocked<AuditService>;
   let pricing: jest.Mocked<PricingFacade>;
   let refundComponents: jest.Mocked<RefundComponentRepository>;
+  let events: jest.Mocked<PaymentEventRepository>;
   let service: RefundService;
   /** Amounts the fake repository will report as already committed. */
   let committedAmounts: string[];
@@ -120,6 +122,10 @@ describe('RefundService', () => {
       sumByCodeForRefunds: jest.fn().mockResolvedValue(new Map()),
     } as unknown as jest.Mocked<RefundComponentRepository>;
 
+    events = {
+      countByConsultationIds: jest.fn().mockResolvedValue(0),
+    } as unknown as jest.Mocked<PaymentEventRepository>;
+
     service = new RefundService(
       db as unknown as Database,
       payments,
@@ -128,6 +134,7 @@ describe('RefundService', () => {
       audit,
       pricing,
       refundComponents,
+      events,
     );
   });
 

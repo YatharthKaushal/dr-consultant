@@ -51,4 +51,27 @@ export interface IdentityContract {
    */
   revokeAllSessions(accountType: AccountType, id: string, actor?: AuditActorOverride): Promise<void>;
   getContactIdentity(accountType: AccountType, id: string): Promise<ContactIdentity | null>;
+
+  /**
+   * ADDITIVE (M-21/data rights execution). `mobileNumber` is the sign-in
+   * identifier and, per `patient.repository.ts`'s own doc comment, stays
+   * exclusively identity's to write — `patients`/`doctors`/`admins` never
+   * touch it directly, even for their own row. A data-deletion execution
+   * that anonymizes a patient's profile therefore cannot null this column
+   * itself; it must come through here.
+   *
+   * Replaces the NOT NULL UNIQUE `mobile_number` with a deterministic,
+   * collision-safe placeholder derived from the account's own id — never a
+   * real E.164 number (no leading `+`), so it can never collide with one,
+   * and deterministic so a retried execution (after a partial failure) is a
+   * no-op rather than churning a fresh placeholder each time. See
+   * `identity.repository.ts#anonymizedMobilePlaceholder`.
+   *
+   * Does NOT revoke sessions or change status — callers that need those
+   * still call `revokeAllSessions` / their own status write separately, the
+   * same split `patient.service.ts#updateStatus` already makes. Returns
+   * `changed: false` (no write) when the account does not exist or its
+   * mobile number is already the deterministic placeholder for its id.
+   */
+  anonymizeMobileNumber(accountType: AccountType, id: string): Promise<{ changed: boolean }>;
 }

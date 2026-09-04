@@ -46,4 +46,9 @@ export class ClinicalFacade implements ClinicalContract {
   async countPendingCaseSummaries(): Promise<number> {
     return this.clinical.countPendingCaseSummaries();
   }
+
+  /** ADDITIVE (M-21/data rights execution) — see `ClinicalContract#countRecordsForConsultations`. */
+  async countRecordsForConsultations(consultationIds: readonly string[]): Promise<number> {
+    return this.clinical.countRecordsForConsultations(consultationIds);
+  }
 }

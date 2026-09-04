@@ -92,6 +92,23 @@ export class SearchRepository {
     return filtered.orderBy(desc(searchQueriesTable.createdAt), desc(searchQueriesTable.id)).limit(filter.limit).offset(filter.offset);
   }
 
+  /**
+   * ADDITIVE (M-21/data rights execution). `SearchContract.deleteSearch
+   * QueriesForPatient`'s implementation — see that contract doc comment for
+   * why this table (and only this table) is hard-deleted. `.returning()`
+   * makes the deleted count exact from the delete itself rather than a
+   * separate count-then-delete race, the same idiom as
+   * `doctor-specialty.repository.ts#remove` / `carehub.repository.ts#remove
+   * Recommendation`. Idempotent: an empty match returns `0`, never throws.
+   */
+  async deleteAllForPatient(patientId: string, executor: Executor = this.db): Promise<{ deletedCount: number }> {
+    const deleted = await executor
+      .delete(searchQueriesTable)
+      .where(eq(searchQueriesTable.patientId, patientId))
+      .returning({ id: searchQueriesTable.id });
+    return { deletedCount: deleted.length };
+  }
+
   /* ---------------------------------------------------------------------- */
   /* search_rate_limits                                                      */
   /* ---------------------------------------------------------------------- */
@@ -120,5 +137,23 @@ export class SearchRepository {
       .from(searchRateLimitsTable)
       .where(and(scope, gte(searchRateLimitsTable.createdAt, since)));
     return Number(result?.total ?? 0);
+  }
+
+  /**
+   * ADDITIVE (M-21/data rights execution). `SearchContract.countDataRights
+   * RowsForPatient`'s implementation — READ ONLY, no write. Counts both
+   * tables for this one patient: `search_queries` (every source, unlike
+   * `listRecentByPatient`, which excludes crisis-fired rows — a deletion
+   * preview must account for ALL rows, not just the ones a patient's own UI
+   * would show them) and `search_rate_limits` (bare `patient_id` pointer,
+   * counted here for visibility only — it is never written or deleted by
+   * this module's M-21 surface, see `deleteAllForPatient`'s doc comment).
+   */
+  async countDataRightsRows(patientId: string, executor: Executor = this.db): Promise<{ searchQueries: number; searchRateLimits: number }> {
+    const [[queries], [rateLimits]] = await Promise.all([
+      executor.select({ total: sql<string>`count(*)` }).from(searchQueriesTable).where(eq(searchQueriesTable.patientId, patientId)),
+      executor.select({ total: sql<string>`count(*)` }).from(searchRateLimitsTable).where(eq(searchRateLimitsTable.patientId, patientId)),
+    ]);
+    return { searchQueries: Number(queries?.total ?? 0), searchRateLimits: Number(rateLimits?.total ?? 0) };
   }
 }

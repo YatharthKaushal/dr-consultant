@@ -51,6 +51,23 @@ export interface NotificationResult {
 export interface NotificationContract {
   /** Best-effort. MUST NOT throw into the caller's flow — a failed notification never fails a consult. */
   notify(request: NotificationRequest): Promise<NotificationResult>;
+
+  /**
+   * ADDITIVE (M-21/data rights execution): `DataRightsFacade#previewExecution`
+   * needs a READ-ONLY row count of `notifications` for a patient's approved
+   * data-deletion request, without touching a single row — this table is
+   * RETAIN in the M-21 compliance survey (SRS §5.3), so nothing this method
+   * reads is ever anonymized or deleted.
+   *
+   * *** DOES NOT TOUCH `notify` OR THE THREE FROZEN INTERFACES ABOVE. ***
+   * `NotificationRequest`/`NotificationResult`/`notify` are what M-13's
+   * parallel-worktree mirror is built against, and this method is purely
+   * additive to `NotificationContract` alongside them — `NotificationFacade`
+   * still satisfies M-13's independently-declared, narrower mirror
+   * structurally either way, so this needs no coordinated change on that
+   * side.
+   */
+  countNotificationsForPatient(patientId: string): Promise<number>;
 }
 
 /* -------------------------------------------------------------------------- */

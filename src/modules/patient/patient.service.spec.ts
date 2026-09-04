@@ -28,6 +28,7 @@ function createDeps() {
     findAll: jest.fn(),
     updateProfile: jest.fn(),
     updateStatus: jest.fn(),
+    anonymizeIdentity: jest.fn(),
   } as unknown as jest.Mocked<PatientRepository>;
 
   const identity = {
@@ -35,6 +36,7 @@ function createDeps() {
     getEffectivePermissions: jest.fn(),
     hasPermission: jest.fn(),
     getContactIdentity: jest.fn(),
+    anonymizeMobileNumber: jest.fn().mockResolvedValue({ changed: true }),
   } as unknown as jest.Mocked<IdentityFacade>;
 
   const audit = { write: jest.fn().mockResolvedValue(undefined) } as unknown as jest.Mocked<AuditService>;
@@ -256,6 +258,53 @@ describe('PatientService', () => {
           metadata: { from: 'active', to: 'suspended' },
         }),
       );
+    });
+  });
+
+  describe('anonymizeForDeletion', () => {
+    it('nulls the identifying columns, sets status to deleted, revokes sessions, anonymizes the mobile number, and audits a delete action', async () => {
+      const { service, repo, identity, audit } = createDeps();
+      repo.findById.mockResolvedValue(basePatient({ status: 'active', fullName: 'Jane Doe' }) as never);
+      repo.anonymizeIdentity.mockResolvedValue(basePatient({ status: 'active', fullName: null }) as never);
+      repo.updateStatus.mockResolvedValue(basePatient({ status: 'deleted', fullName: null }) as never);
+
+      await expect(service.anonymizeForDeletion('patient-1', 'admin-1')).resolves.toEqual({ anonymized: true });
+
+      expect(repo.anonymizeIdentity).toHaveBeenCalledWith('patient-1');
+      expect(repo.updateStatus).toHaveBeenCalledWith('patient-1', 'deleted');
+      expect(identity.revokeAllSessions).toHaveBeenCalledWith('patient', 'patient-1', {
+        actorType: 'admin',
+        actorId: 'admin-1',
+      });
+      expect(identity.anonymizeMobileNumber).toHaveBeenCalledWith('patient', 'patient-1');
+      expect(audit.write).toHaveBeenCalledWith(
+        expect.objectContaining({
+          actorType: 'admin',
+          actorId: 'admin-1',
+          action: 'delete',
+          entityType: 'patient',
+          entityId: 'patient-1',
+        }),
+      );
+    });
+
+    it('is idempotent — a patient already deleted is a no-op, with no writes at all', async () => {
+      const { service, repo, identity, audit } = createDeps();
+      repo.findById.mockResolvedValue(basePatient({ status: 'deleted' }) as never);
+
+      await expect(service.anonymizeForDeletion('patient-1', 'admin-1')).resolves.toEqual({ anonymized: false });
+
+      expect(repo.anonymizeIdentity).not.toHaveBeenCalled();
+      expect(repo.updateStatus).not.toHaveBeenCalled();
+      expect(identity.anonymizeMobileNumber).not.toHaveBeenCalled();
+      expect(audit.write).not.toHaveBeenCalled();
+    });
+
+    it('throws NotFoundException for an unknown patient', async () => {
+      const { service, repo } = createDeps();
+      repo.findById.mockResolvedValue(null);
+
+      await expect(service.anonymizeForDeletion('missing', 'admin-1')).rejects.toBeInstanceOf(NotFoundException);
     });
   });
 });

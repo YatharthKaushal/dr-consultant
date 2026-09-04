@@ -1,5 +1,5 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { and, desc, eq, gte, isNotNull, isNull, lt, or, sql } from 'drizzle-orm';
+import { and, desc, eq, gte, inArray, isNotNull, isNull, lt, or, sql } from 'drizzle-orm';
 import { DATABASE } from '../../config/db/database.module';
 import type { Database, DatabaseTransaction } from '../../config/db/database.config';
 import { auditLogTable } from '../../schema/audit-log.schema';
@@ -175,6 +175,23 @@ export class ClinicalRepository {
       .select({ count: sql<string>`count(*)` })
       .from(clinicalRecordsTable)
       .where(isNull(clinicalRecordsTable.finalisedAt));
+    return Number(row?.count ?? 0);
+  }
+
+  /**
+   * ADDITIVE (M-21/data rights execution). READ-ONLY row count of
+   * `clinical_records` whose `consultation_id` is in the given list —
+   * `DataRightsFacade#previewExecution` needs this to report a count for a
+   * table this module never anonymizes or deletes (RETAIN in the M-21
+   * survey: SRS §5.3 medical-record retention). Empty list in, `0` out, no
+   * query issued — `inArray` on an empty array is unsafe.
+   */
+  async countRecordsForConsultations(consultationIds: readonly string[], executor: Executor = this.db): Promise<number> {
+    if (consultationIds.length === 0) return 0;
+    const [row] = await executor
+      .select({ count: sql<string>`count(*)` })
+      .from(clinicalRecordsTable)
+      .where(inArray(clinicalRecordsTable.consultationId, consultationIds as string[]));
     return Number(row?.count ?? 0);
   }
 

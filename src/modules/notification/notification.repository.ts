@@ -110,6 +110,21 @@ export class NotificationRepository {
   }
 
   /**
+   * ADDITIVE (M-21/data rights execution): a patient data-deletion preview
+   * needs a row count for `notifications` without touching any of them —
+   * this table is RETAIN in the M-21 compliance survey (SRS §5.3), so this
+   * is a pure `SELECT COUNT`, never a delete. Every row for the patient,
+   * read or unread — unlike `countUnread`, this is not the inbox badge.
+   */
+  async countForPatient(patientId: string, executor: Executor = this.db): Promise<number> {
+    const [row] = await executor
+      .select({ value: count() })
+      .from(notificationsTable)
+      .where(eq(notificationsTable.patientId, patientId));
+    return Number(row?.value ?? 0);
+  }
+
+  /**
    * Marks ONE notification read, scoped to its owner in the WHERE clause.
    * Returns false when the row does not exist OR belongs to someone else —
    * the caller turns both into the same 404, so the endpoint cannot be used

@@ -1074,6 +1074,52 @@ export class PromotionService {
   }
 
   /* ====================================================================== */
+  /* M-21/data rights execution — see `PromotionContract` for the full account */
+  /* ====================================================================== */
+
+  /**
+   * READ-ONLY. Fans out to the three repositories this service already holds
+   * — `repo` (`discount_instruments`, `discount_redemptions`,
+   * `promotion_code_attempts`), `referrals` (`referral_events`) and
+   * `affiliateRepo` (`affiliate_attributions`, `affiliate_commissions`) —
+   * and merges their counts into the one shape `PromotionContract` promises.
+   */
+  async countDataRightsRowsForPatient(input: { patientId: string; consultationIds: readonly string[] }): Promise<{
+    discountInstruments: number;
+    discountRedemptions: number;
+    affiliateAttributions: number;
+    affiliateCommissions: number;
+    referralEvents: number;
+    promotionCodeAttempts: number;
+  }> {
+    const [ownCounts, referralCounts, affiliateCounts] = await Promise.all([
+      this.repo.countDataRightsRows(input.patientId),
+      this.referrals.countDataRightsRows(input.patientId),
+      this.affiliateRepo.countDataRightsRows(input),
+    ]);
+
+    return {
+      discountInstruments: ownCounts.discountInstruments,
+      discountRedemptions: ownCounts.discountRedemptions,
+      promotionCodeAttempts: ownCounts.promotionCodeAttempts,
+      referralEvents: referralCounts.referralEvents,
+      affiliateAttributions: affiliateCounts.affiliateAttributions,
+      affiliateCommissions: affiliateCounts.affiliateCommissions,
+    };
+  }
+
+  /**
+   * *** THE ONLY WRITE M-21 MAKES AGAINST THIS MODULE'S TABLES. *** Thin
+   * delegation to `PromotionRepository.anonymizeCodeAttemptsForPatient` — see
+   * `PromotionContract#anonymizePromotionCodeAttemptsForPatient` for why
+   * `promotion_code_attempts` alone, of everything this module owns, is
+   * anonymized rather than retained untouched.
+   */
+  async anonymizePromotionCodeAttemptsForPatient(patientId: string): Promise<{ anonymizedCount: number }> {
+    return this.repo.anonymizeCodeAttemptsForPatient(patientId);
+  }
+
+  /* ====================================================================== */
   /* Small helpers                                                          */
   /* ====================================================================== */
 

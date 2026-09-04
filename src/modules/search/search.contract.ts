@@ -163,4 +163,27 @@ export interface SearchContract {
 
   /** `true` when the text matches the admin-edited crisis keyword list. Never throws; a config read failure degrades to the compiled-in starter list. */
   screenForCrisis(text: string): Promise<{ fired: boolean }>;
+
+  /**
+   * ADDITIVE (M-21/data rights execution): a READ-ONLY row count for
+   * `search_queries` and `search_rate_limits` for this patient, so a
+   * data-deletion preview can report both without writing anything.
+   */
+  countDataRightsRowsForPatient(patientId: string): Promise<{ searchQueries: number; searchRateLimits: number }>;
+
+  /**
+   * ADDITIVE (M-21/data rights execution). *** THE ONLY WRITE M-21 MAKES
+   * AGAINST THIS TABLE. *** `search_queries.schema.ts`'s own header names this
+   * table explicitly: "Must be included in `data_deletion_requests` execution —
+   * a free-text symptom query is among the most sensitive strings this
+   * platform stores." HARD-DELETES every `search_queries` row for this patient
+   * — not an anonymize, a real delete, because a free-text query string has no
+   * legitimate retention purpose once the patient who typed it is gone.
+   * `search_rate_limits` is untouched — see its own schema comment on why it
+   * is designed to survive independent of patient lifecycle.
+   *
+   * Idempotent: deleting an already-empty set returns `{ deletedCount: 0 }`,
+   * never throws.
+   */
+  deleteSearchQueriesForPatient(patientId: string): Promise<{ deletedCount: number }>;
 }

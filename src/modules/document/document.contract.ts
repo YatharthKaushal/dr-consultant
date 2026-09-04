@@ -71,6 +71,26 @@ export interface DocumentContract {
    * transport, which is where that decision belongs.
    */
   writePrescriptionPdf(input: WritePrescriptionPdfInput): Promise<PatientFileView>;
+
+  /**
+   * ADDITIVE (M-21/data rights execution): `DataRightsFacade#previewExecution`
+   * needs a READ-ONLY row count of what this module holds for a patient's
+   * approved data-deletion request, without touching a single row — this
+   * module's tables are RETAIN in the M-21 compliance survey (SRS §5.3
+   * retention obligations), so nothing here is ever anonymized or deleted.
+   *
+   * `patientFiles` counts every non-deleted `patient_files` row for
+   * `patientId` directly, REGARDLESS of `consultationIds` — a file such as
+   * `medical_history` can be attached to no consultation at all and is still
+   * the patient's. `reportRequests` counts `report_requests` rows whose
+   * `consultation_id` is one of `consultationIds`, resolved by the caller
+   * the same way `patient-file.repository.ts#listForDoctorHistory` already
+   * expects a caller-resolved consultation set.
+   */
+  countDataRightsRowsForPatient(input: {
+    patientId: string;
+    consultationIds: readonly string[];
+  }): Promise<{ patientFiles: number; reportRequests: number }>;
 }
 
 /** See `DocumentContract#writePrescriptionPdf`. */

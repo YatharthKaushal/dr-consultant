@@ -454,6 +454,15 @@ export class ClarificationService {
     return row ? toClarificationCaseSummaryView(row) : null;
   }
 
+  /**
+   * ADDITIVE (M-21/data rights execution). See
+   * `ClarificationContract#countCasesForConsultations` — a pure, read-only
+   * count, nothing here is anonymized or deleted.
+   */
+  async countCasesForConsultations(consultationIds: readonly string[]): Promise<number> {
+    return this.repo.countCasesForConsultations(consultationIds);
+  }
+
   /* ══════════════════════════════════════════════════════════════════════ */
   /* Shared plumbing                                                        */
   /* ══════════════════════════════════════════════════════════════════════ */

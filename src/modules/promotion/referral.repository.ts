@@ -1,5 +1,5 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { and, asc, count, desc, eq, inArray, sql, type SQL } from 'drizzle-orm';
+import { and, asc, count, desc, eq, inArray, or, sql, type SQL } from 'drizzle-orm';
 import { DATABASE } from '../../config/db/database.module';
 import type { Database, DatabaseTransaction } from '../../config/db/database.config';
 import { referralEventsTable, type NewReferralEventRow, type ReferralEventRow } from '../../schema/referral-events.schema';
@@ -225,5 +225,21 @@ export class ReferralRepository {
     if (filter.status !== undefined) conditions.push(eq(referralEventsTable.status, filter.status));
     if (conditions.length === 0) return undefined;
     return conditions.length === 1 ? conditions[0] : and(...conditions);
+  }
+
+  /**
+   * M-21/data rights execution, READ-ONLY. See `PromotionContract
+   * #countDataRightsRowsForPatient`. Counts EITHER `referrer_patient_id` OR
+   * `referee_patient_id` matching — a patient's own referral history includes
+   * both rows they started and the one row where they were referred (the
+   * unique index on the latter is exactly what "a patient can be referred once,
+   * ever" enforces, and RETAIN means that guarantee must not silently reopen).
+   */
+  async countDataRightsRows(patientId: string, executor: Executor = this.db): Promise<{ referralEvents: number }> {
+    const [row] = await executor
+      .select({ value: count() })
+      .from(referralEventsTable)
+      .where(or(eq(referralEventsTable.referrerPatientId, patientId), eq(referralEventsTable.refereePatientId, patientId)));
+    return { referralEvents: row?.value ?? 0 };
   }
 }

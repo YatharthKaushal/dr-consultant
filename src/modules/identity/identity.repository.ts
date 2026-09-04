@@ -13,6 +13,22 @@ import { patientsTable } from '../../schema/patients.schema';
 export type Executor = Database | DatabaseTransaction;
 
 /**
+ * ADDITIVE (M-21/data rights execution). Deterministic per-account
+ * placeholder for `mobile_number`, used only by `anonymizeMobileNumber`
+ * below. `mobileNumber` is `varchar(16)` and NOT NULL UNIQUE on all three
+ * account tables, and a real E.164 value always starts with `+` — this
+ * never does, so it can never collide with a live number. Sixteen
+ * characters exactly: `DEL` (3) + the first 13 hex characters of the
+ * account's own id with its dashes stripped, which is unique per id (and
+ * therefore per row) for any account volume this platform will ever reach.
+ * Deterministic on purpose: a retried anonymization writes the same value,
+ * so it is a no-op rather than a second, different placeholder.
+ */
+export function anonymizedMobilePlaceholder(id: string): string {
+  return `DEL${id.replace(/-/g, '').slice(0, 13)}`;
+}
+
+/**
  * Uniform shape across the three account tables, even though their own
  * "may this account sign in" column differs (`patients`/`admins.status`
  * vs. `doctors.verification_status`) — that per-table rule is applied once,
@@ -298,6 +314,33 @@ export class IdentityRepository {
       .where(eq(adminsTable.id, id))
       .limit(1);
     return row?.mobileNumber ?? null;
+  }
+
+  /** See `IdentityContract#anonymizeMobileNumber`. Three explicit branches for the same reason `getContactMobileNumber` gives. */
+  async anonymizeMobileNumber(accountType: AccountType, id: string, executor: Executor = this.db): Promise<{ changed: boolean }> {
+    const placeholder = anonymizedMobilePlaceholder(id);
+    if (accountType === 'patient') {
+      const [row] = await executor
+        .update(patientsTable)
+        .set({ mobileNumber: placeholder, updatedAt: new Date() })
+        .where(and(eq(patientsTable.id, id), sql`${patientsTable.mobileNumber} <> ${placeholder}`))
+        .returning({ id: patientsTable.id });
+      return { changed: !!row };
+    }
+    if (accountType === 'doctor') {
+      const [row] = await executor
+        .update(doctorsTable)
+        .set({ mobileNumber: placeholder, updatedAt: new Date() })
+        .where(and(eq(doctorsTable.id, id), sql`${doctorsTable.mobileNumber} <> ${placeholder}`))
+        .returning({ id: doctorsTable.id });
+      return { changed: !!row };
+    }
+    const [row] = await executor
+      .update(adminsTable)
+      .set({ mobileNumber: placeholder, updatedAt: new Date() })
+      .where(and(eq(adminsTable.id, id), sql`${adminsTable.mobileNumber} <> ${placeholder}`))
+      .returning({ id: adminsTable.id });
+    return { changed: !!row };
   }
 
   /** Returns the new `tokenVersion`. Used by `logout-all` and by a status change that must kill live sessions immediately. */

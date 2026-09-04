@@ -49,6 +49,7 @@ describe('DataDeletionService', () => {
       findOpenByPatient: jest.fn().mockResolvedValue(null),
       listForAdmin: jest.fn().mockResolvedValue([]),
       updateReview: jest.fn(async (id: string, data: Partial<DataDeletionRequestRow>) => requestRow({ id, ...data })),
+      recordExecutionOutcome: jest.fn(async (id: string, data: Partial<DataDeletionRequestRow>) => requestRow({ id, ...data })),
     } as unknown as jest.Mocked<DataDeletionRepository>;
 
     audit = { write: jest.fn().mockResolvedValue(undefined) } as unknown as jest.Mocked<AuditService>;
@@ -231,6 +232,85 @@ describe('DataDeletionService', () => {
       const patch = repo.updateReview.mock.calls[0]?.[1] as Record<string, unknown>;
       expect(patch).not.toHaveProperty('executedAt');
       expect(patch).not.toHaveProperty('executionOutcome');
+    });
+  });
+
+  /* ---------------------------------------------------------------------- */
+  /* findForExecution / recordExecutionOutcome — M-21 (data rights)         */
+  /* ---------------------------------------------------------------------- */
+
+  describe('findForExecution', () => {
+    it('returns the record when it exists', async () => {
+      const record = await service.findForExecution(REQUEST_ID);
+      expect(record?.id).toBe(REQUEST_ID);
+    });
+
+    it('returns null (never throws) when the request does not exist', async () => {
+      repo.findById.mockResolvedValueOnce(null);
+      await expect(service.findForExecution('nope')).resolves.toBeNull();
+    });
+  });
+
+  describe('recordExecutionOutcome', () => {
+    it('writes executedAt/executionOutcome and the target status when the request is approved', async () => {
+      repo.findById.mockResolvedValue(requestRow({ status: 'approved' }));
+
+      const outcome = { tables: [{ table: 'patients', decision: 'anonymize', rowCount: 1 }] };
+      const record = await service.recordExecutionOutcome(ADMIN_ID, REQUEST_ID, { status: 'executed', executionOutcome: outcome });
+
+      expect(repo.recordExecutionOutcome).toHaveBeenCalledWith(
+        REQUEST_ID,
+        { status: 'executed', executionOutcome: outcome, executedAt: expect.any(Date) as unknown as Date },
+        db,
+      );
+      expect(record.status).toBe('executed');
+    });
+
+    it('writes a failed outcome the same way', async () => {
+      repo.findById.mockResolvedValue(requestRow({ status: 'approved' }));
+      await service.recordExecutionOutcome(ADMIN_ID, REQUEST_ID, { status: 'failed', executionOutcome: { reason: 'partial failure' } });
+      expect(repo.recordExecutionOutcome).toHaveBeenCalledWith(
+        REQUEST_ID,
+        expect.objectContaining({ status: 'failed' }),
+        db,
+      );
+    });
+
+    it.each(['requested', 'in_review', 'rejected', 'executed', 'failed'] as const)(
+      'refuses when the request is currently "%s", not approved',
+      async (status) => {
+        repo.findById.mockResolvedValue(requestRow({ status }));
+        const error = await service
+          .recordExecutionOutcome(ADMIN_ID, REQUEST_ID, { status: 'executed', executionOutcome: {} })
+          .catch((e: unknown) => e);
+        expect(error).toBeInstanceOf(ConflictException);
+        expect(error).toMatchObject({ response: { code: DATA_DELETION_ERROR_CODES.DATA_DELETION_NOT_APPROVED } });
+        expect(repo.recordExecutionOutcome).not.toHaveBeenCalled();
+      },
+    );
+
+    it('404s when the request does not exist', async () => {
+      repo.findById.mockResolvedValueOnce(null);
+      await expect(
+        service.recordExecutionOutcome(ADMIN_ID, 'nope', { status: 'executed', executionOutcome: {} }),
+      ).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    it('writes the execution audit entry inside the transaction, naming the transition', async () => {
+      repo.findById.mockResolvedValue(requestRow({ status: 'approved' }));
+      await service.recordExecutionOutcome(ADMIN_ID, REQUEST_ID, { status: 'executed', executionOutcome: { ok: true } });
+
+      expect(audit.write).toHaveBeenCalledWith(
+        expect.objectContaining({
+          actorType: 'admin',
+          actorId: ADMIN_ID,
+          action: 'update',
+          entityType: DATA_DELETION_AUDIT_ENTITY_TYPES.DATA_DELETION_REQUEST,
+          entityId: REQUEST_ID,
+          metadata: expect.objectContaining({ transition: { from: 'approved', to: 'executed' } }) as unknown,
+        }),
+        db,
+      );
     });
   });
 });

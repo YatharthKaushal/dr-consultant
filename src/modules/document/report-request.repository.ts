@@ -1,5 +1,5 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { and, desc, eq, inArray } from 'drizzle-orm';
+import { and, desc, eq, inArray, sql } from 'drizzle-orm';
 import { DATABASE } from '../../config/db/database.module';
 import type { Database, DatabaseTransaction } from '../../config/db/database.config';
 import { reportRequestsTable, type NewReportRequestRow, type ReportRequestRow } from '../../schema/report-requests.schema';
@@ -48,6 +48,23 @@ export class ReportRequestRepository {
       .from(reportRequestsTable)
       .where(inArray(reportRequestsTable.consultationId, consultationIds))
       .orderBy(desc(reportRequestsTable.createdAt));
+  }
+
+  /**
+   * ADDITIVE (M-21/data rights execution): a patient data-deletion preview
+   * needs a row count for `report_requests` without touching any of them —
+   * `report_requests` is RETAIN in the M-21 compliance survey (SRS §5.3), so
+   * this is a pure `SELECT COUNT`, never a delete. Empty array in, `0` out,
+   * no query issued — same guard as `listByConsultations` above, because
+   * `inArray(col, [])` is unsafe SQL.
+   */
+  async countByConsultations(consultationIds: readonly string[], executor: Executor = this.db): Promise<number> {
+    if (consultationIds.length === 0) return 0;
+    const [row] = await executor
+      .select({ count: sql<string>`count(*)` })
+      .from(reportRequestsTable)
+      .where(inArray(reportRequestsTable.consultationId, consultationIds as string[]));
+    return Number(row?.count ?? 0);
   }
 
   /**

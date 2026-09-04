@@ -245,6 +245,24 @@ export class PricingService {
     return this.config.hasCatalogue();
   }
 
+  /**
+   * ADDITIVE (M-21/data rights execution): the `price_quotes`/
+   * `price_quote_components` half of `PricingContract
+   * #countDataRightsRowsForPatient` — a READ-ONLY row count for a patient's
+   * approved data-deletion request. `refund_components`, the third table
+   * this contract method reports, is `PricingRefundService
+   * #countRefundComponentsForConsultations`'s job instead — see
+   * `PricingFacade#countDataRightsRowsForPatient` for where the two are
+   * combined.
+   */
+  async countPriceQuoteRowsForPatient(patientId: string): Promise<{ priceQuotes: number; priceQuoteComponents: number }> {
+    const [priceQuotes, priceQuoteComponents] = await Promise.all([
+      this.quotes.countByPatientId(patientId),
+      this.quotes.countComponentsByPatientId(patientId),
+    ]);
+    return { priceQuotes, priceQuoteComponents };
+  }
+
   /* ---------------------------------------------------------------------- */
   /* Lifecycle transitions                                                   */
   /* ---------------------------------------------------------------------- */

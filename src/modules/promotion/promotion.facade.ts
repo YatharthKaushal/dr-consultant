@@ -137,4 +137,30 @@ export class PromotionFacade implements PromotionContract {
   }): Promise<AffiliateCommissionRow | null> {
     return this.affiliates.recordLinkOnlyCommissionForPatient(input);
   }
+
+  /**
+   * ADDITIVE (M-21/data rights execution). Thin delegation to
+   * `PromotionService.countDataRightsRowsForPatient` — see
+   * `PromotionContract`'s doc comment. Read-only.
+   */
+  async countDataRightsRowsForPatient(input: { patientId: string; consultationIds: readonly string[] }): Promise<{
+    discountInstruments: number;
+    discountRedemptions: number;
+    affiliateAttributions: number;
+    affiliateCommissions: number;
+    referralEvents: number;
+    promotionCodeAttempts: number;
+  }> {
+    return this.promotions.countDataRightsRowsForPatient(input);
+  }
+
+  /**
+   * ADDITIVE (M-21/data rights execution). Thin delegation to
+   * `PromotionService.anonymizePromotionCodeAttemptsForPatient` — see
+   * `PromotionContract`'s doc comment for why `promotion_code_attempts`
+   * (and only `promotion_code_attempts`) is anonymized here.
+   */
+  async anonymizePromotionCodeAttemptsForPatient(patientId: string): Promise<{ anonymizedCount: number }> {
+    return this.promotions.anonymizePromotionCodeAttemptsForPatient(patientId);
+  }
 }
