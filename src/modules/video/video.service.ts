@@ -296,6 +296,35 @@ export class VideoService {
       this.logger.log(
         `Consultation ${consultationId} did not move to in_progress from ${result.booking?.status ?? 'unknown'}.`,
       );
+      return;
+    }
+
+    // *** AND TAKE THE DOCTOR OUT OF THE ROUTING POOL. ***
+    //
+    // An INSTANT consult reached `in_consultation` at accept, but nothing did
+    // that for a SCHEDULED one — so without this a doctor sitting
+    // `available_now` could be handed an instant request in the middle of a
+    // booked video call. `markConsultInProgress` is mode-agnostic and
+    // idempotent, so it is called for every call and no-ops for the instant
+    // case.
+    //
+    // Best-effort, and deliberately AFTER the status move: the status is the
+    // fact FR-8.6 hangs off, and a presence write that fails must not cost us
+    // it. A failure here is bounded — the doctor is offered one request they
+    // must decline, and M-13's acceptance window re-routes it.
+    try {
+      const presence = await this.instant.markConsultInProgress(consultationId);
+      if (presence.refusal) {
+        this.logger.warn(
+          `Consultation ${consultationId} started but the doctor was not moved to in_consultation ` +
+            `(${presence.refusal}); they may be offered an instant request mid-call.`,
+        );
+      }
+    } catch (error) {
+      this.logger.error(
+        `Consultation ${consultationId} started but taking the doctor out of the routing pool threw: ` +
+          `${error instanceof Error ? error.message : String(error)}`,
+      );
     }
   }
 

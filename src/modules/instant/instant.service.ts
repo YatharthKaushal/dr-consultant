@@ -18,7 +18,7 @@ import {
   NOTIFICATION_PORT,
   ROUTING_CANDIDATE_FETCH,
 } from './instant.constants';
-import type { CompletionGateView, InstantConsultView, InstantRequestView } from './instant.contract';
+import type { CompletionGateView, ConsultStartView, InstantConsultView, InstantRequestView } from './instant.contract';
 import { toInstantRequestView } from './instant.mapper';
 import { InstantRepository } from './instant.repository';
 
@@ -857,6 +857,45 @@ export class InstantService {
    * the failure. The other order would leave them `completing_notes` and
    * UNGATED, which routing would happily ignore.
    */
+  /**
+   * *** THE CALL STARTED (M-14). *** Takes the doctor out of the routing pool.
+   *
+   * Closes a hole M-14 found and could not fix from its side: an INSTANT
+   * consult reaches `in_consultation` at accept, but nothing did that for a
+   * SCHEDULED one, so a doctor could be offered an instant request mid-call.
+   *
+   * Mode-agnostic and idempotent — an instant consult is already there, which
+   * the presence layer reports as `changed: false` with no refusal. Non-
+   * throwing, because the caller is a webhook that must answer 2xx.
+   *
+   * Note it does NOT require an ungated doctor: `in_consultation` is absent
+   * from `PRESENCE_REQUIRING_NO_GATE` on purpose. A doctor who still owes
+   * documentation for an earlier consult may not be ROUTED a new instant
+   * request, but they may certainly take the scheduled call already in their
+   * diary.
+   */
+  async markConsultInProgress(consultationId: string): Promise<ConsultStartView> {
+    const booking = await this.bookings.getBooking(consultationId);
+    if (!booking) return { changed: false, doctorId: null, presence: null, refusal: 'not_found' };
+    if (!booking.doctorId) {
+      return { changed: false, doctorId: null, presence: null, refusal: 'no_doctor' };
+    }
+
+    const result = await this.presence.transition({
+      doctorId: booking.doctorId,
+      to: 'in_consultation',
+      actor: SYSTEM_ACTOR,
+      reason: 'consult_started',
+    });
+
+    return {
+      changed: result.changed,
+      doctorId: booking.doctorId,
+      presence: result.after,
+      ...(result.refusal ? { refusal: 'illegal_transition' as const } : {}),
+    };
+  }
+
   async markInstantConsultEnded(consultationId: string): Promise<CompletionGateView> {
     const booking = await this.bookings.getBooking(consultationId);
     if (!booking || booking.mode !== 'instant') throw instantConsultNotFound();

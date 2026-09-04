@@ -81,7 +81,12 @@ function build(overrides: {
   };
 
   const patients = { getProfileSummary: jest.fn().mockResolvedValue({ id: PATIENT_ID, fullName: 'A Patient' }) };
-  const instant = { markInstantConsultEnded: jest.fn().mockResolvedValue({ changed: true, doctorId: DOCTOR_ID }) };
+  const instant = {
+    markInstantConsultEnded: jest.fn().mockResolvedValue({ changed: true, doctorId: DOCTOR_ID }),
+    markConsultInProgress: jest
+      .fn()
+      .mockResolvedValue({ changed: true, doctorId: DOCTOR_ID, presence: 'in_consultation' }),
+  };
 
   const consent = {
     checkPatientConsent: overrides.consentThrows
@@ -453,6 +458,59 @@ describe('VideoService', () => {
         from: ['scheduled'],
         reason: 'video_participant_joined',
       });
+    });
+
+    /**
+     * *** THE HOLE THIS CLOSES. *** An INSTANT consult reaches
+     * `in_consultation` at accept, but nothing did that for a SCHEDULED one —
+     * so a doctor sitting `available_now` could be handed an instant request
+     * in the middle of a booked video call.
+     */
+    it('takes the doctor OUT OF THE ROUTING POOL when the call starts', async () => {
+      const { service, instant } = build();
+
+      await service.markCallStarted(CONSULTATION_ID);
+
+      expect(instant.markConsultInProgress).toHaveBeenCalledWith(CONSULTATION_ID);
+    });
+
+    /** The status is the fact FR-8.6 hangs off; a presence write must not cost us it. */
+    it('moves the status FIRST, then the presence', async () => {
+      const { service, bookings, instant } = build();
+      const order: string[] = [];
+      bookings.transitionConsultationStatus.mockImplementation(async () => {
+        order.push('status');
+        return { changed: true, booking: null };
+      });
+      instant.markConsultInProgress.mockImplementation(async () => {
+        order.push('presence');
+        return { changed: true, doctorId: DOCTOR_ID, presence: 'in_consultation' };
+      });
+
+      await service.markCallStarted(CONSULTATION_ID);
+
+      expect(order).toEqual(['status', 'presence']);
+    });
+
+    it('does not touch presence when the status move was refused', async () => {
+      const { service, bookings, instant } = build();
+      bookings.transitionConsultationStatus.mockResolvedValue({
+        changed: false,
+        booking: null,
+        refusal: 'illegal_transition',
+      });
+
+      await service.markCallStarted(CONSULTATION_ID);
+
+      expect(instant.markConsultInProgress).not.toHaveBeenCalled();
+    });
+
+    /** Bounded failure: the doctor is offered one request they must decline, and M-13 re-routes it. */
+    it('still succeeds when the presence move throws — the caller is a webhook', async () => {
+      const { service, instant } = build();
+      instant.markConsultInProgress.mockRejectedValue(new Error('doctor module is down'));
+
+      await expect(service.markCallStarted(CONSULTATION_ID)).resolves.toBeUndefined();
     });
 
     it('markCallStarted never throws on a refused move — its caller is a webhook', async () => {

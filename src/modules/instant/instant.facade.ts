@@ -1,6 +1,12 @@
 import { Injectable } from '@nestjs/common';
 import { InstantPresenceService } from './instant-presence.service';
-import type { CompletionGateView, InstantConsultView, InstantContract, InstantPresenceView } from './instant.contract';
+import type {
+  CompletionGateView,
+  ConsultStartView,
+  InstantConsultView,
+  InstantContract,
+  InstantPresenceView,
+} from './instant.contract';
 import { InstantService } from './instant.service';
 
 /**
@@ -21,8 +27,10 @@ import { InstantService } from './instant.service';
  *                            transaction" can honestly mean across a module
  *                            boundary, and why the method is idempotent.
  *
- *   M-14 (Video)             `markInstantConsultEnded`. The call ended, so
- *                            gate the doctor and move them to
+ *   M-14 (Video)             `markConsultInProgress` when the call starts, so
+ *                            the doctor leaves the routing pool for its
+ *                            duration; `markInstantConsultEnded` when it ends,
+ *                            so they are gated and moved to
  *                            `completing_notes`.
  *
  *   M-09 / M-04              `getPresence`. FR-4.2's "live availability" on a
@@ -47,6 +55,11 @@ export class InstantFacade implements InstantContract {
   /** See `InstantContract#markInstantConsultEnded`. */
   async markInstantConsultEnded(consultationId: string): Promise<CompletionGateView> {
     return this.instant.markInstantConsultEnded(consultationId);
+  }
+
+  /** *** M-14 CALLS THIS. *** The call started — take the doctor out of the routing pool. See `InstantContract#markConsultInProgress`. */
+  async markConsultInProgress(consultationId: string): Promise<ConsultStartView> {
+    return this.instant.markConsultInProgress(consultationId);
   }
 
   /** *** M-15 CALLS THIS. *** See `InstantContract#clearCompletionGate`. */
