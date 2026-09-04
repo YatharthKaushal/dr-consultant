@@ -116,6 +116,8 @@ export interface CreateBookingInput {
   concernId?: string | null;
   scheduledStartAt: Date;
   intakeAnswers?: unknown;
+  /** A discount/coupon/referral code the patient offered at booking time. Threaded to `createOrderForConsultation` so it is priced AND reserved, not just previewed. */
+  discountCode?: string | null;
 }
 
 /** What a patient gets back from a successful booking: the row, plus the checkout handles M-12 minted. */
@@ -238,6 +240,11 @@ export class BookingService {
       order = await this.payments.createOrderForConsultation({
         consultationId: booking.id,
         consultationFeeInr: doctorProfile.consultationFeeInr,
+        discountCode: input.discountCode ?? null,
+        patientId: input.patientId,
+        doctorId: input.doctorId,
+        specialtyId: input.specialtyId,
+        mode: 'scheduled',
       });
     } catch (error) {
       await this.compensateFailedPaymentSetup(booking.id, error);
@@ -1033,12 +1040,32 @@ export class BookingService {
     return this.repo.listAdminResolutionQueue(limit, offset);
   }
 
-  /** The pre-booking bill, so a patient sees the total before committing to a slot. Wrapped like every other port call. */
-  async quoteForDoctor(doctorId: string): Promise<PaymentBreakdown> {
-    const profile = await this.doctors.getPublicProfile(doctorId);
+  /**
+   * The pre-booking bill, so a patient sees the total before committing to a
+   * slot. Wrapped like every other port call.
+   *
+   * `discountCode` is OPTIONAL and `materialise` is DELIBERATELY OMITTED
+   * (falsy) — a preview must never reserve anything; `BOOKING_PAYMENT_PORT
+   * #quote`'s own contract says as much. `patientId` always comes from
+   * `@CurrentUser()` because `BookingController` requires patient auth on
+   * every route, `quote/:doctorId` included — so there is no anonymous path
+   * here to worry about. `specialtyId` is resolved from the doctor's own
+   * profile (their primary specialty, or their first if none is marked
+   * primary) since the route only names a doctor, not a specialty.
+   */
+  async quoteForDoctor(input: { doctorId: string; patientId: string; discountCode?: string | null }): Promise<PaymentBreakdown> {
+    const profile = await this.doctors.getPublicProfile(input.doctorId);
     if (!profile) throw doctorNotBookable();
+    const specialtyId = profile.specialties.find((specialty) => specialty.isPrimary)?.id ?? profile.specialties[0]?.id ?? null;
     try {
-      return await this.payments.quote(profile.consultationFeeInr);
+      return await this.payments.quote(profile.consultationFeeInr, {
+        discountCode: input.discountCode ?? null,
+        patientId: input.patientId,
+        doctorId: input.doctorId,
+        specialtyId,
+        mode: 'scheduled',
+        materialise: false,
+      });
     } catch {
       throw new ConflictException({
         code: BOOKING_ERROR_CODES.PAYMENT_SETUP_FAILED,

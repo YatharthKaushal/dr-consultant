@@ -21,11 +21,31 @@ import type { BookingPaymentPort, CreatedOrder, PaymentBreakdown } from './booki
  */
 @Injectable()
 export class UnavailableBookingPaymentProvider implements BookingPaymentPort {
-  async quote(_consultationFeeInr: string): Promise<PaymentBreakdown> {
+  async quote(
+    _consultationFeeInr: string,
+    _options?: {
+      placeOfSupplyStateCode?: string;
+      placeOfSupplyPincode?: string;
+      discountCode?: string | null;
+      patientId?: string | null;
+      doctorId?: string | null;
+      specialtyId?: string | null;
+      mode?: 'scheduled' | 'instant';
+      materialise?: boolean;
+    },
+  ): Promise<PaymentBreakdown> {
     throw this.unavailable();
   }
 
-  async createOrderForConsultation(_input: { consultationId: string; consultationFeeInr: string }): Promise<CreatedOrder> {
+  async createOrderForConsultation(_input: {
+    consultationId: string;
+    consultationFeeInr: string;
+    discountCode?: string | null;
+    patientId?: string | null;
+    doctorId?: string | null;
+    specialtyId?: string | null;
+    mode?: 'scheduled' | 'instant';
+  }): Promise<CreatedOrder> {
     throw this.unavailable();
   }
 

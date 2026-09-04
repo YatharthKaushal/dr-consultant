@@ -367,6 +367,143 @@ describe('BookingService.createBooking', () => {
 
     await expect(h.service.createBooking(input, PATIENT)).rejects.toMatchObject({ response: { code: 'PAYMENT_SETUP_FAILED' } });
   });
+
+  /* ── THE DISCOUNT SEAM ───────────────────────────────────────────────────
+   *
+   * `createOrderForConsultation` is what prices AND PINS the booking, so a
+   * discount code must reach it here — not just `quoteForDoctor`'s preview —
+   * or it is priced in at preview time and never actually reserved. Likewise
+   * `patientId`/`doctorId`/`specialtyId` must reach it on EVERY booking, not
+   * only a discounted one: those are the columns
+   * `pricing.service.ts#tryReserveForPinned` reads back for its per-user cap,
+   * and a null `patientId` there means `''`, shared by every patient. */
+
+  it('forwards discountCode, patientId, doctorId, specialtyId and mode to createOrderForConsultation', async () => {
+    const h = buildHarness();
+    await h.service.createBooking({ ...input, discountCode: 'SAVE20' }, PATIENT);
+
+    expect(h.payments.createOrderForConsultation).toHaveBeenCalledWith(
+      expect.objectContaining({
+        discountCode: 'SAVE20',
+        patientId: PATIENT_ID,
+        doctorId: DOCTOR_ID,
+        specialtyId: SPECIALTY_ID,
+        mode: 'scheduled',
+      }),
+    );
+  });
+
+  /** Every booking — discounted or not — must carry its own patient/doctor/specialty into the quote. */
+  it('forwards patientId, doctorId and specialtyId even when no discount code is offered', async () => {
+    const h = buildHarness();
+    await h.service.createBooking(input, PATIENT);
+
+    expect(h.payments.createOrderForConsultation).toHaveBeenCalledWith(
+      expect.objectContaining({
+        discountCode: null,
+        patientId: PATIENT_ID,
+        doctorId: DOCTOR_ID,
+        specialtyId: SPECIALTY_ID,
+      }),
+    );
+  });
+});
+
+describe('BookingService.quoteForDoctor', () => {
+  /**
+   * *** A REFUSAL MUST REACH THE CALLER, NOT COLLAPSE INTO A SILENT FULL
+   * PRICE. *** `quoteForDoctor` is a thin pass-through over the payment port,
+   * so this proves the pass-through itself carries the `discount` field —
+   * whatever `pricing`/`promotions` decided about the code (applied, or
+   * refused with a reason and message) is what the caller gets back
+   * unmodified.
+   */
+  it('passes the discount refusal straight through, unmodified', async () => {
+    const h = buildHarness();
+    h.payments.quote.mockResolvedValueOnce({
+      totalPayable: '750.00',
+      discount: { applied: false, code: 'EXPIRED10', reason: 'CODE_NOT_USABLE', message: 'That code is no longer valid.' },
+    });
+
+    const result = await h.service.quoteForDoctor({ doctorId: DOCTOR_ID, patientId: PATIENT_ID, discountCode: 'EXPIRED10' });
+
+    expect(result.discount).toEqual({
+      applied: false,
+      code: 'EXPIRED10',
+      reason: 'CODE_NOT_USABLE',
+      message: 'That code is no longer valid.',
+    });
+  });
+
+  /** The preview NEVER reserves — `materialise` must stay falsy, unconditionally. */
+  it('never materialises — a preview reserves nothing', async () => {
+    const h = buildHarness();
+    await h.service.quoteForDoctor({ doctorId: DOCTOR_ID, patientId: PATIENT_ID, discountCode: 'SAVE20' });
+
+    expect(h.payments.quote).toHaveBeenCalledWith(
+      '750.00',
+      expect.objectContaining({ materialise: false }),
+    );
+  });
+
+  it('forwards the discount code, the current patient, the doctor and their resolved specialty', async () => {
+    const h = buildHarness();
+    await h.service.quoteForDoctor({ doctorId: DOCTOR_ID, patientId: PATIENT_ID, discountCode: 'SAVE20' });
+
+    expect(h.payments.quote).toHaveBeenCalledWith(
+      '750.00',
+      expect.objectContaining({
+        discountCode: 'SAVE20',
+        patientId: PATIENT_ID,
+        doctorId: DOCTOR_ID,
+        specialtyId: SPECIALTY_ID,
+        mode: 'scheduled',
+      }),
+    );
+  });
+
+  it('resolves specialtyId from the doctor primary specialty when the caller offers none', async () => {
+    const h = buildHarness();
+    h.doctors.getPublicProfile.mockResolvedValueOnce({
+      id: DOCTOR_ID,
+      consultationFeeInr: '750.00',
+      consultationDurationMinutes: 30,
+      specialties: [
+        { id: 'not-primary', code: 'x', name: 'X', isPrimary: false },
+        { id: SPECIALTY_ID, code: 'gen', name: 'General', isPrimary: true },
+      ],
+    });
+
+    await h.service.quoteForDoctor({ doctorId: DOCTOR_ID, patientId: PATIENT_ID });
+
+    expect(h.payments.quote).toHaveBeenCalledWith('750.00', expect.objectContaining({ specialtyId: SPECIALTY_ID }));
+  });
+
+  it('omitting a discount code stays legal — it defaults to null', async () => {
+    const h = buildHarness();
+    await h.service.quoteForDoctor({ doctorId: DOCTOR_ID, patientId: PATIENT_ID });
+
+    expect(h.payments.quote).toHaveBeenCalledWith('750.00', expect.objectContaining({ discountCode: null }));
+  });
+
+  it('rejects an unbookable doctor before ever calling the payment port', async () => {
+    const h = buildHarness();
+    h.doctors.getPublicProfile.mockResolvedValueOnce(null);
+
+    await expect(h.service.quoteForDoctor({ doctorId: DOCTOR_ID, patientId: PATIENT_ID })).rejects.toMatchObject({
+      response: { code: 'DOCTOR_NOT_BOOKABLE' },
+    });
+    expect(h.payments.quote).not.toHaveBeenCalled();
+  });
+
+  it('wraps a payment-port throw as PAYMENT_SETUP_FAILED, never a raw error', async () => {
+    const h = buildHarness();
+    h.payments.quote.mockRejectedValueOnce(new Error('pricing catalogue unavailable'));
+
+    const error = await h.service.quoteForDoctor({ doctorId: DOCTOR_ID, patientId: PATIENT_ID }).catch((e: unknown) => e);
+    expect(error).toMatchObject({ response: { code: 'PAYMENT_SETUP_FAILED' } });
+    expect(JSON.stringify(error)).not.toContain('pricing catalogue unavailable');
+  });
 });
 
 describe('BookingService.cancel', () => {

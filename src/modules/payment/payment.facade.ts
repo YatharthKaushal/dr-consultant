@@ -27,13 +27,53 @@ export class PaymentFacade implements PaymentContract {
     private readonly refunds: RefundService,
   ) {}
 
-  async quote(consultationFeeInr: string): Promise<PaymentBreakdown> {
-    return this.payments.quote(consultationFeeInr);
+  /**
+   * *** `options` MUST BE FORWARDED, NOT JUST ACCEPTED. ***
+   *
+   * This method used to declare only `(consultationFeeInr: string)` and call
+   * `this.payments.quote(consultationFeeInr)` — one argument, always. That
+   * compiled clean against `PaymentContract`'s `options?` (a narrower function
+   * satisfies a wider signature), so `implements PaymentContract` caught
+   * nothing: any caller's `discountCode`/`patientId`/etc. was silently
+   * DROPPED at this exact seam, every time, regardless of what
+   * `PaymentService#quote` itself supports. See `payment.facade.spec.ts`.
+   */
+  async quote(
+    consultationFeeInr: string,
+    options?: {
+      placeOfSupplyStateCode?: string;
+      placeOfSupplyPincode?: string;
+      discountCode?: string | null;
+      patientId?: string | null;
+      doctorId?: string | null;
+      specialtyId?: string | null;
+      mode?: 'scheduled' | 'instant';
+      materialise?: boolean;
+    },
+  ): Promise<PaymentBreakdown> {
+    return this.payments.quote(consultationFeeInr, options);
   }
 
+  /**
+   * `input` is forwarded BY REFERENCE, exactly as `createRefund` below does
+   * for `refundPct` — so a field this parameter type does not (yet) mention
+   * still reaches `PaymentService` at runtime. The type is still widened here
+   * to match `PaymentContract`, so a caller typed against either one can ASK
+   * for `discountCode`/`patientId`/`doctorId`/`specialtyId`/`mode` and have it
+   * checked at compile time rather than relying on the reference-forwarding
+   * alone.
+   */
   async createOrderForConsultation(input: {
     consultationId: string;
     consultationFeeInr: string;
+    quoteId?: string;
+    placeOfSupplyStateCode?: string;
+    placeOfSupplyPincode?: string;
+    discountCode?: string | null;
+    patientId?: string | null;
+    doctorId?: string | null;
+    specialtyId?: string | null;
+    mode?: 'scheduled' | 'instant';
   }): Promise<CreatedOrder> {
     return this.payments.createOrderForConsultation(input);
   }

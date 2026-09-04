@@ -84,6 +84,8 @@ export class PaymentService {
       discountCode?: string | null;
       patientId?: string | null;
       doctorId?: string | null;
+      specialtyId?: string | null;
+      mode?: 'scheduled' | 'instant';
       materialise?: boolean;
     },
   ): Promise<PaymentBreakdown> {
@@ -94,6 +96,8 @@ export class PaymentService {
       discountCode: options?.discountCode ?? null,
       patientId: options?.patientId ?? null,
       doctorId: options?.doctorId ?? null,
+      specialtyId: options?.specialtyId ?? null,
+      mode: options?.mode,
     };
 
     const view = options?.materialise
@@ -143,6 +147,11 @@ export class PaymentService {
     quoteId?: string;
     placeOfSupplyStateCode?: string;
     placeOfSupplyPincode?: string;
+    discountCode?: string | null;
+    patientId?: string | null;
+    doctorId?: string | null;
+    specialtyId?: string | null;
+    mode?: 'scheduled' | 'instant';
   }): Promise<CreatedOrder> {
     const existing = await this.payments.findByConsultationId(input.consultationId);
     if (existing) {
@@ -158,12 +167,28 @@ export class PaymentService {
     // *** PIN BEFORE THE GATEWAY IS TOLD ANYTHING. ***
     const quote =
       input.quoteId !== undefined
-        ? await this.pricing.pin({ quoteId: input.quoteId, consultationId: input.consultationId })
+        ? await this.pricing.pin({
+            quoteId: input.quoteId,
+            consultationId: input.consultationId,
+            patientId: input.patientId ?? null,
+          })
         : await this.pricing.materialiseAndPin({
             consultationId: input.consultationId,
             consultationFeeInr: input.consultationFeeInr,
             placeOfSupplyStateCode: input.placeOfSupplyStateCode ?? null,
             placeOfSupplyPincode: input.placeOfSupplyPincode ?? null,
+            // *** THE FIX. *** Without these every real booking priced and
+            // pinned with discountCode/patientId/doctorId/specialtyId null: a
+            // code typed at `quote()`'s preview time was never reserved at
+            // charge time, and `price_quotes.patient_id`/`doctor_id`/
+            // `specialty_id` were null on every row — which would have made
+            // `tryReserveForPinned`'s per-user cap key on `''`, shared by
+            // every patient, the moment a code became reachable at all.
+            discountCode: input.discountCode ?? null,
+            patientId: input.patientId ?? null,
+            doctorId: input.doctorId ?? null,
+            specialtyId: input.specialtyId ?? null,
+            mode: input.mode,
           });
 
     const totalPayablePaise = rupeesToPaise(quote.totalPayable);
