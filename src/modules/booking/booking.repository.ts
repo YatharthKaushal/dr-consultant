@@ -517,6 +517,28 @@ export class BookingRepository {
   }
 
   /**
+   * ADDITIVE (M-20/governance and quality): one `GROUP BY status` pass over
+   * every consultation, for the quality dashboard's "completed cases" figure
+   * (FR-18.6) and any other status-mix reporting governance composes from it.
+   * Statuses with zero rows are simply absent from the map — the caller
+   * treats a missing key as `0`, the same convention
+   * `GovernanceComplaintsPort#countComplaintsByStatus`'s null-object
+   * provider uses.
+   */
+  async countByStatus(executor: Executor = this.db): Promise<Partial<Record<ConsultationStatus, number>>> {
+    const rows = await executor
+      .select({ status: consultationsTable.status, count: sql<string>`count(*)` })
+      .from(consultationsTable)
+      .groupBy(consultationsTable.status);
+
+    const result: Partial<Record<ConsultationStatus, number>> = {};
+    for (const row of rows) {
+      result[row.status] = Number(row.count);
+    }
+    return result;
+  }
+
+  /**
    * THE ADMIN RESOLUTION QUEUE. Reads back the `audit_log` rows this module
    * writes with `entity_type = 'booking_admin_resolution'` — see
    * `booking.constants.ts` for why the queue is an audit entity rather than a

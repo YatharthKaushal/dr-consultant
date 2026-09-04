@@ -1040,6 +1040,11 @@ export class BookingService {
     return this.repo.listAdminResolutionQueue(limit, offset);
   }
 
+  /** ADDITIVE (M-20/governance and quality) — see `booking.repository.ts#countByStatus`. */
+  async countByStatus(): Promise<Partial<Record<ConsultationStatus, number>>> {
+    return this.repo.countByStatus();
+  }
+
   /**
    * The pre-booking bill, so a patient sees the total before committing to a
    * slot. Wrapped like every other port call.

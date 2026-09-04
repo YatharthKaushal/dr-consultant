@@ -1,4 +1,12 @@
 import type { DoctorPresence } from '../../schema/enums.schema';
+import type { DoctorReliabilityMetrics } from './doctor-reliability.service';
+
+/**
+ * Re-exported so a caller across a module boundary (M-20/governance) can name
+ * the type from `DoctorContract` alone, never reaching past this file into
+ * `doctor-reliability.service.ts` (`backend/README.md` §2 — no deep import).
+ */
+export type { DoctorReliabilityMetrics };
 
 export interface PublicDoctorSpecialty {
   id: string;
@@ -164,6 +172,20 @@ export interface DoctorContract {
 
   /** THE BOOT SWEEP: reset every doctor in `from` to `to`, because after a restart no realtime channel exists to vouch for them. Returns the doctors actually moved. */
   resetPresence(input: ResetPresenceInput): Promise<{ doctorIds: string[] }>;
+
+  /**
+   * ADDITIVE (M-20/governance and quality): FR-18.6's "doctor reliability
+   * metrics covering acceptance rate, no-show rate and case summary
+   * completion", exposed on the facade so governance's quality dashboard can
+   * read it through composition rather than a deep import of
+   * `doctor-reliability.service.ts`.
+   *
+   * A THIN WRAPPER, NOT NEW LOGIC: this is the exact computation
+   * `admin/doctors/:id/reliability` (`doctor-admin.controller.ts`) already
+   * served before M-20 existed. Throws the same `doctorNotFound` a bad id
+   * throws there — see `DoctorReliabilityService#getMetrics`.
+   */
+  getReliabilityMetrics(doctorId: string): Promise<DoctorReliabilityMetrics>;
 }
 
 /** Who is driving a presence or completion-gate write. `system` is the router and the sweeps; `doctor` is a self-service change; `admin` is an operator override. */
