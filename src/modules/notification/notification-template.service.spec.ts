@@ -301,6 +301,38 @@ describe('NotificationTemplateService', () => {
         }),
       ).resolves.toBeDefined();
     });
+
+    /* -------------------------------------------------------------------- *
+     * THE CODE IS NOT PRIVATE BOOKKEEPING.
+     *
+     * Only `title` and `body` were screened, and an admin may invent any code
+     * `TEMPLATE_CODE_PATTERN` accepts — `you_have_diabetes` among them. The
+     * code is written to `notifications.template_code`, put in the FCM `data`
+     * block and projected back to the app by `notification.mapper.ts`, which
+     * is the same reasoning that already puts `deepLinkData` under the
+     * screen. Underscores normalise to spaces, so a code screens as the
+     * phrase it spells.
+     * -------------------------------------------------------------------- */
+    it.each([['you_have_diabetes'], ['hiv_result_ready'], ['cancer_followup'], ['diagnosis_ready']])(
+      'refuses the template code %s, however clean the copy is',
+      async (code) => {
+        await expect(
+          service.upsertTemplate(ADMIN_ID, code, { title: 'An update', body: 'Tap to open the app.' }),
+        ).rejects.toMatchObject({
+          status: 409,
+          response: { code: 'NOTIFICATION_TEMPLATE_NAMES_DIAGNOSIS' },
+        });
+
+        expect(repo.upsert).not.toHaveBeenCalled();
+        expect(db.transaction).not.toHaveBeenCalled();
+      },
+    );
+
+    it('still accepts an ordinary new code', async () => {
+      await expect(
+        service.upsertTemplate(ADMIN_ID, 'followup_overdue', { title: 'An update', body: 'Tap to open the app.' }),
+      ).resolves.toMatchObject({ code: 'followup_overdue' });
+    });
   });
 
   /* ====================================================================== */

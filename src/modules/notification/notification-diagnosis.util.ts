@@ -371,8 +371,26 @@ export function screenAllForDiagnosis(pieces: readonly string[]): DiagnosisScree
   return CLEAN;
 }
 
-/** Depth cap for `collectStrings` — deep-link payloads are flat by nature, and an unbounded walk on caller-supplied JSON is a denial-of-service shape. */
-const MAX_DEEP_LINK_DEPTH = 6;
+/**
+ * Work cap for `collectStrings`, counted in NODES VISITED rather than in
+ * depth.
+ *
+ * *** A DEPTH CAP WAS A HOLE, NOT A BOUND. *** This was `depth > 6 -> return
+ * []`, on the reasoning that "deep-link payloads are flat by nature". They
+ * are — right up until someone makes one that is not: a payload of
+ * `{a:{b:{c:{d:{e:{f:{g:'you have diabetes'}}}}}}}` returned NO strings, so
+ * the screen passed it, and the phrase was written to `deep_link_data`,
+ * projected back to the client by `notification.mapper.ts` and put in the FCM
+ * `data` block. Nesting was a one-line way around the send-time screen.
+ *
+ * A node budget bounds the same denial-of-service shape without making
+ * depth the thing that hides text, and the walk below is ITERATIVE, so deep
+ * nesting cannot overflow the stack either. Cycles are handled by identity
+ * (`seen`) rather than by running out of depth — the old walk terminated on a
+ * self-referential object only by re-collecting the same strings six times
+ * over.
+ */
+const MAX_DEEP_LINK_NODES = 10_000;
 
 /**
  * Every string value reachable in a deep-link payload, so the screen covers
@@ -388,15 +406,34 @@ const MAX_DEEP_LINK_DEPTH = 6;
  * Object KEYS are collected as well as values: `{ diabetes: true }` names a
  * diagnosis just as surely as `{ tag: 'diabetes' }` does.
  */
-export function collectStrings(value: unknown, depth = 0): string[] {
-  if (depth > MAX_DEEP_LINK_DEPTH) return [];
-  if (typeof value === 'string') return [value];
-  if (Array.isArray(value)) return value.flatMap((entry) => collectStrings(entry, depth + 1));
-  if (typeof value === 'object' && value !== null) {
-    return Object.entries(value as Record<string, unknown>).flatMap(([key, entry]) => [
-      key,
-      ...collectStrings(entry, depth + 1),
-    ]);
+export function collectStrings(value: unknown): string[] {
+  const found: string[] = [];
+  const seen = new WeakSet<object>();
+  const pending: unknown[] = [value];
+  let budget = MAX_DEEP_LINK_NODES;
+
+  while (pending.length > 0 && budget > 0) {
+    budget -= 1;
+    const current = pending.pop();
+
+    if (typeof current === 'string') {
+      found.push(current);
+      continue;
+    }
+    if (typeof current !== 'object' || current === null) continue;
+    // A structure that points back at itself is walked once, not six times.
+    if (seen.has(current)) continue;
+    seen.add(current);
+
+    if (Array.isArray(current)) {
+      for (const entry of current) pending.push(entry);
+      continue;
+    }
+    for (const [key, entry] of Object.entries(current as Record<string, unknown>)) {
+      found.push(key);
+      pending.push(entry);
+    }
   }
-  return [];
+
+  return found;
 }

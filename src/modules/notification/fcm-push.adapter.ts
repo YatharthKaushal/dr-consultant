@@ -190,6 +190,16 @@ export class FcmPushAdapter implements PushProvider {
    */
   private readCredentials(app: PushAppKey): FcmCredentials | null {
     const env = getEnv();
+    /* --- EVERY APP KEY IS NAMED, AND THERE IS NO `else` -------------------- *
+     * This was `app === 'patient' ? patientEnv : doctorEnv`, which made the
+     * DOCTOR project the fallback for ANY key that is not `'patient'`. The
+     * type says that cannot happen; the type is also the only thing that says
+     * so, and a value reaching here from `audience.kind` crosses a module
+     * boundary that M-13 mirrors rather than imports. A ternary that sends an
+     * unrecognised audience through the doctor app's Firebase credentials is
+     * the exact cross-app delivery two store listings exist to prevent, so an
+     * unrecognised key is UNCONFIGURED — which the module already degrades
+     * safely (row written, push recorded as undelivered). */
     const raw =
       app === 'patient'
         ? {
@@ -197,13 +207,15 @@ export class FcmPushAdapter implements PushProvider {
             clientEmail: env.FCM_PATIENT_CLIENT_EMAIL,
             privateKey: env.FCM_PATIENT_PRIVATE_KEY,
           }
-        : {
-            projectId: env.FCM_DOCTOR_PROJECT_ID,
-            clientEmail: env.FCM_DOCTOR_CLIENT_EMAIL,
-            privateKey: env.FCM_DOCTOR_PRIVATE_KEY,
-          };
+        : app === 'doctor'
+          ? {
+              projectId: env.FCM_DOCTOR_PROJECT_ID,
+              clientEmail: env.FCM_DOCTOR_CLIENT_EMAIL,
+              privateKey: env.FCM_DOCTOR_PRIVATE_KEY,
+            }
+          : null;
 
-    if (!raw.projectId || !raw.clientEmail || !raw.privateKey) return null;
+    if (raw === null || !raw.projectId || !raw.clientEmail || !raw.privateKey) return null;
 
     return {
       projectId: raw.projectId,
