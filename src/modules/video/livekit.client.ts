@@ -62,10 +62,26 @@ export interface LivekitWebhookDelivery {
  * line or a token PAYLOAD — a token is signed WITH it, not by carrying it."
  *
  * Concretely, in this file:
- *   - the secret is a `private readonly` field with NO getter. Contrast
+ *   - the secret is an ECMAScript `#private` field with NO getter. Contrast
  *     `RazorpayClient`, which exposes `getWebhookSecret()` because its webhook
  *     service computes the HMAC itself; here the SDK's `WebhookReceiver` does
  *     the verifying, so the secret has no reason to leave at all and does not.
+ *
+ *     *** `#apiSecret` AND NOT `private apiSecret`, AND THE DIFFERENCE IS REAL.
+ *     *** TypeScript's `private` is a COMPILE-TIME annotation and nothing else:
+ *     the emitted field is an ordinary enumerable property, so
+ *     `JSON.stringify(client)` returns the secret in plain text. That is one
+ *     careless spread away from a response body — `{ ...client, ok: true }`
+ *     compiles, passes review, and ships a credential. A `#` field is a real
+ *     JavaScript private: invisible to `JSON.stringify`, `Object.keys`,
+ *     `structuredClone` and every logger that formats an object. This was
+ *     caught by `video.secret-leak.spec.ts`, which failed on the `private`
+ *     version — the test earning its keep before the code was ever deployed.
+ *
+ *     `#receiver` is private for the same reason and not for tidiness: the
+ *     SDK's `WebhookReceiver` stores the key and secret on its own
+ *     `verifier`, so an enumerable `receiver` would leak the secret one level
+ *     down even with `#apiSecret` in place.
  *   - `getServerUrl()` and `getApiKey()` DO exist. The URL is what the mobile
  *     client dials, and the API key is the token's `iss` claim — public by
  *     construction, the same way `gatewayKeyId` is Razorpay's publishable key.
@@ -94,17 +110,17 @@ export class LivekitClient {
 
   private readonly serverUrl: string;
   private readonly apiKey: string;
-  /** *** NEVER EXPOSED. There is no getter, by design. *** */
-  private readonly apiSecret: string;
-
-  private readonly receiver: WebhookReceiver;
+  /** *** NEVER EXPOSED. No getter, and a real `#private` so it cannot be serialised out. See the class header. *** */
+  readonly #apiSecret: string;
+  /** `#private` too — the SDK stores the secret on its own `verifier`. */
+  readonly #receiver: WebhookReceiver;
 
   constructor() {
     const env = getEnv();
     this.serverUrl = env.LIVEKIT_URL;
     this.apiKey = env.LIVEKIT_API_KEY;
-    this.apiSecret = env.LIVEKIT_API_SECRET;
-    this.receiver = new WebhookReceiver(this.apiKey, this.apiSecret);
+    this.#apiSecret = env.LIVEKIT_API_SECRET;
+    this.#receiver = new WebhookReceiver(this.apiKey, this.#apiSecret);
   }
 
   /**
@@ -180,7 +196,7 @@ export class LivekitClient {
     ttlSeconds: number;
   }): Promise<string | null> {
     try {
-      const token = new AccessToken(this.apiKey, this.apiSecret, {
+      const token = new AccessToken(this.apiKey, this.#apiSecret, {
         identity: input.identity,
         name: input.displayName,
         ttl: input.ttlSeconds,
@@ -228,7 +244,7 @@ export class LivekitClient {
     const body = rawBody.toString('utf8');
 
     try {
-      const event = await this.receiver.receive(body, authHeader);
+      const event = await this.#receiver.receive(body, authHeader);
       return this.toDelivery(event, body);
     } catch (error) {
       // A rejected delivery is a security event, so it is logged — but at
