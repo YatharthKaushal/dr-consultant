@@ -336,6 +336,16 @@ describe('Video webhooks — the primary key, the left_at guard and the CHECK (i
       expect(row.leftAt).toEqual(leftAt);
       expect(row.disconnectReason).toBe('SIGNAL_CLOSE');
       expect(await repo.countConnections(fixtures.consultationId)).toBe(1);
+
+      // *** AND THE CALL WAS STILL STARTED, EXACTLY ONCE. *** The row was only
+      // half the job: the status move lived solely on the `participant_joined`
+      // path, which then saw its own late redelivery as a duplicate and did
+      // nothing — so a consultation whose join deliveries lost the race stayed
+      // `scheduled` for ever, and the `room_finished` that followed refused.
+      // The `findConnection` miss that drives this is REAL SQL against the real
+      // primary key, which is the only thing that can prove the late join does
+      // not repeat it.
+      expect(statusMoves).toEqual([{ to: 'in_progress', consultationId: fixtures.consultationId }]);
     });
   });
 

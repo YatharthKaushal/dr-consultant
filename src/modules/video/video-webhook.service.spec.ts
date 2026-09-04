@@ -63,11 +63,20 @@ function delivery(overrides: Partial<LivekitWebhookDelivery> = {}): LivekitWebho
   };
 }
 
-function build(overrides: { inserted?: boolean; closed?: boolean; booking?: BookingView | null } = {}) {
+function build(
+  overrides: {
+    inserted?: boolean;
+    closed?: boolean;
+    booking?: BookingView | null;
+    /** What `findConnection` answers — an existing row means this leave is closing a join we already recorded. */
+    known?: { livekitParticipantSid: string } | undefined;
+  } = {},
+) {
   const livekit = { verifyWebhook: jest.fn() };
   const repo = {
     insertConnectionIfNew: jest.fn().mockResolvedValue(overrides.inserted ?? true),
     closeConnection: jest.fn().mockResolvedValue(overrides.closed ?? true),
+    findConnection: jest.fn().mockResolvedValue(overrides.known ?? undefined),
   };
   const video = {
     markCallStarted: jest.fn().mockResolvedValue(undefined),
@@ -287,6 +296,37 @@ describe('VideoWebhookService', () => {
       await service.handle(delivery({ event: 'participant_left' }));
 
       expect(video.endSession).not.toHaveBeenCalled();
+    });
+
+    /**
+     * *** A LEAVE THAT OVERTOOK ITS OWN JOIN ALSO HAS TO START THE CALL. ***
+     *
+     * `closeConnection` is an upsert precisely so this delivery is not lost —
+     * but the row was only half the job. The status move lived exclusively on
+     * the `participant_joined` path, and that path then saw its own late
+     * redelivery as a `duplicate` and did nothing. So a consultation whose
+     * join deliveries lost the race stayed `scheduled` for ever: never
+     * `in_progress`, the doctor never taken out of the routing pool, and the
+     * `room_finished` that followed refused (`awaiting_documentation` is legal
+     * only from `in_progress`) — a call with connection rows to prove it
+     * happened and a status machine that never noticed.
+     */
+    it('*** STARTS THE CALL when the leave had to CREATE the row — the join was never seen ***', async () => {
+      const { service, video } = build({ known: undefined });
+
+      await service.handle(
+        delivery({ event: 'participant_left', participant: { ...delivery().participant!, sid: 'PA_ooo' } }),
+      );
+
+      expect(video.markCallStarted).toHaveBeenCalledWith(CONSULTATION_ID);
+    });
+
+    it('does NOT re-start the call when the leave is closing a join we already recorded', async () => {
+      const { service, video } = build({ known: { livekitParticipantSid: 'PA_abcdef' } });
+
+      await service.handle(delivery({ event: 'participant_left' }));
+
+      expect(video.markCallStarted).not.toHaveBeenCalled();
     });
 
     it('treats a redelivery as a duplicate and does not re-audit', async () => {

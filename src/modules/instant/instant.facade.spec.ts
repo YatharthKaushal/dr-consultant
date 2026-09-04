@@ -23,6 +23,8 @@ function buildHarness() {
       blockedByConsultationId: CONSULTATION_ID,
     })),
     clearCompletionGate: jest.fn(async () => ({ changed: true, doctorId: DOCTOR_ID, blockedByConsultationId: null })),
+    markConsultInProgress: jest.fn(async () => ({ changed: true, doctorId: DOCTOR_ID, presence: 'in_consultation' })),
+    markConsultEnded: jest.fn(async () => ({ changed: true, doctorId: DOCTOR_ID, presence: 'available_now' })),
     getInstantConsult: jest.fn(async () => ({
       consultationId: CONSULTATION_ID,
       doctorId: DOCTOR_ID,
@@ -65,6 +67,22 @@ describe('InstantFacade', () => {
     expect(instant.markInstantConsultEnded).toHaveBeenCalledWith(CONSULTATION_ID);
   });
 
+  /**
+   * The pair. `markConsultInProgress` had no inverse on this surface, and
+   * because `in_consultation` is a state the boot sweep, the disconnect handler
+   * and `LEGAL_PRESENCE_TRANSITIONS.offline` all deliberately refuse to leave,
+   * that made it a one-way door for every SCHEDULED consultation.
+   */
+  it('*** M-14 TAKES THE DOCTOR OUT OF THE POOL AND PUTS THEM BACK, BOTH THROUGH HERE ***', async () => {
+    const { facade, instant } = buildHarness();
+
+    await expect(facade.markConsultInProgress(CONSULTATION_ID)).resolves.toMatchObject({ presence: 'in_consultation' });
+    await expect(facade.markConsultEnded(CONSULTATION_ID)).resolves.toMatchObject({ presence: 'available_now' });
+
+    expect(instant.markConsultInProgress).toHaveBeenCalledWith(CONSULTATION_ID);
+    expect(instant.markConsultEnded).toHaveBeenCalledWith(CONSULTATION_ID);
+  });
+
   it('this form applies NO ownership check — a trusted module-to-module call, the caller authorizes', async () => {
     const { facade, instant } = buildHarness();
 
@@ -100,6 +118,11 @@ describe('InstantFacade', () => {
       'clearCompletionGate',
       'getInstantConsult',
       'getPresence',
+      // The pair M-14 needs: the call started, and — the half that was missing
+      // — the call ended. `in_consultation` is a state nothing else ever
+      // leaves, so the way in is only safe while the way out is on the surface
+      // beside it.
+      'markConsultEnded',
       'markConsultInProgress',
       'markInstantConsultEnded',
     ]);
