@@ -30,7 +30,7 @@
  * else. It is kept OUT of the module seeds on purpose: those are things a real
  * deployment wants, and a demo patient with a made-up phone number is not.
  *
- * ── THE FIVE THINGS NOTHING ELSE CREATES ───────────────────────────────────
+ * ── THE SEVEN THINGS NOTHING ELSE CREATES ──────────────────────────────────
  *
  *  1. A PATIENT, `status = 'active'` (the column defaults to `pending`, which
  *     is a half-finished sign-up, not a bookable account).
@@ -75,6 +75,32 @@
  *     must read `GET /api/legal-documents/teleconsultation_consent` first —
  *     and that 404s until a row here carries `is_current = true`.
  *
+ *  6. THE `general` FOLLOW-UP PATHWAY, published. Without it, finalising the
+ *     demo consultation above (M-15 -> M-16, `followup-clinical.listener.ts`)
+ *     log-and-skips with `PATHWAY_NOT_FOUND` — M-16, "the core
+ *     differentiator" per the client's own `docs/MODULES.md`, would stay
+ *     invisible even after exercising this script's own instructions below.
+ *     `general` specifically, because it is the pathway EVERY concern falls
+ *     back to (`CONCERN_TO_PATHWAY_CODE`'s `DEFAULT_PATHWAY_CODE`) — the demo
+ *     booking above never sets a `concernId`, so `general` is exactly what it
+ *     will be assigned. Delegates to `followup.seed.ts#seedPathway`, not a
+ *     re-authored row — see that file's header for the full reasoning.
+ *
+ *  7. THE `emergency-guidance` CONTENT ITEM, published. FR-15.7's "persistent,
+ *     clearly worded emergency guidance" is patient-safety content, not a
+ *     nice-to-have, and no other step above creates it. Delegates to
+ *     `carehub.seed.ts#seedContentItem`, not a re-authored row — see that
+ *     file's header.
+ *
+ *     *** THE REST OF `followup.seed.ts` AND `carehub.seed.ts` ARE NOT
+ *     FOLDED IN. *** Only the one row from each that the demo chain actually
+ *     needs to be non-empty is. The other four pathways and nine content
+ *     items are real, reference-data-shaped content an admin wants in any
+ *     deployment, not demo-only scaffolding — `npm run db:seed:followup` and
+ *     `npm run db:seed:carehub` seed them, same as `catalogue`/`pricing`/
+ *     `promotion` are separate from this file for the same reason (see this
+ *     file's own header, "kept OUT of the module seeds on purpose").
+ *
  * ── IDEMPOTENT AND RE-RUNNABLE ─────────────────────────────────────────────
  *
  * Every write is keyed on a natural key (the demo phone numbers, the demo
@@ -90,6 +116,8 @@
 import { and, eq } from 'drizzle-orm';
 import { connectDatabase, disconnectDatabase, type Database } from './config/db/database.config';
 import { loadEnvFiles } from './config/env/env.validation';
+import { EMERGENCY_GUIDANCE, seedContentItem } from './modules/carehub/carehub.seed';
+import { GENERAL_PATHWAY_DEFINITION, seedPathway } from './modules/followup/followup.seed';
 import { doctorAvailabilityTable } from './schema/doctor-availability.schema';
 import { doctorSpecialtiesTable } from './schema/doctor-specialties.schema';
 import { doctorsTable } from './schema/doctors.schema';
@@ -129,6 +157,8 @@ interface SeedSummary {
   doctorSpecialty: { created: boolean };
   availability: { weeklyRulesCreated: number; weeklyRulesAlreadyPresent: number };
   legalDocument: { id: string; version: string; created: boolean; reusedExistingCurrent: boolean };
+  followupPathway: { code: string; id: string; version: number; outcome: string };
+  emergencyGuidance: { slug: string; outcome: string };
 }
 
 /* -------------------------------------------------------------------------- */
@@ -355,7 +385,20 @@ async function seed(): Promise<SeedSummary> {
   const availability = await seedAvailability(db, doctor.id);
   const legalDocument = await seedLegalDocument(db);
 
-  return { patient, specialty, doctor, doctorSpecialty, availability, legalDocument };
+  // 6 and 7: delegate to the module seeds' own idempotent logic — see the
+  // header for why these two rows specifically are folded in here.
+  const followupPathwayResult = await seedPathway(db, GENERAL_PATHWAY_DEFINITION);
+  const followupPathway = {
+    code: followupPathwayResult.code,
+    id: followupPathwayResult.id,
+    version: followupPathwayResult.version,
+    outcome: followupPathwayResult.outcome,
+  };
+
+  const emergencyGuidanceOutcome = await seedContentItem(db, EMERGENCY_GUIDANCE);
+  const emergencyGuidance = { slug: EMERGENCY_GUIDANCE.slug, outcome: emergencyGuidanceOutcome };
+
+  return { patient, specialty, doctor, doctorSpecialty, availability, legalDocument, followupPathway, emergencyGuidance };
 }
 
 /** Says plainly what it created, what was already there, and what to do next. */
@@ -378,6 +421,8 @@ function report(summary: SeedSummary): string {
           ? 'reused the existing CURRENT version'
           : 'existing demo version re-promoted to current'
     }`,
+    `  followup pathway general v${summary.followupPathway.version}  id=${summary.followupPathway.id}  ${summary.followupPathway.outcome}`,
+    `  content item     ${summary.emergencyGuidance.slug}  ${summary.emergencyGuidance.outcome}`,
     '',
     '  Exercise it by hand:',
     `    1. POST /api/auth/otp/request  { "mobileNumber": "${summary.patient.mobileNumber}", "audience": "patient" }`,
