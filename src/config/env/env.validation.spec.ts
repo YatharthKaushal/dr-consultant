@@ -10,6 +10,9 @@ const VALID: Record<string, string> = {
   RAZORPAY_KEY_ID: 'rzp_test_1234567890',
   RAZORPAY_KEY_SECRET: 'rzp_secret_1234567890',
   RAZORPAY_WEBHOOK_SECRET: 'whsec_1234567890',
+  LIVEKIT_URL: 'wss://livekit.test.invalid',
+  LIVEKIT_API_KEY: 'devkey_test',
+  LIVEKIT_API_SECRET: 'livekit_secret_1234567890',
 };
 
 describe('env.validation', () => {
@@ -165,6 +168,9 @@ describe('env.validation', () => {
       'RAZORPAY_KEY_ID',
       'RAZORPAY_KEY_SECRET',
       'RAZORPAY_WEBHOOK_SECRET',
+      'LIVEKIT_URL',
+      'LIVEKIT_API_KEY',
+      'LIVEKIT_API_SECRET',
     ]);
     expect(Object.keys(envSchema.shape)).toContain('CORS_ORIGIN');
   });
@@ -181,6 +187,33 @@ describe('env.validation', () => {
    * finding that out at the first checkout instead of at boot is strictly
    * worse. Same precedent as `SLIDE_API_KEY`.
    */
+  /**
+   * modules/video (M-14). LiveKit's three variables are REQUIRED for the same
+   * reason Razorpay's are and the OPPOSITE reason the FCM ones are optional:
+   * it is the sole video provider, it is SELF-HOSTED so there is no managed
+   * fallback, and a deployment missing a key cannot run a single consultation.
+   * A push that fails degrades to "recorded, not delivered"; a video join that
+   * fails is the consultation not happening.
+   */
+  it.each([['LIVEKIT_URL'], ['LIVEKIT_API_KEY'], ['LIVEKIT_API_SECRET']])(
+    'exits(1) when %s is missing — video has no fallback provider',
+    (key) => {
+      const incomplete = { ...VALID };
+      delete (incomplete as Record<string, unknown>)[key];
+
+      expect(() => validateEnv(incomplete)).toThrow('process.exit:1');
+      expect(stderrSpy.mock.calls.map((call) => String(call[0])).join('')).toContain(`- ${key}`);
+    },
+  );
+
+  it('exposes the LiveKit credentials typed', () => {
+    const env = validateEnv(VALID);
+
+    expect(env.LIVEKIT_URL).toBe('wss://livekit.test.invalid');
+    expect(env.LIVEKIT_API_KEY).toBe('devkey_test');
+    expect(env.LIVEKIT_API_SECRET).toBe('livekit_secret_1234567890');
+  });
+
   it.each([['RAZORPAY_KEY_ID'], ['RAZORPAY_KEY_SECRET'], ['RAZORPAY_WEBHOOK_SECRET']])(
     'refuses to boot without %s — Razorpay is the only gateway, so there is no degraded mode',
     (key) => {

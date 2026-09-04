@@ -5,8 +5,9 @@ import { FastifyAdapter, NestFastifyApplication } from '@nestjs/platform-fastify
 import { AppModule } from './app.module';
 import { getEnv } from './config/env/env.validation';
 import { DOCUMENT_UPLOAD_HARD_CEILING_BYTES } from './modules/document/document.constants';
-import { registerWebhookSafeJsonParser } from './modules/payment/payment-webhook.body-parser';
 import { PAYMENT_WEBHOOK_PATH } from './modules/payment/payment.constants';
+import { VIDEO_WEBHOOK_PATH } from './modules/video/video.constants';
+import { registerWebhookSafeJsonParser } from './shared/http/webhook-safe-json.parser';
 
 async function bootstrap(): Promise<void> {
   // Validate the environment before anything else is constructed. On a missing
@@ -79,13 +80,23 @@ async function bootstrap(): Promise<void> {
   // Required for DatabaseModule.onApplicationShutdown to drain the pool.
   app.enableShutdownHooks();
 
-  // *** M-12: the Razorpay webhook must survive a body that is not valid JSON.
+  // *** EVERY SIGNED WEBHOOK MUST SURVIVE A BODY THAT IS NOT VALID JSON. ***
   //
   // Fastify's stock JSON parser answers 400 before any controller runs, which
-  // would make an authentic-but-unparseable delivery unrecordable AND have
-  // Razorpay retry it forever. Only the webhook path is exempted; every other
-  // route keeps Fastify's exact previous behaviour. The rule and its reasoning
-  // live in the payment module, next to the code that depends on them.
+  // would make an authentic-but-unparseable delivery unrecordable AND have the
+  // provider retry it forever. Both webhooks here verify a signature over the
+  // RAW BYTES, so both need the exemption for the same reason: Razorpay's HMAC
+  // (M-12) and LiveKit's `WebhookReceiver` (M-14).
+  //
+  // ONLY these paths are exempted; every other route keeps Fastify's exact
+  // previous behaviour, byte for byte. The rule and its reasoning live in
+  // `shared/http/webhook-safe-json.parser.ts` — shared rather than inside one
+  // module, because two modules now depend on it and a rule cannot live inside
+  // one of its two consumers.
+  //
+  // Each path is imported from the module that owns the route rather than
+  // written as a literal here, so it cannot silently stop matching the day a
+  // route moves.
   //
   // *** ORDERING IS LOAD-BEARING. *** This must run AFTER `app.init()` and
   // BEFORE `app.listen()`. Nest registers its own `application/json` parser
@@ -96,7 +107,10 @@ async function bootstrap(): Promise<void> {
   // triggers, so it cannot go any later. `init()` is idempotent and `listen()`
   // calls it again harmlessly.
   await app.init();
-  registerWebhookSafeJsonParser(app.getHttpAdapter().getInstance(), PAYMENT_WEBHOOK_PATH);
+  registerWebhookSafeJsonParser(app.getHttpAdapter().getInstance(), [
+    PAYMENT_WEBHOOK_PATH,
+    VIDEO_WEBHOOK_PATH,
+  ]);
 
   await app.listen(env.PORT, '0.0.0.0');
 

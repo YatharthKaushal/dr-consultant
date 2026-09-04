@@ -87,6 +87,33 @@ const requiredEnv = z.object({
   RAZORPAY_KEY_ID: z.string().min(1, 'must be the Razorpay key id (e.g. rzp_test_... or rzp_live_...)'),
   RAZORPAY_KEY_SECRET: z.string().min(1),
   RAZORPAY_WEBHOOK_SECRET: z.string().min(1),
+
+  /**
+   * LiveKit (`modules/video`, M-14). REQUIRED, on the Razorpay side of the line
+   * above rather than the FCM side below.
+   *
+   * The FCM keys are optional because a missing push credential degrades to
+   * "recorded but not delivered" and a malformed one must not stop the server
+   * booting — a notification failure must never take down a consultation. The
+   * reverse is true here: LiveKit is the SOLE video provider this release
+   * integrates, it is SELF-HOSTED so there is no managed fallback, and a
+   * deployment missing a key cannot run a single consultation. Failing at boot
+   * with the variable named beats failing at the first join with a 500.
+   *
+   * `LIVEKIT_URL` is the self-hosted server the mobile client connects to
+   * (`wss://...`), one per deployment. `LIVEKIT_API_KEY` identifies the
+   * project and appears as the `iss` claim of every join token.
+   *
+   * *** `LIVEKIT_API_SECRET` SIGNS THE JOIN TOKEN AND VERIFIES THE WEBHOOK. ***
+   * It never leaves the server, and it must never appear in a response, a log
+   * line or a token PAYLOAD — a token is signed WITH it, not by carrying it.
+   * It is the only thing standing between the video routes and an attacker
+   * minting themselves a token into any consultation's room, exactly as
+   * `RAZORPAY_WEBHOOK_SECRET` is for the payment webhook.
+   */
+  LIVEKIT_URL: z.string().min(1, 'must be the LiveKit server URL (e.g. wss://livekit.example.com)'),
+  LIVEKIT_API_KEY: z.string().min(1),
+  LIVEKIT_API_SECRET: z.string().min(1),
 });
 
 /* -------------------------------------------------------------------------- */
