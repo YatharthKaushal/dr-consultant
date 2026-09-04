@@ -1,6 +1,8 @@
 import { ConflictException, Injectable, Logger } from '@nestjs/common';
 import type { PaymentStatus, RefundStatus } from '../../schema/enums.schema';
+import type { PaymentRow } from '../../schema/payments.schema';
 import { AuditService } from '../../shared/audit/audit.service';
+import { PricingFacade } from '../pricing/pricing.facade';
 import { PaymentEventRepository } from './payment-event.repository';
 import { PaymentRepository } from './payment.repository';
 import { PaymentService } from './payment.service';
@@ -46,7 +48,47 @@ export class PaymentAdminService {
     private readonly events: PaymentEventRepository,
     private readonly paymentService: PaymentService,
     private readonly audit: AuditService,
+    /**
+     * *** REQUIRED, NOT DECORATIVE: EVERY READ HERE NEEDS A QUOTE TOTAL. ***
+     * See `resolveQuoteTotals`.
+     */
+    private readonly pricing: PricingFacade,
   ) {}
+
+  /**
+   * *** `price_quotes.total_payable` FOR A PAGE OF PAYMENTS, IN ONE QUERY. ***
+   *
+   * `toPaymentAdminView` -> `toBreakdown` -> `capturedTotalPaise`, and
+   * `capturedTotalPaise` THROWS for a payment carrying a `price_quote_id` when
+   * no total is supplied. That refusal is correct and deliberate — re-deriving a
+   * quoted payment's total from the three legacy columns computes a DIFFERENT
+   * number for any bill with a discount or an inclusive component — but it means
+   * the caller must actually resolve it.
+   *
+   * *** THE BUG THIS CLOSES. *** All three reads below called
+   * `toPaymentAdminView(row, refunds)` with the third argument omitted, so it
+   * defaulted to `null`. `createOrderForConsultation` writes a `price_quote_id`
+   * on EVERY payment it creates ("no call site can produce an unpriced
+   * payment"), so the transactions list, the payment detail and the CSV export
+   * each threw a raw `Error` — an unhandled 500 — for every payment written
+   * since the pricing engine merged. The whole admin money surface was down for
+   * current data and green only for legacy fixtures.
+   *
+   * Batched deliberately: `getQuoteTotals` takes a LIST because a per-row lookup
+   * would put one query per row behind a paginated screen and behind a
+   * 50 000-row export.
+   *
+   * Legacy rows (`price_quote_id IS NULL`) are not in the request at all — they
+   * are priced by `calculateBill` and must keep being, so asking pricing about
+   * them would be meaningless as well as wasteful.
+   */
+  private async resolveQuoteTotals(rows: readonly PaymentRow[]): Promise<Map<string, string | null>> {
+    const quoteIds = [...new Set(rows.map((row) => row.priceQuoteId).filter((id): id is string => id != null))];
+    if (quoteIds.length === 0) return new Map();
+
+    const totals = await this.pricing.getQuoteTotals(quoteIds);
+    return new Map(rows.map((row) => [row.id, row.priceQuoteId == null ? null : (totals[row.priceQuoteId] ?? null)]));
+  }
 
   /** FR-18.4's transactions list. */
   async listPayments(filter: {
@@ -76,8 +118,10 @@ export class PaymentAdminService {
       byPayment.set(refund.paymentId, list);
     }
 
+    const quoteTotals = await this.resolveQuoteTotals(rows);
+
     return {
-      items: rows.map((row) => toPaymentAdminView(row, byPayment.get(row.id) ?? [])),
+      items: rows.map((row) => toPaymentAdminView(row, byPayment.get(row.id) ?? [], quoteTotals.get(row.id) ?? null)),
       total,
       limit: resolved.limit,
       offset: resolved.offset,
@@ -96,8 +140,10 @@ export class PaymentAdminService {
       this.events.listByPaymentId(paymentId),
     ]);
 
+    const quoteTotals = await this.resolveQuoteTotals([payment]);
+
     return {
-      payment: toPaymentAdminView(payment, refunds),
+      payment: toPaymentAdminView(payment, refunds, quoteTotals.get(payment.id) ?? null),
       refunds: refunds.map(toRefundView),
       events: events.map(toPaymentEventView),
     };
@@ -228,10 +274,13 @@ export class PaymentAdminService {
       'created_at',
     ];
 
+    const quoteTotals = await this.resolveQuoteTotals(rows);
+
     const body = rows.map((row) => {
       const view = toPaymentAdminView(
         row,
         refundRows.filter((refund) => refund.paymentId === row.id),
+        quoteTotals.get(row.id) ?? null,
       );
       return [
         view.id,
