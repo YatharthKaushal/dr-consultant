@@ -1,10 +1,12 @@
 import { Injectable } from '@nestjs/common';
 import { DoctorPresenceService } from './doctor-presence.service';
+import { DoctorReliabilityService } from './doctor-reliability.service';
 import { DoctorSpecialtyService } from './doctor-specialty.service';
 import type {
   CompletionGateResult,
   DoctorContract,
   DoctorPresenceState,
+  DoctorReliabilityMetrics,
   DoctorSchedulingParameters,
   DoctorSchedulingParametersById,
   InstantRoutingCandidate,
@@ -25,6 +27,7 @@ export class DoctorFacade implements DoctorContract {
     private readonly doctorService: DoctorService,
     private readonly specialtyService: DoctorSpecialtyService,
     private readonly presenceService: DoctorPresenceService,
+    private readonly reliabilityService: DoctorReliabilityService,
   ) {}
 
   async getPublicProfile(doctorId: string): Promise<PublicDoctorProfile | null> {
@@ -88,5 +91,10 @@ export class DoctorFacade implements DoctorContract {
 
   async resetPresence(input: ResetPresenceInput): Promise<{ doctorIds: string[] }> {
     return this.presenceService.resetPresence(input);
+  }
+
+  /** ADDITIVE (M-20/governance and quality) — see `doctor.contract.ts`. */
+  async getReliabilityMetrics(doctorId: string): Promise<DoctorReliabilityMetrics> {
+    return this.reliabilityService.getMetrics(doctorId);
   }
 }

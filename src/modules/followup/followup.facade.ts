@@ -1,4 +1,5 @@
 import { Injectable } from '@nestjs/common';
+import type { SafetyAlertType } from '../../schema/enums.schema';
 import { FollowupAlertService } from './followup-alert.service';
 import type {
   CarePlanView,
@@ -58,5 +59,15 @@ export class FollowupFacade implements FollowupContract {
 
   async getCarePlan(consultationId: string): Promise<CarePlanView> {
     return this.followup.getCarePlan(consultationId);
+  }
+
+  /** ADDITIVE (M-20/governance and quality) — see `FollowupContract#listOpenAlerts`. */
+  async listOpenAlerts(limit: number, offset: number): Promise<SafetyAlertView[]> {
+    return this.alerts.listOpenAlertsForAdmin(limit, offset);
+  }
+
+  /** ADDITIVE (M-20/governance and quality) — see `FollowupContract#countOpenAlertsByType`. */
+  async countOpenAlertsByType(): Promise<Partial<Record<SafetyAlertType, number>>> {
+    return this.alerts.countOpenAlertsByType();
   }
 }

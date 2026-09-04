@@ -15,6 +15,7 @@ import { ConsentModule } from './modules/consent/consent.module';
 import { DoctorModule } from './modules/doctor/doctor.module';
 import { DocumentModule } from './modules/document/document.module';
 import { FollowupModule } from './modules/followup/followup.module';
+import { GovernanceModule } from './modules/governance/governance.module';
 import { IdentityModule } from './modules/identity/identity.module';
 import { InstantModule } from './modules/instant/instant.module';
 import { McpModule } from './modules/mcp/mcp.module';
@@ -175,6 +176,15 @@ import { ErrorsModule } from './shared/errors/errors.module';
     // Plan's "recommended self-help" section keeps rendering empty via
     // `UnavailableCareHubProvider`, never an error.
     CarehubModule,
+    // M-20: Governance and Quality. Depends on M-11 to M-19
+    // (`docs/MODULES.md`) — imports `BookingModule`, `ClinicalModule`,
+    // `DoctorModule`, `FollowupModule` and `PatientModule` for their facades
+    // and composes every queue/dashboard number live across them; it owns no
+    // table of its own. `ClarificationModule` is deliberately not imported —
+    // see `governance.module.ts`'s header. `GOVERNANCE_COMPLAINTS_PORT`
+    // (the one M-19/Feedback-and-Complaints seam) is bound to the null
+    // object until that parallel worktree merges.
+    GovernanceModule,
     HealthModule,
   ],
 })

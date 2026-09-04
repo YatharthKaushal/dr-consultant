@@ -1,5 +1,5 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { and, asc, desc, eq, gt, isNull } from 'drizzle-orm';
+import { and, asc, desc, eq, gt, isNull, sql } from 'drizzle-orm';
 import type { Database, DatabaseTransaction } from '../../config/db/database.config';
 import { DATABASE } from '../../config/db/database.module';
 import {
@@ -7,7 +7,7 @@ import {
   type CheckinResponseRow,
   type NewCheckinResponseRow,
 } from '../../schema/checkin-responses.schema';
-import type { FollowupStatus } from '../../schema/enums.schema';
+import type { FollowupStatus, SafetyAlertType } from '../../schema/enums.schema';
 import {
   followupAssignmentsTable,
   type FollowupAssignmentRow,
@@ -165,6 +165,31 @@ export class FollowupRepository {
       .orderBy(desc(safetyAlertsTable.createdAt))
       .limit(limit)
       .offset(offset);
+  }
+
+  /**
+   * ADDITIVE (M-20/governance and quality): the dashboard-number companion
+   * to `listOpenAlerts` — FR-18.6's "red flags" and "follow-up alerts"
+   * figures both come from this ONE `GROUP BY alert_type` query. The
+   * governance layer reads `red_flag` as "red flags"/"high-risk alerts" and
+   * sums the remaining four types (`amber`, `missed_checkin`,
+   * `medication_side_effect`, `followup_due`) as "follow-up alerts" — there
+   * is no second table or second query for either number.
+   *
+   * A type with zero open alerts is simply absent from the map.
+   */
+  async countOpenAlertsByType(executor: Executor = this.db): Promise<Partial<Record<SafetyAlertType, number>>> {
+    const rows = await executor
+      .select({ alertType: safetyAlertsTable.alertType, count: sql<string>`count(*)` })
+      .from(safetyAlertsTable)
+      .where(and(isNull(safetyAlertsTable.acknowledgedAt), isNull(safetyAlertsTable.closedAt)))
+      .groupBy(safetyAlertsTable.alertType);
+
+    const result: Partial<Record<SafetyAlertType, number>> = {};
+    for (const row of rows) {
+      result[row.alertType] = Number(row.count);
+    }
+    return result;
   }
 
   async acknowledgeAlert(

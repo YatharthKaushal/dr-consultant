@@ -7,6 +7,8 @@ function createFacade() {
   const clinical = {
     getRecordByConsultationId: jest.fn().mockResolvedValue(null),
     getCarePlanInputs: jest.fn().mockResolvedValue(null),
+    listPendingCaseSummaries: jest.fn().mockResolvedValue([]),
+    countPendingCaseSummaries: jest.fn().mockResolvedValue(0),
   };
   return { facade: new ClinicalFacade(clinical as unknown as ClinicalService), clinical };
 }
@@ -28,6 +30,22 @@ describe('ClinicalFacade', () => {
     expect(clinical.getCarePlanInputs).toHaveBeenCalledWith(CONSULTATION_ID);
   });
 
+  it('delegates the M-20/governance pending-case-summaries queue read', async () => {
+    const { facade, clinical } = createFacade();
+
+    await facade.listPendingCaseSummaries(20, 0);
+
+    expect(clinical.listPendingCaseSummaries).toHaveBeenCalledWith(20, 0);
+  });
+
+  it('delegates the M-20/governance pending-case-summaries dashboard count', async () => {
+    const { facade, clinical } = createFacade();
+
+    await facade.countPendingCaseSummaries();
+
+    expect(clinical.countPendingCaseSummaries).toHaveBeenCalled();
+  });
+
   /**
    * *** THE ABSENCE IS THE CONTRACT. *** Finalising asserts that a clinician
    * did the clinical work, so it is the treating doctor's act through this
@@ -41,6 +59,11 @@ describe('ClinicalFacade', () => {
 
     const surface = Object.getOwnPropertyNames(Object.getPrototypeOf(facade)).filter((name) => name !== 'constructor');
 
-    expect(surface.sort()).toEqual(['getCarePlanInputs', 'getRecordByConsultationId']);
+    expect(surface.sort()).toEqual([
+      'countPendingCaseSummaries',
+      'getCarePlanInputs',
+      'getRecordByConsultationId',
+      'listPendingCaseSummaries',
+    ]);
   });
 });

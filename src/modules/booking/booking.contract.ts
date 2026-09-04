@@ -301,4 +301,18 @@ export interface BookingContract {
     patientId: string;
     updatedAt: Date;
   }>>;
+
+  /**
+   * ADDITIVE (M-20/governance and quality): every consultation status's
+   * current row count, for FR-18.6's "completed cases" quality-dashboard
+   * figure. Deliberately a `GROUP BY`, not a per-status `count(*)` the
+   * caller runs once per status it cares about — one round trip either way.
+   *
+   * A status with zero rows is simply absent from the map; treat a missing
+   * key as `0`. This is a READ of `consultations.status`, nothing more — it
+   * carries no money and answers no question `BookingAdminController`'s own
+   * `admin/bookings` routes don't already answer one status at a time; it
+   * exists only because the dashboard wants every status's count in one call.
+   */
+  countByStatus(): Promise<Partial<Record<ConsultationStatus, number>>>;
 }
