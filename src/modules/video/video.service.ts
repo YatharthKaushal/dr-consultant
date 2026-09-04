@@ -305,12 +305,15 @@ export class VideoService {
       reason: 'video_participant_joined',
     });
 
-    if (result.refusal === 'illegal_transition') {
+    if (result.refusal) {
       // Ordinary, not alarming: a redelivered join for a consultation that has
-      // since ended, or one an admin cancelled mid-call. Logged so an operator
-      // reading a support case can see the sequence.
+      // since ended, one an admin cancelled mid-call, or a room whose
+      // consultation has been deleted. Logged so an operator reading a support
+      // case can see the sequence. Nothing moves the doctor either — there is
+      // no call to take them out of the pool for.
       this.logger.log(
-        `Consultation ${consultationId} did not move to in_progress from ${result.booking?.status ?? 'unknown'}.`,
+        `Consultation ${consultationId} did not move to in_progress from ${result.booking?.status ?? 'unknown'} ` +
+          `(${result.refusal}).`,
       );
       return;
     }
@@ -328,9 +331,22 @@ export class VideoService {
     // fact FR-8.6 hangs off, and a presence write that fails must not cost us
     // it. A failure here is bounded — the doctor is offered one request they
     // must decline, and M-13's acceptance window re-routes it.
+    //
+    // *** `illegal_transition` IS THE ORDINARY ANSWER, NOT AN ALARM. *** M-13
+    // narrows this move to `onlyFrom: ['available_now']`, because that is the
+    // only state an instant offer can land on and therefore the only one it is
+    // safe to take away and give back. Every doctor who is `offline`, `paused`
+    // or `scheduled_only` when their booked call starts is refused here and
+    // left exactly where they are — which is correct, and would be a warning
+    // per consultation if it were logged as one.
     try {
       const presence = await this.instant.markConsultInProgress(consultationId);
-      if (presence.refusal) {
+      if (presence.refusal === 'illegal_transition') {
+        this.logger.debug(
+          `Consultation ${consultationId} started; the doctor was not moved to in_consultation ` +
+            `(they were not in the routing pool). Nothing to take away, and nothing to give back.`,
+        );
+      } else if (presence.refusal) {
         this.logger.warn(
           `Consultation ${consultationId} started but the doctor was not moved to in_consultation ` +
             `(${presence.refusal}); they may be offered an instant request mid-call.`,

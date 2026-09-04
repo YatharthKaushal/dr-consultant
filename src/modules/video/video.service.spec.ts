@@ -508,6 +508,20 @@ describe('VideoService', () => {
       expect(instant.markConsultInProgress).not.toHaveBeenCalled();
     });
 
+    /** A room whose consultation has been deleted. No call, so nothing to take a doctor out of. */
+    it('does not touch presence when the consultation does not exist either', async () => {
+      const { service, bookings, instant } = build();
+      bookings.transitionConsultationStatus.mockResolvedValue({
+        changed: false,
+        booking: null,
+        refusal: 'not_found',
+      });
+
+      await service.markCallStarted(CONSULTATION_ID);
+
+      expect(instant.markConsultInProgress).not.toHaveBeenCalled();
+    });
+
     /** Bounded failure: the doctor is offered one request they must decline, and M-13 re-routes it. */
     it('still succeeds when the presence move throws — the caller is a webhook', async () => {
       const { service, instant } = build();
