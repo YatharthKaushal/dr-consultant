@@ -68,6 +68,7 @@ import { PromotionConfigService } from './promotion-config.service';
 import { PromotionRepository } from './promotion.repository';
 import { PromotionService } from './promotion.service';
 import { ReferralRepository } from './referral.repository';
+import { ReferralService } from './referral.service';
 import { UnavailablePromotionBookingLookupProvider } from './unavailable-promotion-booking-lookup.provider';
 import { PROMOTION_INDEXES } from './promotion.constants';
 import type { DiscountOrderContext } from './promotion.contract';
@@ -81,8 +82,13 @@ interface Fixtures {
   patientIds: string[];
 }
 
-/** Enough patients that a per-patient throttle (20/hour) can never be the reason a test failed. */
-const PATIENT_COUNT = 12;
+/**
+ * Enough patients that a per-patient throttle (20/hour) can never be the reason
+ * a test failed — and enough SPARE ones that the referral tests always have a
+ * referee who has never been referred, since `referral_events_referee_once_idx`
+ * makes that a once-ever fact for the whole run.
+ */
+const PATIENT_COUNT = 15;
 
 async function seedFixtures(db: Database): Promise<Fixtures> {
   const runId = randomUUID().slice(0, 8);
@@ -130,6 +136,23 @@ async function teardown(db: Database, fixtures: Fixtures): Promise<void> {
     .from(discountInstrumentsTable)
     .where(sql`${discountInstrumentsTable.code} like ${'ZZ' + fixtures.runId.toUpperCase() + '%'}`);
 
+  // MINTED REWARDS FIRST. A `kind = 'referral_reward'` instrument carries an FK
+  // to the `referral_events` row that minted it, and its generated `RW…` code
+  // does not match this run's `ZZ…` prefix — so it is invisible to both the
+  // instrument deletes below and would block the event delete above them.
+  const ourEvents = db
+    .select({ id: referralEventsTable.id })
+    .from(referralEventsTable)
+    .where(inArray(referralEventsTable.consultationId, ourConsultations));
+  await db.execute(
+    sql`delete from audit_log where entity_id in (
+          select id::text from discount_instruments
+          where referral_event_id in (
+            select id from referral_events where consultation_id in (
+              select id from consultations where doctor_id = ${fixtures.doctorId}))) `,
+  );
+  await db.delete(discountInstrumentsTable).where(inArray(discountInstrumentsTable.referralEventId, ourEvents));
+
   // `referral_events` -> `discount_redemptions` -> `discount_instruments`, and
   // audit rows reference consultations. Order matters and is not incidental.
   await db.delete(referralEventsTable).where(inArray(referralEventsTable.consultationId, ourConsultations));
@@ -167,6 +190,7 @@ describe('Redemption race — the row lock and the partial unique indexes are th
   let repo: PromotionRepository;
   let referralRepo: ReferralRepository;
   let service: PromotionService;
+  let referralService: ReferralService;
 
   /** Codes are namespaced per run so concurrent runs against a shared dev database cannot collide on `UNIQUE(code)`. */
   let codeSeq = 0;
@@ -201,6 +225,8 @@ describe('Redemption race — the row lock and the partial unique indexes are th
       new UnavailablePromotionBookingLookupProvider(),
       audit,
     );
+
+    referralService = new ReferralService(db, repo, referralRepo, config, audit);
   });
 
   /**
@@ -863,5 +889,187 @@ describe('Redemption race — the row lock and the partial unique indexes are th
     });
 
     expect(result).toMatchObject({ reserved: true, code: coupon.code });
+  });
+
+  /* ====================================================================== */
+  /* THE ENUMERATION THROTTLE, UNDER CONCURRENCY                            */
+  /* ====================================================================== */
+
+  describe('the enumeration throttle is a throttle, not a suggestion', () => {
+    /**
+     * *** THIS IS THE ONLY PLACE THE THROTTLE'S REAL PROPERTY CAN BE PROVED. ***
+     *
+     * `promotion.service.spec.ts` can assert the ORDER of the two calls against
+     * a mock. It cannot demonstrate that an attempt row COMMITS on its own
+     * connection and is therefore visible to every count taken after it, which
+     * is the entire mechanism — exactly as a mocked repository cannot
+     * demonstrate that `SELECT ... FOR UPDATE` serialises two transactions.
+     *
+     * The throttle previously counted BEFORE recording. Forty simultaneous
+     * `preview` calls therefore all read the same pre-write total, all passed a
+     * budget of twenty, and all forty rows landed afterwards — a rate limiter
+     * that only holds against a caller who politely waits their turn, which is
+     * not the caller `promotion-code-attempts.schema.ts` exists to stop.
+     * Walking the unlisted-code namespace is a job for a machine, and a machine
+     * issues its requests at once.
+     */
+    it('*** FORTY SIMULTANEOUS PREVIEWS CANNOT ALL PASS A BUDGET OF TWENTY ***', async () => {
+      const patientId = fixtures.patientIds[0];
+      const budget = 20; // `PROMOTION_CONFIG_FALLBACKS.CODE_ATTEMPTS_PER_PATIENT_PER_HOUR`
+
+      // Every call is ISSUED before any is awaited, so they genuinely contend —
+      // the same shape as the reserve races above.
+      const results = await Promise.all(
+        Array.from({ length: 40 }, () =>
+          // A code that does not exist: this measures the throttle, not the resolver.
+          service.previewForPatient('ZZNOSUCHCODE', context(patientId), null),
+        ),
+      );
+
+      const admitted = results.filter(
+        (result) => result.applicable || result.reason !== 'TOO_MANY_ATTEMPTS',
+      ).length;
+
+      // *** THE ASSERTION. *** Before the fix this was 40.
+      expect(admitted).toBeLessThanOrEqual(budget);
+
+      // And every attempt was still RECORDED, throttled ones included — a
+      // throttle that stops counting once it starts refusing lets an attacker
+      // wait out the window with a burst rather than a trickle.
+      const rows = await db
+        .select({ id: promotionCodeAttemptsTable.id })
+        .from(promotionCodeAttemptsTable)
+        .where(eq(promotionCodeAttemptsTable.patientId, patientId));
+      expect(rows).toHaveLength(40);
+    });
+
+    it('and the budget is still 20 rather than 19 when the calls arrive one at a time', async () => {
+      // Recording first means the count includes the caller's own row, so the
+      // comparison had to move from `>=` to `>`. This is the off-by-one that
+      // change could have introduced, pinned against the real table.
+      const patientId = fixtures.patientIds[1];
+
+      for (let attempt = 1; attempt <= 20; attempt += 1) {
+        const outcome = await service.previewForPatient('ZZNOSUCHCODE', context(patientId), null);
+        expect(outcome).toMatchObject({ reason: 'CODE_NOT_USABLE' });
+      }
+
+      expect(await service.previewForPatient('ZZNOSUCHCODE', context(patientId), null)).toMatchObject({
+        reason: 'TOO_MANY_ATTEMPTS',
+      });
+    });
+  });
+
+  /* ====================================================================== */
+  /* THE PER-REFERRER QUALIFICATION CAP                                     */
+  /* ====================================================================== */
+
+  describe('maxQualifiedReferralsPerReferrer holds across a referrer’s events', () => {
+    /**
+     * *** A COUNT ACROSS MANY ROWS NEEDS A LOCK OVER THE SET IT COUNTS. ***
+     *
+     * `ReferralService.qualify` locks the `referral_events` row it is about to
+     * flip, which is right for "two callers must not qualify the SAME event
+     * twice" and does NOTHING for `maxQualifiedReferralsPerReferrer`, which is
+     * `count(*) WHERE referrer_patient_id = ? AND status = 'qualified'` — a
+     * different set. Two of one referrer's referrals qualifying at the same
+     * moment lock two DIFFERENT rows, each reads a count that excludes the
+     * other, and a cap of 1 mints twice.
+     *
+     * That is not a hypothetical arrangement: `promotion-sweep.service.ts`
+     * states that two processes sweeping at once is harmless and safe, so two
+     * instances WILL do exactly this.
+     *
+     * Only a real database can show it. A mock cannot demonstrate that
+     * `pg_advisory_xact_lock` makes the second caller block until the first
+     * commits and then count a total that already includes it.
+     */
+    it('*** TWO OF ONE REFERRER’S EVENTS QUALIFYING AT ONCE MINT AT MOST ONE REWARD AGAINST A CAP OF 1 ***', async () => {
+      const referrer = fixtures.patientIds[2];
+      const [instrument] = await db
+        .insert(discountInstrumentsTable)
+        .values({
+          code: nextCode(),
+          kind: 'referral',
+          status: 'active',
+          label: 'Referral code',
+          valueKind: 'flat',
+          flatAmount: '100.00',
+          minOrderAmount: '0.00',
+          maxRedemptionsPerUser: 1,
+          referrerPatientId: referrer,
+        })
+        .returning();
+
+      // The programme terms are read from the EVENT'S OWN SNAPSHOT, so the cap
+      // under test is pinned here rather than in `app_config` — this spec must
+      // never write shared configuration.
+      const referrerReward = {
+        enabled: true,
+        valueKind: 'flat',
+        flatAmount: '100.00',
+        percentRate: null,
+        maxDiscountAmount: null,
+        minOrderAmount: '0.00',
+        validityDays: 90,
+        label: 'Referral reward',
+      };
+      const programSnapshot = {
+        enabled: true,
+        refereeMustBeFirstConsultation: false,
+        maxQualifiedReferralsPerReferrer: 1,
+        referrerReward,
+        refereeReward: { ...referrerReward, enabled: false, label: 'Welcome reward' },
+      };
+
+      // Two referees, two consultations, two `qualifying` events for ONE
+      // referrer — the state a pair of concurrent sweeps finds.
+      const eventIds: string[] = [];
+      // Patients 12 and 13 are reserved for this test: being referred is a
+      // once-ever fact, so a referee any earlier test touched is unusable here.
+      for (const [index, referee] of [fixtures.patientIds[12], fixtures.patientIds[13]].entries()) {
+        const consultationId = await createConsultation(referee, 2200 + index * 30);
+        const redemption = await repo.insertRedemption({
+          instrumentId: instrument.id,
+          patientId: referee,
+          consultationId,
+          status: 'consumed',
+          valueKind: 'flat',
+          flatAmount: '100.00',
+          discountableBase: '600.00',
+          discountAmount: '100.00',
+          enforcesSingleUsePerUser: true,
+          expiresAt: holdExpiresAt(),
+        });
+        const event = await referralRepo.insertEvent({
+          referralInstrumentId: instrument.id,
+          referrerPatientId: referrer,
+          refereePatientId: referee,
+          consultationId,
+          redemptionId: redemption.id,
+          status: 'qualifying',
+          programSnapshot,
+        });
+        eventIds.push(event.id);
+      }
+
+      // Both qualifications ISSUED before either is awaited.
+      await Promise.all(eventIds.map((eventId) => referralService.qualify(eventId)));
+
+      // *** THE ASSERTION: ONE REWARD, NOT TWO. *** Before the fix this was 2.
+      const rewards = await db
+        .select({ id: discountInstrumentsTable.id })
+        .from(discountInstrumentsTable)
+        .where(eq(discountInstrumentsTable.assignedPatientId, referrer));
+      expect(rewards).toHaveLength(1);
+
+      // Both events are still `qualified`: they DID qualify, which is a fact
+      // about the consultations. The cap suppresses the REWARD, not the fact.
+      const events = await db
+        .select({ status: referralEventsTable.status })
+        .from(referralEventsTable)
+        .where(inArray(referralEventsTable.id, eventIds));
+      expect(events.map((row) => row.status)).toEqual(['qualified', 'qualified']);
+    });
   });
 });
