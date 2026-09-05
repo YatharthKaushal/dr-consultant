@@ -2,6 +2,7 @@ import { Body, Controller, Get, Param, Patch } from '@nestjs/common';
 import { AccountType, CurrentUser, RequirePermission } from '../../shared/auth/auth.decorator';
 import type { AuthContext } from '../../shared/auth/auth.types';
 import { PERMISSIONS } from '../../shared/auth/permission.catalog';
+import { createUuidValidationPipe } from '../../shared/errors/uuid-param.pipe';
 import { UpdatePatientStatusDto } from './patient.dto';
 import { PatientService } from './patient.service';
 
@@ -24,13 +25,17 @@ export class PatientAdminController {
 
   @Get(':id')
   @RequirePermission(PERMISSIONS.PATIENTS_READ)
-  getById(@Param('id') id: string) {
+  getById(@Param('id', createUuidValidationPipe('id')) id: string) {
     return this.patients.getForAdmin(id);
   }
 
   @Patch(':id/status')
   @RequirePermission(PERMISSIONS.PATIENTS_MANAGE_STATUS)
-  updateStatus(@CurrentUser() auth: AuthContext, @Param('id') id: string, @Body() dto: UpdatePatientStatusDto) {
+  updateStatus(
+    @CurrentUser() auth: AuthContext,
+    @Param('id', createUuidValidationPipe('id')) id: string,
+    @Body() dto: UpdatePatientStatusDto,
+  ) {
     return this.patients.updateStatus(auth.accountId, id, dto.status);
   }
 }
