@@ -78,7 +78,21 @@ const TEST_KIT_HTML = `<!doctype html>
   button { margin-top: 10px; font-size: 14px; padding: 8px 18px; border-radius: 6px; border: none; cursor: pointer; font-weight: 600; background: #2e7d32; color: white; }
   button:disabled { opacity: 0.5; cursor: not-allowed; }
   #status { font-size: 13px; color: #4fc3f7; margin: 14px 0; min-height: 18px; }
-  pre { background: #000; border-radius: 8px; padding: 14px; overflow-x: auto; font-size: 12px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; }
+  #result { display: none; }
+  .crisis { background: #4a1414; border: 1px solid #a33; border-radius: 8px; padding: 12px 14px; margin-bottom: 16px; font-size: 13px; }
+  .guidance { font-size: 14px; margin-bottom: 16px; line-height: 1.5; }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 16px; }
+  .chip { background: #1c1c1c; border: 1px solid #444; border-radius: 999px; padding: 3px 10px; font-size: 12px; color: #ccc; }
+  .chip b { color: #eee; }
+  .section-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: #888; margin: 18px 0 6px; }
+  .doctor-card { background: #1a1a1a; border: 1px solid #333; border-radius: 8px; padding: 12px 14px; margin-bottom: 10px; }
+  .doctor-card .name { font-size: 15px; font-weight: 600; }
+  .doctor-card .meta { font-size: 12px; color: #999; margin-top: 2px; }
+  .doctor-card .reason { font-size: 12px; color: #7fd17f; margin-top: 6px; }
+  .empty { font-size: 13px; color: #888; font-style: italic; }
+  details { margin-top: 20px; }
+  summary { cursor: pointer; font-size: 12px; color: #888; }
+  pre { background: #000; border-radius: 8px; padding: 14px; overflow-x: auto; font-size: 12px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; margin-top: 8px; }
 </style>
 </head>
 <body>
@@ -88,21 +102,76 @@ const TEST_KIT_HTML = `<!doctype html>
   <textarea id="query" placeholder="e.g. I've been feeling anxious and can't sleep for the past two weeks">I've been feeling very anxious and can't sleep well for the past two weeks</textarea>
   <div><button id="go">Send Query</button></div>
   <div id="status"></div>
-  <pre id="out"></pre>
+
+  <div id="result">
+    <div id="crisisBox"></div>
+    <div class="guidance" id="guidanceText"></div>
+
+    <div class="section-label">Matched concerns / specialties</div>
+    <div class="chips" id="matchedChips"></div>
+
+    <div class="section-label">Ranked doctors</div>
+    <div id="doctorList"></div>
+
+    <details>
+      <summary>Raw JSON response</summary>
+      <pre id="out"></pre>
+    </details>
+  </div>
 
 <script>
 (function () {
   var queryEl = document.getElementById('query');
   var goBtn = document.getElementById('go');
   var statusEl = document.getElementById('status');
+  var resultEl = document.getElementById('result');
+  var crisisBoxEl = document.getElementById('crisisBox');
+  var guidanceEl = document.getElementById('guidanceText');
+  var chipsEl = document.getElementById('matchedChips');
+  var doctorListEl = document.getElementById('doctorList');
   var outEl = document.getElementById('out');
+
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+    });
+  }
+
+  /** Replaces {{specialty:code}}/{{concern:code}} tokens with their human label, using guidance.references. */
+  function renderGuidanceText(guidance) {
+    if (!guidance) return '';
+    var byToken = {};
+    (guidance.references || []).forEach(function (ref) { byToken[ref.token] = ref.label; });
+    return escapeHtml(guidance.text).replace(/\{\{[a-z]+:[a-z0-9_]+\}\}/gi, function (token) {
+      return '<b>' + escapeHtml(byToken[token] || token) + '</b>';
+    });
+  }
+
+  function renderChips(data) {
+    var chips = [];
+    (data.matchedSpecialties || []).forEach(function (s) { chips.push('<span class="chip">specialty: <b>' + escapeHtml(s.name) + '</b></span>'); });
+    (data.matchedConcerns || []).forEach(function (c) { chips.push('<span class="chip">concern: <b>' + escapeHtml(c.name) + '</b></span>'); });
+    return chips.length ? chips.join('') : '<span class="empty">No specific match — showing general suggestions in the raw response.</span>';
+  }
+
+  function renderDoctors(results) {
+    if (!results || results.length === 0) return '<div class="empty">No doctors matched this query.</div>';
+    return results.map(function (d) {
+      return '' +
+        '<div class="doctor-card">' +
+          '<div class="name">' + escapeHtml(d.fullName) + '</div>' +
+          '<div class="meta">' + escapeHtml(d.qualification || '') + ' &middot; ' + d.yearsOfExperience + ' yrs &middot; ₹' + escapeHtml(d.consultationFeeInr) + ' &middot; ' + escapeHtml((d.languages || []).join(', ')) + '</div>' +
+          '<div class="reason">' + escapeHtml(d.reason || '') + ' (score ' + d.score + ')</div>' +
+        '</div>';
+    }).join('');
+  }
 
   goBtn.addEventListener('click', async function () {
     var text = queryEl.value.trim();
     if (!text) return;
     goBtn.disabled = true;
     statusEl.textContent = 'Sending to AI search...';
-    outEl.textContent = '';
+    resultEl.style.display = 'none';
 
     try {
       var res = await fetch('/api/search/test-kit/discover', {
@@ -111,13 +180,25 @@ const TEST_KIT_HTML = `<!doctype html>
         body: JSON.stringify({ queryText: text }),
       });
       var body = await res.json();
+
       if (!res.ok) {
         statusEl.textContent = 'Request failed (' + res.status + ').';
-      } else {
-        var interpretation = body.data && body.data.meta ? body.data.meta.interpretation : undefined;
-        statusEl.textContent = 'Done. Interpretation source: ' + (interpretation || 'unknown') + '.';
+        outEl.textContent = JSON.stringify(body, null, 2);
+        resultEl.style.display = 'block';
+        return;
       }
+
+      var data = body.data;
+      statusEl.textContent = 'Done. Interpretation source: ' + (data.meta ? data.meta.interpretation : 'unknown') + '.';
+
+      crisisBoxEl.innerHTML = data.crisis
+        ? '<div class="crisis">' + escapeHtml(JSON.stringify(data.crisis)) + '</div>'
+        : '';
+      guidanceEl.innerHTML = renderGuidanceText(data.guidance);
+      chipsEl.innerHTML = renderChips(data);
+      doctorListEl.innerHTML = renderDoctors(data.results);
       outEl.textContent = JSON.stringify(body, null, 2);
+      resultEl.style.display = 'block';
     } catch (err) {
       statusEl.textContent = 'Could not reach the backend: ' + err.message;
     } finally {
