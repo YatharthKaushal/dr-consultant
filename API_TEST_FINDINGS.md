@@ -63,3 +63,76 @@ and `src/app.bootstrap.ts`.
 
 ---
 
+## 2. FOUND, NOT FIXED — needs a decision: `notification.seed.ts` permanently defeats `listForAdmin()`'s default/custom distinction
+
+**Route:** `GET /api/admin/notifications/templates` (`notification-admin.controller.ts`).
+
+**Exact request that triggers it:** run `npm run db:seed:notifications` (or
+any deployment/dev setup that has ever run it — this shared test database
+has), then `GET /api/admin/notifications/templates` as an admin holding
+`content.manage_notification_templates`, for any of the nine schema-named
+template codes (e.g. `checkin_due`) that no admin has ever actually edited.
+
+**Exact observation:** the response's `source` field for `checkin_due` (and
+every other of the nine seeded codes) is `"custom"`, even though the title/body
+are byte-for-byte the compiled-in default and no admin has ever called
+`PUT /api/admin/notifications/templates/checkin_due`. Confirmed directly
+against Postgres: `select value->'checkin_due' from app_config where
+key='notifications.templates'` returns the exact compiled-in copy — a
+row IS present, it just was never edited by a human.
+
+**Root cause:** `notification-template.service.ts`'s own class doc comment
+defines the field precisely: `"default" = compiled-in, no app_config entry
+yet. "custom" = an admin has edited it.` — `listForAdmin()` computes it as
+`lookupTemplate(stored, code) === null ? 'default' : 'custom'`, i.e. purely
+by "does a key exist in the stored map", never by comparing content.
+`notification.seed.ts`, however, unconditionally writes ALL NINE compiled-in
+templates into that one `app_config` row at seed time (`ON CONFLICT DO
+NOTHING`, but on the KEY `notifications.templates` as a whole — the insert is
+all-nine-or-nothing, not per-template), specifically so — per its own
+comment — "the copy is VISIBLE and EDITABLE in the admin panel from day one."
+That pre-population makes `lookupTemplate(stored, code)` non-null for every
+one of the nine codes on any database the seed has ever touched, so `source`
+reads `'custom'` for all of them **forever**, regardless of whether a human
+ever touched any of them. The admin panel's "this is genuinely default, no
+one has customized it, revert would be a no-op" signal is permanently wrong
+on any seeded deployment — which, per the seed script's own stated purpose,
+is meant to be every real deployment.
+
+**Why this was not patched here:** the actual DELIVERED template content and
+the `DELETE` "revert" behavior are both still correct — `deleteTemplate()`
+doesn't consult `source` at all, so this is a display/informational
+discrepancy, not a functional delivery bug. But the right fix is a genuine
+design choice between at least two different correct directions, and I'm not
+confident which the codebase owners intend:
+  1. Stop the seed script from pre-populating all nine templates into the
+     stored map at all (only write copy an admin has actually customized;
+     `getResolved()`/`findTemplate()` already fall back to
+     `NOTIFICATION_TEMPLATE_DEFAULTS` on a missing/empty row, so nothing
+     about *sending* depends on the seed having run — its own doc comment
+     says exactly this). This changes what a fresh `db:seed:notifications`
+     writes, which may be relied upon elsewhere (e.g. an audit-log row is
+     written per seeded key on first insert).
+  2. Keep the seed as-is, but change `source`'s derivation in
+     `listForAdmin()` to compare the STORED value against
+     `NOTIFICATION_TEMPLATE_DEFAULTS` content instead of mere key presence —
+     a template equal to its compiled-in default reads as `'default'` even
+     if a row exists, and only a value that actually differs reads as
+     `'custom'`. This changes the meaning of `source` for every consumer of
+     `AdminNotificationTemplate` and needs its own confirmation that nothing
+     downstream depends on "a row exists" being the definition.
+
+Either fix is small in code size but changes documented, load-bearing
+behavior (a seed script's contract, or a public admin-facing field's
+semantics) rather than being an obviously-correct one-liner, so per this
+round's discipline it is reported rather than patched. My own test
+(`notification.endpoint.spec.ts`) was adjusted to use a fresh, run-unique
+template code for its PUT/DELETE proof instead of asserting `source ===
+'default'` against one of the nine real, shared, seed-populated codes — both
+to avoid this discrepancy and to avoid mutating shared production-shaped
+config data other tests/deployments read.
+
+**Status: FOUND, NOT FIXED — needs a decision.**
+
+---
+
