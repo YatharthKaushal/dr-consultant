@@ -160,6 +160,14 @@ const optionalEnv = z.object({
   // traffic.
   VIDEO_TEST_KIT_ENABLED: booleanFromEnv(false),
 
+  // *** DEV/STAGING ONLY — SEE `search-test-kit.controller.ts`. *** Same
+  // shape as VIDEO_TEST_KIT_ENABLED: two `@Public()` routes that run
+  // SearchService#discover (a real, billed AI call) with no login and no
+  // patient record — `patientId: null` on the already-supported
+  // "unattributed source" path `search.contract.ts` documents for MCP/
+  // WhatsApp. Defaults to `false`.
+  SEARCH_TEST_KIT_ENABLED: booleanFromEnv(false),
+
   // Auth / JWT tuning. TTLs are a bare `<number><unit>` (s/m/h/d) — both
   // `jsonwebtoken`'s `expiresIn` and identity-token.service.ts's own
   // seconds conversion for the API response parse this shape; validating
