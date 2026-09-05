@@ -391,7 +391,29 @@ if [ "${#MISSING_REQUIRED[@]}" -eq 0 ]; then
   log "Starting the backend under pm2"
   start_or_reload_backend
   pm2 save
-  echo "Backend running under pm2 as 'backend'. 'pm2 startup' once, following its printed instructions, to survive a reboot."
+
+  # `pm2 startup` itself only PRINTS the sudo command needed to register the
+  # systemd unit — it deliberately does not run it (root running arbitrary
+  # printed shell is the sane default), so a one-shot unattended script has to
+  # execute that command itself or this step silently does nothing. Idempotent
+  # (systemctl enable on an already-enabled unit is a no-op) and safe to skip
+  # if this box has no systemd/sudo (e.g. run inside a container) — checked
+  # for explicitly rather than letting `set -e` abort the whole script here.
+  if command -v systemctl >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
+    if [ "$(systemctl is-enabled pm2-"$USER" 2>/dev/null || true)" != "enabled" ]; then
+      log "Registering pm2 to auto-start on reboot"
+      PM2_STARTUP_CMD="$(pm2 startup systemd -u "$USER" --hp "$HOME" 2>&1 | grep -E '^sudo ' || true)"
+      if [ -n "$PM2_STARTUP_CMD" ]; then
+        eval "$PM2_STARTUP_CMD" >/dev/null
+      else
+        warn "Could not determine the 'pm2 startup' command to run — the backend will need 'pm2 resurrect' by hand after a reboot. Run 'pm2 startup' yourself and follow its instructions."
+      fi
+    fi
+  else
+    warn "No systemd/passwordless-sudo available — skipping pm2 reboot-persistence setup. Run 'pm2 startup' by hand if this box needs to survive a reboot."
+  fi
+
+  echo "Backend running under pm2 as 'backend', registered to survive a reboot."
 else
   warn "NOT starting the backend yet — required secrets are still placeholders (listed below). It would only crash-loop on boot."
 fi
