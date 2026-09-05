@@ -235,7 +235,10 @@ const TEST_KIT_HTML = `<!doctype html>
       return;
     }
 
-    var data = await res.json();
+    // Every route in this app wraps a successful body in { success, data } —
+    // see response.interceptor.ts. The token fields are one level deeper than
+    // they look.
+    var data = (await res.json()).data;
     setStatus('Connecting to ' + data.serverUrl + ' as ' + data.identity + '...');
 
     room = new LivekitClient.Room();
