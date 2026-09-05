@@ -391,20 +391,16 @@ describe('M-08 Notification — HTTP endpoints, real app.inject(), real Postgres
     /**
      * *** A RUN-UNIQUE CODE, NOT ONE OF THE NINE REAL SEEDED CODES. ***
      *
-     * `notification.seed.ts` writes ALL NINE compiled-in templates into the
-     * one `notifications.templates` `app_config` row at seed time (so the
-     * panel is non-empty "from day one") — which this shared database has
-     * already had run against it. That pre-population means
-     * `listForAdmin()`'s `source` is 'custom' for every one of the nine
-     * codes FOREVER after a seed run, never 'default', which contradicts
-     * this file's own doc comment ("default = compiled-in, no app_config
-     * entry yet"). See API_TEST_FINDINGS.md — a real discrepancy, logged as
-     * found-not-fixed rather than patched here. Using a fresh code side-steps
-     * it entirely (a code an admin only just added is unambiguously
-     * `source: 'custom'` before, and unambiguously gone/`null` after delete,
-     * since it was never in the compiled-in defaults) AND avoids mutating a
-     * real, shared production template code that other tests/deployments
-     * read.
+     * `notification.seed.ts` seeds `notifications.templates` as `{}` (fixed
+     * post-merge — it used to pre-fill all nine compiled-in codes into this
+     * row, which made `listForAdmin()` report `source: 'custom'` for every
+     * one forever with no admin ever having touched one; see
+     * `NOTIFICATION_APP_CONFIG_DEFAULTS`'s header and API_TEST_FINDINGS.md
+     * for the full account — the shared database's stale row was corrected
+     * to match). Using a fresh code here regardless, since this test's own
+     * point is the CREATE/DELETE lifecycle for a code with no compiled-in
+     * default to fall back to, not the nine schema-named ones, and it avoids
+     * mutating a real, shared template code other tests/deployments read.
      */
     it('PUT creates/edits custom copy under a NEW code; DELETE removes it entirely (no compiled-in default to fall back to)', async () => {
       const freshCode = `endpoint_test_${fixtures.runId}`;
