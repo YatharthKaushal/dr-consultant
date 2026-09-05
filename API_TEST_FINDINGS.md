@@ -22,7 +22,7 @@ Format per finding:
 - catalogue: 45 cases, all pass against current code. No bugs found.
 - consent: 61 cases, all pass against current code. No bugs found.
 - patient: 26 cases. One bug found and fixed (below).
-- identity: see finding-free summary below once the full suite is confirmed green.
+- identity: 53 cases, all pass against current code. No bugs found — the OTP flow, token refresh, logout-all, and the full admin RBAC surface (roles, direct permission grants, self-modification guard) all behave exactly as documented. `LAST_SUPER_ADMIN` (409) is NOT independently exercised: triggering it for real would require driving the shared, seeded `super_admin` row's holder count to zero in a database five other parallel worktrees are also using, which is an unacceptable blast radius for a check whose whole job is to prevent exactly that. `CANNOT_MODIFY_SELF`, `ROLE_NOT_FOUND`, `PERMISSION_NOT_FOUND`, `ADMIN_NOT_FOUND` and `MOBILE_NUMBER_TAKEN` are all covered directly.
 
 ---
 
