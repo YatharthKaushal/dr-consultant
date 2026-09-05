@@ -14,6 +14,7 @@ import { VideoController } from './video.controller';
 import { VideoFacade } from './video.facade';
 import { VideoRepository } from './video.repository';
 import { VideoService } from './video.service';
+import { VideoTestKitController } from './video-test-kit.controller';
 import { VideoWebhookController } from './video-webhook.controller';
 import { VideoWebhookService } from './video-webhook.service';
 
@@ -105,7 +106,7 @@ import { VideoWebhookService } from './video-webhook.service';
  */
 @Module({
   imports: [BookingModule, PaymentModule, PatientModule, InstantModule, ConsentModule],
-  controllers: [VideoController, VideoAdminController, VideoWebhookController],
+  controllers: [VideoController, VideoAdminController, VideoWebhookController, VideoTestKitController],
   providers: [
     VideoRepository,
     LivekitClient,

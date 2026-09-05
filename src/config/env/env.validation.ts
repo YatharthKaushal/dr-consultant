@@ -151,6 +151,15 @@ const optionalEnv = z.object({
   // every request collapses into one IP for the OTP per-IP rate limit.
   TRUST_PROXY: booleanFromEnv(false),
 
+  // *** DEV/STAGING ONLY — SEE `video-test-kit.controller.ts` BEFORE TOUCHING
+  // THIS. *** Turns on two `@Public()` routes that mint a real LiveKit join
+  // token with NO login, NO booking, NO payment and NO consent check — every
+  // gate `video.controller.ts` exists to enforce. Defaults to `false` so a
+  // fresh deployment never carries it; the test kit's own routes 404 unless
+  // this is explicitly `true`. Never set on a deployment carrying real patient
+  // traffic.
+  VIDEO_TEST_KIT_ENABLED: booleanFromEnv(false),
+
   // Auth / JWT tuning. TTLs are a bare `<number><unit>` (s/m/h/d) — both
   // `jsonwebtoken`'s `expiresIn` and identity-token.service.ts's own
   // seconds conversion for the API response parse this shape; validating
