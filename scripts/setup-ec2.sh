@@ -323,7 +323,26 @@ echo "Postgres is ready."
 # ---------------------------------------------------------------------------
 log "Installing dependencies and building"
 npm ci
+
+# *** MUST run before every build, not just the first. ***
+# tsconfig.json has "incremental": true, and nest-cli.json's own
+# "deleteOutDir": true only wipes dist/ — it does NOT touch this separate
+# root-level cache file. TypeScript's incremental mode decides whether to
+# re-emit based on whether SOURCE files changed since the timestamps this
+# file recorded, not on whether dist/ still exists. So the second time this
+# script runs npm run build with no source changes in between, tsc reads a
+# still-valid cache, concludes "nothing to recompile," and silently emits
+# NOTHING — even though deleteOutDir just wiped dist clean seconds earlier.
+# `nest build` reports success (exit 0) either way, so this fails silently
+# until something downstream (pm2, here) tries to run a dist/main.js that
+# was never written. A one-shot deploy script has no legitimate use for
+# incremental caching ACROSS separate invocations of itself — only within
+# one long-running dev watch session — so it's removed before every build,
+# guaranteeing a full, honest compile every single run.
+rm -f tsconfig.build.tsbuildinfo tsconfig.tsbuildinfo
+
 npm run build
+[ -f "dist/main.js" ] || die "nest build reported success but dist/main.js does not exist — this should be impossible now that the incremental cache is cleared first. Check: npx nest build (run directly, not through this script) for the real error."
 
 log "Running database migrations"
 npm run db:migrate
