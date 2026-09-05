@@ -1,4 +1,4 @@
-import { Body, Controller, Get, NotFoundException, Post, Res } from '@nestjs/common';
+import { Body, Controller, Get, HttpCode, HttpStatus, NotFoundException, Post, Res } from '@nestjs/common';
 import type { FastifyReply } from 'fastify';
 import { getEnv } from '../../config/env/env.validation';
 import { Public } from '../../shared/auth/auth.decorator';
@@ -41,6 +41,7 @@ export class SearchTestKitController {
   }
 
   @Post('discover')
+  @HttpCode(HttpStatus.OK)
   async discover(@Body() dto: DiscoverSearchDto) {
     this.assertEnabled();
     return this.search.discover({
