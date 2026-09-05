@@ -1,15 +1,6 @@
 import { randomUUID } from 'node:crypto';
-import {
-  Body,
-  Controller,
-  Get,
-  Header,
-  HttpCode,
-  HttpStatus,
-  InternalServerErrorException,
-  NotFoundException,
-  Post,
-} from '@nestjs/common';
+import { Body, Controller, Get, HttpCode, HttpStatus, InternalServerErrorException, NotFoundException, Post, Res } from '@nestjs/common';
+import type { FastifyReply } from 'fastify';
 import { IsIn, IsOptional, Matches } from 'class-validator';
 import { getEnv } from '../../config/env/env.validation';
 import { Public } from '../../shared/auth/auth.decorator';
@@ -70,12 +61,17 @@ export class TestKitTokenRequestDto {
 export class VideoTestKitController {
   constructor(private readonly livekit: LivekitClient) {}
 
-  /** The one-page test UI. Same gate as the token route — see the class header. */
+  /**
+   * The one-page test UI. Same gate as the token route — see the class
+   * header. Sent via `@Res()` directly rather than a plain return, for the
+   * same reason `audit-admin.controller.ts#sendCsv` gives: `ResponseInterceptor`
+   * wraps every ordinary return value in `{ success, data }`, which turns an
+   * HTML page into a JSON object a browser cannot render.
+   */
   @Get()
-  @Header('Content-Type', 'text/html; charset=utf-8')
-  getPage(): string {
+  getPage(@Res() reply: FastifyReply): void {
     this.assertEnabled();
-    return TEST_KIT_HTML;
+    void reply.header('Content-Type', 'text/html; charset=utf-8').send(TEST_KIT_HTML);
   }
 
   /**

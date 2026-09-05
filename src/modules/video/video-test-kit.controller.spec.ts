@@ -1,7 +1,25 @@
 import { NotFoundException } from '@nestjs/common';
+import type { FastifyReply } from 'fastify';
 import { getEnv, resetEnvCache } from '../../config/env/env.validation';
 import { LivekitClient } from './livekit.client';
 import { VideoTestKitController } from './video-test-kit.controller';
+
+/** `getPage` sends via `@Res()` directly (see the controller's own header) rather than returning a value, so it needs a reply double to call. */
+function mockReply(): FastifyReply & { body: unknown; contentType: unknown } {
+  const reply = {
+    body: undefined as unknown,
+    contentType: undefined as unknown,
+    header(name: string, value: unknown) {
+      if (name.toLowerCase() === 'content-type') reply.contentType = value;
+      return reply;
+    },
+    send(payload: unknown) {
+      reply.body = payload;
+      return reply;
+    },
+  };
+  return reply as unknown as FastifyReply & { body: unknown; contentType: unknown };
+}
 
 /**
  * Same construction style as `video.secret-leak.spec.ts`: a real
@@ -35,7 +53,7 @@ describe('VideoTestKitController', () => {
     });
 
     it('404s the page', () => {
-      expect(() => build().getPage()).toThrow(NotFoundException);
+      expect(() => build().getPage(mockReply())).toThrow(NotFoundException);
     });
 
     it('404s the token route', async () => {
@@ -51,9 +69,11 @@ describe('VideoTestKitController', () => {
     });
 
     it('serves the html page', () => {
-      const html = build().getPage();
-      expect(html).toContain('<title>LiveKit Test Kit</title>');
-      expect(html).toContain('/api/video/test-kit/token');
+      const reply = mockReply();
+      build().getPage(reply);
+      expect(reply.contentType).toBe('text/html; charset=utf-8');
+      expect(reply.body).toContain('<title>LiveKit Test Kit</title>');
+      expect(reply.body).toContain('/api/video/test-kit/token');
     });
 
     it('mints a token for each role, in a room a real webhook cannot resolve to a consultation', async () => {
