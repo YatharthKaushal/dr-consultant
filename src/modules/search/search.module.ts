@@ -17,6 +17,7 @@ import { SearchController } from './search.controller';
 import { SearchFacade } from './search.facade';
 import { SearchRepository } from './search.repository';
 import { SearchService } from './search.service';
+import { SearchTestKitController } from './search-test-kit.controller';
 import { SEARCH_AI_PORT } from './search.constants';
 
 /**
@@ -45,7 +46,7 @@ import { SEARCH_AI_PORT } from './search.constants';
  */
 @Module({
   imports: [CatalogueModule, DoctorModule, AvailabilityModule, AiModule],
-  controllers: [SearchController, SearchAdminController],
+  controllers: [SearchController, SearchAdminController, SearchTestKitController],
   providers: [
     SearchRepository,
     SearchConfigRepository,
