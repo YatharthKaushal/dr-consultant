@@ -79,19 +79,30 @@ start_or_reload_backend() {
 # ---------------------------------------------------------------------------
 log "Checking/installing OS packages"
 
+# Deliberately does NOT ask apt/dnf for a "docker compose plugin" package.
+# The plugin only reliably ships from Docker's own official apt/yum repo,
+# which this script does not add; Ubuntu/Amazon Linux's default repos either
+# lack that package outright or carry a version out of step with the distro
+# release. Rather than guess at a package name that will break on the next
+# OS release, engine install is unconditional, and the compose plugin is
+# ALWAYS handled uniformly by the direct-binary fallback below, for both
+# branches, every time.
 if command -v dnf >/dev/null 2>&1; then
   PKG_INSTALL="sudo dnf install -y"
   sudo dnf install -y docker curl jq openssl >/dev/null
 elif command -v apt-get >/dev/null 2>&1; then
   PKG_INSTALL="sudo apt-get install -y"
   sudo apt-get update -y >/dev/null
-  sudo apt-get install -y docker.io docker-compose-plugin curl jq openssl >/dev/null
+  sudo apt-get install -y docker.io curl jq openssl >/dev/null
 else
   die "Neither dnf nor apt-get found — this script supports Amazon Linux and Ubuntu. Install docker/curl/jq/openssl yourself and re-run."
 fi
 
 if ! docker compose version >/dev/null 2>&1; then
-  # Amazon Linux's docker package doesn't always bundle the compose plugin.
+  # Neither distro's plain engine package (docker / docker.io) bundles the
+  # compose plugin, and it's deliberately not requested from apt/dnf above —
+  # see that block's own comment. Downloaded directly from Docker's GitHub
+  # releases instead, which works identically regardless of distro/version.
   #
   # Installed to the SYSTEM-WIDE plugin path, not ~/.docker/cli-plugins —
   # deliberately. Whether this script ends up invoking `docker` directly or
