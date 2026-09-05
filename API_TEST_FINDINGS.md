@@ -24,6 +24,23 @@ verified against a shared database); CSV exports carry the correct rows,
 content-type and `Content-Disposition`; `GET .../doctors/:doctorId/reliability`
 404s cleanly for a well-formed but non-existent doctor id.
 
+## Clarification (`clarification.controller.ts` / `clarification-admin.controller.ts`)
+
+No bugs found. All 11 routes covered. CHECK #1 ("who may be asked") and
+CHECK #2 ("what they may see") — both previously adversarially tested at the
+service layer per the module's own header comments — were proven to hold
+through the real HTTP stack: assigning a verified-but-non-expert doctor is
+refused (409 `CLARIFICATION_NOT_AN_EXPERT`); an expert reading or responding
+to another expert's assigned case gets 404, never 403 (no existence leak).
+The de-identification guarantee (no `patientName`/`patientPhone`/
+`patientAddress`/`patientEmail` field or column) held under a real
+whitelist-bypass attempt — the extra fields were silently stripped by
+`ValidationPipe({ whitelist: true })` and never appeared in the raw response
+text or the persisted row. The full status state machine (draft -> posted ->
+awaiting_response -> response_received/clarification_asked -> reviewed ->
+closed) was driven end to end over real HTTP with correct 409s at each
+illegal transition.
+
 ## Audit (`audit-admin.controller.ts`)
 
 No bugs found. `audit.read`/`audit.export`/`config.read`/`config.manage` are
