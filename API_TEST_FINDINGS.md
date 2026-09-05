@@ -41,6 +41,21 @@ awaiting_response -> response_received/clarification_asked -> reviewed ->
 closed) was driven end to end over real HTTP with correct 409s at each
 illegal transition.
 
+## Feedback and Complaints (`feedback.controller.ts` / `complaint.controller.ts` / `feedback-admin.controller.ts` / `complaint-admin.controller.ts`)
+
+No bugs found. All 13 routes covered. The real `UNIQUE(consultation_id)`
+constraint on `feedback` was hit by two genuine, sequential HTTP submissions
+for the same consultation — the second cleanly answers 409
+`FEEDBACK_ALREADY_SUBMITTED` (never a 500 from an unhandled `23505`), and the
+original row is provably unmodified. The complaint state machine
+(`open -> in_progress -> resolved | rejected`) enforces every documented
+edge (assign is one-shot from `open` only; resolve/reject both require
+`in_progress`; `resolvedAt` is set on resolve and never on reject).
+`isInternal` filtering held: an admin's internal-only note appears in the
+admin's own detail view but is absent — both structurally (missing from the
+`messages` array) and from the raw response text of both the patient's
+detail AND list views.
+
 ## Audit (`audit-admin.controller.ts`)
 
 No bugs found. `audit.read`/`audit.export`/`config.read`/`config.manage` are
