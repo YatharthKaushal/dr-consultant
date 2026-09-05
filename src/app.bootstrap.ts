@@ -50,7 +50,23 @@ export async function createConfiguredApp(): Promise<NestFastifyApplication> {
     // trustProxy: read the real client IP from X-Forwarded-For when behind a
     // load balancer, so per-IP OTP rate limiting (otp_challenges) sees each
     // caller's own IP rather than the proxy's.
-    new FastifyAdapter({ logger: false, trustProxy: env.TRUST_PROXY }),
+    //
+    // *** maxParamLength: 200. ***
+    //
+    // `find-my-way` (Fastify's router) defaults this to 100 and answers a
+    // bare 414 for any `:param` segment longer than that — before the
+    // request reaches any guard, pipe or controller. `GET /care-hub/shared/
+    // :token` (`carehub-share.controller.ts`) is the one route in this
+    // codebase whose path param is not an id: `carehub.service.ts#mintShareLink`
+    // mints `v1.<base64url(JSON({c: contentItemId, e: expiresAtSeconds}))>.
+    // <base64url(hmac-sha256)>`, which is consistently ~126 characters for a
+    // uuid `contentItemId` and a 10-digit unix-seconds expiry. Left at the
+    // default, EVERY token this feature has ever minted 414s against its own
+    // route — found by driving a real, server-minted token through
+    // `app.inject()` in `carehub.endpoint.spec.ts`, not a contrived edge
+    // case. 200 leaves headroom above the current fixed length without
+    // materially widening what the router will match for any other route.
+    new FastifyAdapter({ logger: false, trustProxy: env.TRUST_PROXY, maxParamLength: 200 }),
     // *** rawBody: REQUIRED BY THE RAZORPAY WEBHOOK (M-12). ***
     //
     // `@nestjs/platform-fastify` only preserves the unparsed request body when
