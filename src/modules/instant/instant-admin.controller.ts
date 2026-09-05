@@ -10,7 +10,7 @@ import { DEFAULT_INSTANT_PAGE_SIZE } from './instant.constants';
 import { AdminSetPresenceDto, InstantMetricsQueryDto, ListInstantRequestsQueryDto, UpdateInstantConfigDto } from './instant.dto';
 import { toInstantRequestView } from './instant.mapper';
 import { InstantRepository } from './instant.repository';
-import { InstantService } from './instant.service';
+import { InstantService, instantConsultNotFound } from './instant.service';
 
 /**
  * Admin oversight of instant consults (FR-18.3: "scheduled and instant
@@ -164,10 +164,26 @@ export class InstantAdminController {
     return this.presence.setPresenceAsAdmin(doctorId, dto.presence, auth.accountId);
   }
 
-  /** One request's full routing history — every doctor tried, in order, with each outcome. */
+  /**
+   * One request's full routing history — every doctor tried, in order, with
+   * each outcome.
+   *
+   * *** BUG FIX (found by the real-HTTP endpoint tests): `getInstantConsult`
+   * returns `null` for a consultation that does not exist or is not `mode:
+   * 'instant'` — a deliberate, tested contract for its other callers
+   * (`InstantFacade`, M-21's data-rights code), which need to tell "no such
+   * instant consult" apart from an error without a thrown exception on the
+   * hot path. Returning that `null` straight from this HTTP handler skipped
+   * the conversion every other admin "get one" route makes (see
+   * `booking-admin.controller.ts#getOne`, which throws through its own
+   * facade) and answered `200` with a `null` body for a nonexistent id
+   * instead of `404`.
+   */
   @Get(':consultationId')
   @RequirePermission(PERMISSIONS.APPOINTMENTS_READ)
-  getOne(@Param('consultationId', createUuidValidationPipe('consultationId')) consultationId: string) {
-    return this.instant.getInstantConsult(consultationId);
+  async getOne(@Param('consultationId', createUuidValidationPipe('consultationId')) consultationId: string) {
+    const view = await this.instant.getInstantConsult(consultationId);
+    if (!view) throw instantConsultNotFound();
+    return view;
   }
 }
