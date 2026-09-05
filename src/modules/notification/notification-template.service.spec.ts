@@ -3,7 +3,7 @@ import type { AppConfigService } from '../../shared/app-config/app-config.servic
 import type { AuditService } from '../../shared/audit/audit.service';
 import type { NotificationConfigRepository } from './notification-config.repository';
 import { NotificationTemplateService } from './notification-template.service';
-import { NOTIFICATION_TEMPLATE_DEFAULTS } from './notification.constants';
+import { NOTIFICATION_APP_CONFIG_DEFAULTS, NOTIFICATION_CONFIG_KEYS, NOTIFICATION_TEMPLATE_DEFAULTS } from './notification.constants';
 
 const ADMIN_ID = 'a0000000-0000-4000-8000-000000000001';
 const KEY = 'notifications.templates';
@@ -124,6 +124,32 @@ describe('NotificationTemplateService', () => {
 
       expect(list.find((entry) => entry.code === 'booking_confirmed')).toMatchObject({ source: 'custom' });
       expect(list.find((entry) => entry.code === 'consult_reminder')).toMatchObject({ source: 'default' });
+    });
+
+    /**
+     * *** REGRESSION: what `notification.seed.ts` ACTUALLY writes must not
+     * make every template look admin-edited. ***
+     *
+     * `NOTIFICATION_APP_CONFIG_DEFAULTS` is the exact value the seed script
+     * inserts under `notifications.templates` — this test feeds it straight
+     * in as `stored`, the same shape `listForAdmin` reads on a freshly
+     * seeded, never-edited database. Before the fix, the seed wrote all nine
+     * compiled-in templates into the "stored" bucket, so EVERY code found a
+     * match in `stored` and read `source: 'custom'` forever, even though no
+     * admin had ever touched one — exactly backwards from what `source`
+     * exists to tell an admin. The seed's own header says it is not required
+     * for correctness and exists only so copy is "visible and editable from
+     * day one" — a claim that requires `source: 'default'` on a fresh seed,
+     * not `'custom'`.
+     */
+    it('a freshly seeded database (never admin-edited) reports every template as default, never custom', async () => {
+      stored.set(KEY, NOTIFICATION_APP_CONFIG_DEFAULTS[NOTIFICATION_CONFIG_KEYS.TEMPLATES]);
+      const list = await service.listForAdmin();
+
+      expect(list.length).toBeGreaterThan(0);
+      for (const entry of list) {
+        expect(entry).toMatchObject({ source: 'default' });
+      }
     });
 
     /** Derived from the copy, never stored — a stored list could drift from the copy it describes. */

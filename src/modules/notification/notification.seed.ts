@@ -6,12 +6,17 @@
  *
  * Writes the one `app_config` row M-08 owns:
  *
- *   notifications.templates = { <code>: { title, body }, ... }
+ *   notifications.templates = {}
  *
- * with default copy for the nine template codes `notifications.template_code`'s
- * own schema comment names. `docs/erd.sql`'s `app_config` comment lists
- * `notifications.templates` by name, which is why there is no templates TABLE
- * and no migration here: copy is configuration, not an entity.
+ * EMPTY on purpose — see `NOTIFICATION_APP_CONFIG_DEFAULTS`'s own header for
+ * why: the row exists only so the key is present for an admin's first edit
+ * to land in, never pre-filled with the nine compiled-in codes
+ * `notifications.template_code`'s own schema comment names, which would make
+ * `NotificationTemplateService#listForAdmin` report every one of them as
+ * admin-edited (`source: 'custom'`) on a database nobody has touched.
+ * `docs/erd.sql`'s `app_config` comment lists `notifications.templates` by
+ * name, which is why there is no templates TABLE and no migration here:
+ * copy is configuration, not an entity.
  *
  * `ON CONFLICT DO NOTHING`, so a re-run never overwrites copy an admin has
  * since edited — the same discipline `search.seed.ts` applies to crisis
@@ -62,6 +67,7 @@ import {
 interface SeedSummary {
   configKeysInserted: string[];
   configKeysAlreadyPresent: string[];
+  /** Compiled-in default codes available via the merge — NOT how many rows this script wrote; it writes none, see `NOTIFICATION_APP_CONFIG_DEFAULTS`. */
   templatesSeeded: number;
 }
 

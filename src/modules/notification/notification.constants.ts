@@ -172,9 +172,33 @@ export const NOTIFICATION_TEMPLATE_DEFAULTS: Readonly<Record<NotificationTemplat
   },
 };
 
-/** What `notification.seed.ts` writes into `app_config` under `notifications.templates`. */
+/**
+ * What `notification.seed.ts` writes into `app_config` under
+ * `notifications.templates`.
+ *
+ * *** DELIBERATELY EMPTY, NOT PRE-FILLED WITH `NOTIFICATION_TEMPLATE_DEFAULTS`.
+ * ***
+ *
+ * `NotificationTemplateService#listForAdmin` derives `source` by checking
+ * whether a code is present in the STORED map: found = `'custom'` (an admin
+ * touched it), absent = `'default'` (compiled-in, untouched) — and every
+ * read path (`getResolved`/`findTemplate`/`listForAdmin`) already merges an
+ * empty or partial stored map with `NOTIFICATION_TEMPLATE_DEFAULTS`, so
+ * nothing about correctness or day-one admin-panel visibility depends on
+ * this row containing anything.
+ *
+ * It USED TO be seeded as `NOTIFICATION_TEMPLATE_DEFAULTS` itself — which
+ * put every one of the nine compiled-in codes into the "stored" bucket, so
+ * `listForAdmin` reported `source: 'custom'` for all nine forever, on a
+ * database no admin had ever touched. That is exactly backwards from what
+ * `source` exists to tell an admin, and defeated the seed's own stated
+ * purpose ("copy is visible and editable from day one," which requires
+ * `'default'`, not a false `'custom'`, on a fresh seed). Found by
+ * `notification-template.service.spec.ts`'s "a freshly seeded database"
+ * regression test.
+ */
 export const NOTIFICATION_APP_CONFIG_DEFAULTS: Readonly<Record<NotificationConfigKey, unknown>> = {
-  [NOTIFICATION_CONFIG_KEYS.TEMPLATES]: NOTIFICATION_TEMPLATE_DEFAULTS as NotificationTemplateSet,
+  [NOTIFICATION_CONFIG_KEYS.TEMPLATES]: {} as NotificationTemplateSet,
 };
 
 /**

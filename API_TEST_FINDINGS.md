@@ -80,11 +80,12 @@ Format per finding: route, exact request, exact observed failure, root cause, di
 
 ### 2. `notification.seed.ts` mislabels every seeded template's `source` as `'custom'` forever
 
-- **Status: FOUND, NOT FIXED — needs a design decision.**
+- **Status: FIXED.**
 - **Route:** `GET /admin/notifications/templates` (the `source` field on each returned template).
-- **Observed:** every one of the nine compiled-in templates `notification.seed.ts` writes into the single `notifications.templates` app_config row reads `source: 'custom'`, even when never touched by an admin — contradicting that field's own documented meaning (distinguishing a compiled-in default from an admin override).
-- **Root cause:** the seed script writes the compiled-in templates into the same storage shape an admin edit would produce, with no separate marker distinguishing "seeded as default" from "admin-edited."
-- **Disposition:** **NOT FIXED.** Two plausible correct fixes (a separate `source` column at write time, or deriving `source` by diffing against the compiled-in defaults at read time) represent a real design choice, not a one-line correction — reported for a decision rather than guessed at. Delivery/revert behavior is unaffected either way.
+- **Observed (RED, before fix):** every one of the nine compiled-in templates `notification.seed.ts` wrote into the single `notifications.templates` app_config row read `source: 'custom'`, even when never touched by an admin — contradicting that field's own documented meaning (distinguishing a compiled-in default from an admin override).
+- **Root cause:** `notification-template.service.ts#listForAdmin` already had correct read-time derivation logic (`source` = `'custom'` iff the code is found in the stored map, `'default'` otherwise) — the bug was entirely that `NOTIFICATION_APP_CONFIG_DEFAULTS` (what the seed writes) pre-filled the stored map with all nine compiled-in codes, so every one was always "found," never actually a design gap requiring a new column or a new comparison.
+- **Fix:** `NOTIFICATION_APP_CONFIG_DEFAULTS[TEMPLATES]` now seeds `{}` instead of `NOTIFICATION_TEMPLATE_DEFAULTS`. Every read path already merges the stored map with the compiled-in defaults, so nothing about correctness or day-one admin-panel visibility changes — only the (now correct) `source` labeling does. The shared dev database's pre-existing stale row (written by the old seed, `ON CONFLICT DO NOTHING` would never have self-corrected it) was reset directly to `{}` with an audit entry recording the before/after and why.
+- **Proof:** RED — a new regression test in `notification-template.service.spec.ts` ("a freshly seeded database... reports every template as default, never custom") feeds `NOTIFICATION_APP_CONFIG_DEFAULTS`'s exact value in as `stored` and failed with `source: 'custom'` before the fix. GREEN after — same test passes, full notification module suite (438 tests) and `notification.endpoint.spec.ts` (24 tests, against the corrected real database row) both green, full repo suite 222 suites / 4948 tests.
 
 ---
 
