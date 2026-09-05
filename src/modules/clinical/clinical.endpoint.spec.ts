@@ -234,16 +234,39 @@ describe('CLINICAL module — real HTTP, real guards, real database', () => {
     await db.delete(doctorClinicalTemplatesTable).where(inArray(doctorClinicalTemplatesTable.id, templateIds));
     await db.execute(sql`update doctors set blocked_by_consultation_id = null where id = any(${sql.raw(`array['${doctorIds.join("','")}']::uuid[]`)})`);
     // *** M-16's follow-up chain. *** `finalise` moves a consultation to
-    // `completed`, and `FollowupClinicalListener` reacts by assigning a
-    // pathway — visible in this suite's own log output. Same ordering
-    // `app.e2e.integration.spec.ts`'s teardown fixed this round: alerts before
-    // responses (a nullable FK from the former to the latter), both before
-    // assignments, all three before consultations.
+    // `completed`, and `FollowupClinicalListener` reacts to
+    // `CLINICAL_RECORD_FINALISED_EVENT` by assigning a pathway — visible in
+    // this suite's own log output. Same ordering `app.e2e.integration.spec
+    // .ts`'s teardown fixed this round: alerts before responses (a nullable
+    // FK from the former to the latter), both before assignments, all three
+    // before consultations.
+    //
+    // *** THE EVENT IS FIRE-AND-FORGET (`clinical.service.ts#finalise`'s own
+    // "STEP 4"), SO THE ASSIGNMENT CAN LAND AFTER `finalise`'s HTTP RESPONSE
+    // ALREADY RETURNED. *** A single delete-then-move-on races it: this
+    // suite calls `finalise` successfully six times, and one or more of
+    // those listeners can still be mid-flight the instant `afterAll` starts,
+    // landing a `followup_assignments` row moments after this file's own
+    // delete already ran and found nothing — which then fails the
+    // consultations delete on a fresh FK violation. Retried rather than
+    // delayed with a fixed sleep, so this teardown is not a coin flip on how
+    // fast the listener happens to run.
     const consultationList = sql.raw(`array['${consultationIds.join("','")}']::uuid[]`);
-    await db.execute(sql`delete from safety_alerts where consultation_id = any(${consultationList})`);
-    await db.execute(sql`delete from checkin_responses where consultation_id = any(${consultationList})`);
-    await db.execute(sql`delete from followup_assignments where consultation_id = any(${consultationList})`);
-    await db.delete(consultationsTable).where(inArray(consultationsTable.id, consultationIds));
+    let lastError: unknown;
+    for (let attempt = 0; attempt < 10; attempt += 1) {
+      try {
+        await db.execute(sql`delete from safety_alerts where consultation_id = any(${consultationList})`);
+        await db.execute(sql`delete from checkin_responses where consultation_id = any(${consultationList})`);
+        await db.execute(sql`delete from followup_assignments where consultation_id = any(${consultationList})`);
+        await db.delete(consultationsTable).where(inArray(consultationsTable.id, consultationIds));
+        lastError = undefined;
+        break;
+      } catch (error) {
+        lastError = error;
+        await new Promise((resolve) => setTimeout(resolve, 300));
+      }
+    }
+    if (lastError) throw lastError;
     await db.delete(adminPermissionGrantsTable).where(inArray(adminPermissionGrantsTable.adminId, adminIds));
     await db.delete(adminsTable).where(inArray(adminsTable.id, adminIds));
     await db.delete(doctorSpecialtiesTable).where(inArray(doctorSpecialtiesTable.doctorId, doctorIds));

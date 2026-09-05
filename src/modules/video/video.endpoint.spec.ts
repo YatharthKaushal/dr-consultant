@@ -44,7 +44,7 @@
  * running application reads.
  */
 import { createHash, randomUUID } from 'node:crypto';
-import { and, eq, sql } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 import { AccessToken } from 'livekit-server-sdk';
 import type { NestFastifyApplication } from '@nestjs/platform-fastify';
 import { createConfiguredApp } from '../../app.bootstrap';
@@ -64,6 +64,7 @@ import { permissionsTable } from '../../schema/permissions.schema';
 import { specialtiesTable } from '../../schema/specialties.schema';
 import { PERMISSIONS } from '../../shared/auth/permission.catalog';
 import { IdentityTokenService } from '../identity/identity-token.service';
+import { LivekitClient } from './livekit.client';
 
 jest.setTimeout(60_000);
 
@@ -542,6 +543,31 @@ describe('*** VIDEO MODULE — REAL HTTP ENDPOINT TESTS ***', () => {
       });
       expect(res.statusCode).toBe(200);
     });
+
+    it('409 VIDEO_TOKEN_MINT_FAILED — every gate clears but the LiveKit SDK itself refuses to mint', async () => {
+      const id = await insertConsultation(db, fixtures, { scheduledStartAt: new Date(Date.now() + 5 * 60_000) });
+      await markPaid(db, id);
+      await grantConsent(db, fixtures, fixtures.patientId);
+
+      // `LivekitClient#mintJoinToken` swallows its own errors and returns
+      // `null` on failure (never re-throwing anything produced with the API
+      // secret in hand — see the class header) — the ONLY way to reach
+      // `VIDEO_ERROR_CODES.TOKEN_MINT_FAILED` is therefore for it to answer
+      // `null`. Every gate above it is real; only the mint itself is stubbed,
+      // and only for this one call.
+      const spy = jest.spyOn(app.get(LivekitClient), 'mintJoinToken').mockResolvedValueOnce(null);
+      try {
+        const res = await app.inject({
+          method: 'POST',
+          url: `/api/video/consultations/${id}/token`,
+          headers: auth(fixtures.patientToken),
+        });
+        expect(res.statusCode).toBe(409);
+        expect(payload<{ code: string }>(res).code).toBe('VIDEO_TOKEN_MINT_FAILED');
+      } finally {
+        spy.mockRestore();
+      }
+    });
   });
 
   /* ======================================================================== */
@@ -701,6 +727,24 @@ describe('*** VIDEO MODULE — REAL HTTP ENDPOINT TESTS ***', () => {
       expect(second.statusCode).toBe(200);
       expect(payload<{ changed: boolean }>(second).changed).toBe(false);
     });
+
+    it('a call nobody ever joined (still `scheduled`) answers 200 with changed:false — LEGAL_VIDEO_STATUS_TRANSITIONS refuses the move, it does not throw', async () => {
+      const id = await insertConsultation(db, fixtures, { mode: 'scheduled', status: 'scheduled' });
+      const res = await app.inject({
+        method: 'POST',
+        url: `/api/video/consultations/${id}/end`,
+        headers: auth(fixtures.doctorToken),
+      });
+      expect(res.statusCode).toBe(200);
+      const body = payload<{ changed: boolean; status: string }>(res);
+      expect(body.changed).toBe(false);
+      // `awaiting_documentation` is legal only from `in_progress` — a call that
+      // never started is a NO-SHOW, which is M-11's `markNoShow`, not this route's.
+      expect(body.status).toBe('scheduled');
+
+      const fresh = await db.execute(sql`select status from consultations where id = ${id}`);
+      expect((fresh.rows as Array<{ status: string }>)[0].status).toBe('scheduled');
+    });
   });
 
   /* ======================================================================== */
@@ -777,6 +821,18 @@ describe('*** VIDEO MODULE — REAL HTTP ENDPOINT TESTS ***', () => {
       const res = await post(body, signature);
       expect(res.statusCode).toBe(200);
       expect(payload<{ outcome: string }>(res).outcome).toBe('ignored');
+    });
+
+    it('room_finished for a consultation nobody ever joined is a no-op — a NO-SHOW is markNoShow\'s call, not this webhook\'s', async () => {
+      const id = await insertConsultation(db, fixtures, { status: 'scheduled' });
+      const body = eventBody('room_finished', `consult-${id}`);
+      const signature = await signLivekitWebhook(body, apiKey, apiSecret);
+      const res = await post(body, signature);
+      expect(res.statusCode).toBe(200);
+      expect(payload<{ outcome: string }>(res).outcome).toBe('duplicate');
+
+      const stillScheduled = await db.execute(sql`select status from consultations where id = ${id}`);
+      expect((stillScheduled.rows as Array<{ status: string }>)[0].status).toBe('scheduled');
     });
 
     it('*** THE REAL SIGNED CHAIN *** participant_joined -> in_progress (and the doctor leaves the routing pool), participant_left, then room_finished -> awaiting_documentation (and the doctor returns to the pool for a SCHEDULED call)', async () => {
