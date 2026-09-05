@@ -13,6 +13,44 @@ Format per entry:
 
 ---
 
+## Data Rights (`data-rights-admin.controller.ts`) — highest scrutiny
+
+No bugs found; this module received the most direct SQL verification of any
+in this round. Confirmed with fresh Postgres reads, never the HTTP
+response's own say-so:
+
+- `GET .../preview` writes byte-for-byte nothing (verified with a full raw
+  SQL snapshot of the `patients` row, both `search_queries` rows and the
+  `promotion_code_attempts` row, taken before and after two separate real
+  HTTP preview calls, `toEqual`-compared).
+- `POST .../execute` on a `requested` (non-approved) request is refused 409
+  `DATA_DELETION_NOT_APPROVED` and — same snapshot technique — touches
+  nothing.
+- `POST .../execute` on a genuinely `approved` request really: anonymizes
+  `patients` (`fullName`/`dateOfBirth`/`pushToken`/`deviceId` nulled,
+  `status -> deleted`, `mobileNumber` replaced by the exact deterministic
+  `anonymizedMobilePlaceholder(id)` — confirmed by direct computation and
+  comparison, not just "changed"); hard-deletes both `search_queries` rows;
+  anonymizes the `promotion_code_attempts` row (`patient_id`/`ip_address`
+  nulled, the row itself retained). A `feedback` row (a `retain` table) tied
+  to the same patient was confirmed present, unmodified, and still resolving
+  its FK to the now-anonymized patient row.
+- **The concurrency fix from the prior adversarial round holds under real
+  concurrent HTTP load.** Two genuine, simultaneous `POST .../execute`
+  calls via `Promise.all` against the same approved request produced
+  exactly one 201 (`overallStatus: 'executed'`) and one clean 409
+  `DATA_DELETION_NOT_APPROVED` — never both succeeding, never a 500 — on
+  every run, over real HTTP, not a mocked repository.
+- Both routes independently confirmed gated on
+  `compliance.manage_deletion_requests` (401 no token, 403 wrong account
+  type, 403 missing permission).
+
+One deliberate test-authoring note, not a bug: every fixture is torn down
+BY ID, never by mobile number, because the execute/concurrent subjects'
+`mobile_number` is genuinely replaced by the code under test — a
+mobile-number-keyed teardown would have silently stopped matching those
+rows the moment the test succeeded.
+
 ## Governance (`governance-admin.controller.ts`)
 
 No bugs found. All six routes (two working queues, quality dashboard,
