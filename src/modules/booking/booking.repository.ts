@@ -462,6 +462,15 @@ export class BookingRepository {
     return rows.map((row) => row.id);
   }
 
+  /** ADDITIVE (account-deletion lifecycle round) — the doctor-side mirror of `listConsultationIdsForPatient` above, for the identical reason: `data-rights`'s open-obligations check needs every consultation a doctor is party to, not just a patient. */
+  async listConsultationIdsForDoctor(doctorId: string): Promise<string[]> {
+    const rows = await this.db
+      .select({ id: consultationsTable.id })
+      .from(consultationsTable)
+      .where(eq(consultationsTable.doctorId, doctorId));
+    return rows.map((row) => row.id);
+  }
+
   /* ── Listings ─────────────────────────────────────────────────────────── */
 
   /**

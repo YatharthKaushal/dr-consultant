@@ -222,6 +222,11 @@ async function seedFixtures(db: Database): Promise<Fixtures> {
       specialtyId: specialty.id,
       mode: 'scheduled',
       durationMinutes: 30,
+      // ADDITIVE (open-obligations round): must be a TERMINAL status, or
+      // `DataRightsService#executeForRequest`'s new open-obligations check
+      // correctly refuses to execute this fixture — the schema default
+      // (`pending_payment`) is an open status.
+      status: 'completed',
     })
     .returning({ id: consultationsTable.id });
   const [feedback] = await db

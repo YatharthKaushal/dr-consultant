@@ -92,6 +92,11 @@ export class BookingFacade implements BookingContract {
     return this.repo.listConsultationIdsForPatient(patientId);
   }
 
+  /** ADDITIVE (account-deletion lifecycle round) — see `BookingContract#listConsultationIdsForDoctor`. */
+  async listConsultationIdsForDoctor(doctorId: string): Promise<string[]> {
+    return this.repo.listConsultationIdsForDoctor(doctorId);
+  }
+
   /* ── General ──────────────────────────────────────────────────────────── */
 
   async getBooking(consultationId: string): Promise<BookingView | null> {

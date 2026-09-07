@@ -47,3 +47,38 @@ export const DATA_DELETION_CONFIG_KEYS = {
 
 export const DATA_DELETION_DEFAULT_GRACE_PERIOD_DAYS = 30;
 export const DATA_DELETION_DEFAULT_AUTO_EXECUTE = true;
+
+/**
+ * DI token for the `DataDeletionNotificationPort` implementation, bound in
+ * `consent.module.ts` to the real `NotificationFacade` — see
+ * `data-deletion-notification.contract.ts`'s header for why this indirection
+ * exists even though M-08 is already merged.
+ */
+export const DATA_DELETION_NOTIFICATION_PORT = Symbol('DATA_DELETION_NOTIFICATION_PORT');
+
+/**
+ * ADDITIVE (deferred follow-up: notify on status change). None of these are
+ * in `docs/erd.sql`'s `notifications.template_code` comment — the closed set
+ * M-08 ships compiled defaults for. Like `INSTANT_NOTIFICATION_TEMPLATES`/
+ * `FOLLOWUP_NOTIFICATION_TEMPLATES` before them, these are GENUINELY NEW
+ * codes: they resolve ONLY once an admin configures a template for them
+ * (`PUT /admin/notifications/templates/:code`) and degrade to
+ * `reason: 'template_missing'`/nothing-queued until then — not a bug, the
+ * established M-08 design (copy sign-off before anything ships to a user).
+ *
+ * *** NONE OF THESE MAY NAME A DIAGNOSIS (FR-16.2). *** This module never
+ * passes anything beyond a status/date — a deletion request carries no
+ * clinical content to begin with.
+ */
+export const DATA_DELETION_NOTIFICATION_TEMPLATES = {
+  /** To the requester: their request was received, with the scheduled deletion date. */
+  REQUESTED: 'data_deletion_requested',
+  /** To the requester: an admin (or the grace-period sweep) approved the request. */
+  APPROVED: 'data_deletion_approved',
+  /** To the requester: an admin rejected the request. */
+  REJECTED: 'data_deletion_rejected',
+  /** To the requester: they cancelled their own request. */
+  CANCELLED: 'data_deletion_cancelled',
+  /** To the requester: execution completed and their account is deactivated. Sent on success only — see `data-deletion.service.ts#recordExecutionOutcome`'s own comment for why `failed` is internal-only. */
+  EXECUTED: 'data_deletion_executed',
+} as const;

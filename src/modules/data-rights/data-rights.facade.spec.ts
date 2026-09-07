@@ -19,12 +19,21 @@ describe('DataRightsFacade', () => {
     expect(service.previewExecution).toHaveBeenCalledWith('r1');
   });
 
-  it('executeForRequest delegates to the service', async () => {
+  it('executeForRequest delegates to the service, options undefined when omitted', async () => {
     const { facade, service } = createDeps();
     service.executeForRequest.mockResolvedValue({ requestId: 'r1', status: 'executed' } as never);
 
     const actor = { actorType: 'admin' as const, actorId: 'admin-1' };
     await expect(facade.executeForRequest('r1', actor)).resolves.toEqual({ requestId: 'r1', status: 'executed' });
-    expect(service.executeForRequest).toHaveBeenCalledWith('r1', actor);
+    expect(service.executeForRequest).toHaveBeenCalledWith('r1', actor, undefined);
+  });
+
+  it('executeForRequest passes options.override through unchanged — ADDITIVE (open-obligations round)', async () => {
+    const { facade, service } = createDeps();
+    service.executeForRequest.mockResolvedValue({ requestId: 'r1', status: 'executed' } as never);
+
+    const actor = { actorType: 'admin' as const, actorId: 'admin-1' };
+    await facade.executeForRequest('r1', actor, { override: true });
+    expect(service.executeForRequest).toHaveBeenCalledWith('r1', actor, { override: true });
   });
 });

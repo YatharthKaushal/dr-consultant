@@ -59,6 +59,12 @@ function createDeps() {
 
   const booking = {
     listConsultationIdsForPatient: jest.fn().mockResolvedValue([CONSULTATION_ID]),
+    // ADDITIVE (open-obligations round). Default: a single TERMINAL
+    // consultation, so every EXISTING test in this file (none of which are
+    // about the obligations gate) keeps exercising a clean execute path
+    // unchanged. Tests of the gate itself override this per-case.
+    listConsultationIdsForDoctor: jest.fn().mockResolvedValue([]),
+    getBooking: jest.fn().mockResolvedValue({ id: CONSULTATION_ID, status: 'completed', scheduledStartAt: null }),
   } as unknown as jest.Mocked<BookingFacade>;
 
   const clinical = { countRecordsForConsultations: jest.fn().mockResolvedValue(0) } as unknown as jest.Mocked<ClinicalFacade>;
@@ -98,6 +104,7 @@ function createDeps() {
   } as unknown as jest.Mocked<PricingFacade>;
   const payment = {
     countDataRightsRowsForConsultations: jest.fn().mockResolvedValue({ payments: 0, refunds: 0, paymentEvents: 0 }),
+    getByConsultationId: jest.fn().mockResolvedValue(null),
   } as unknown as jest.Mocked<PaymentFacade>;
   const patient = {
     softDeleteForDeletionRequest: jest.fn().mockResolvedValue({ softDeleted: true, snapshot: { id: PATIENT_ID }, originalMobileNumber: '+919876543210' }),
@@ -347,6 +354,110 @@ describe('DataRightsService.executeForRequest', () => {
       expect(patient.softDeleteForDeletionRequest).toHaveBeenCalledWith(PATIENT_ID, SYSTEM_ACTOR);
       expect(deletedAccounts.recordSnapshot).toHaveBeenCalledWith(expect.objectContaining({ deletedByAdminId: null }));
       expect(deletionRequests.recordExecutionOutcome).toHaveBeenCalledWith(SYSTEM_ACTOR, REQUEST_ID, expect.anything());
+    });
+  });
+
+  describe('open obligations (open-obligations round)', () => {
+    function openBooking(overrides: Partial<{ id: string; status: string; scheduledStartAt: Date | null }> = {}) {
+      return { id: CONSULTATION_ID, status: 'scheduled', scheduledStartAt: new Date('2026-10-01T09:00:00.000Z'), ...overrides };
+    }
+
+    describe('previewExecution', () => {
+      it('reports an open consultation for a patient request, without writing anything', async () => {
+        const { service, booking, search, promotion, patient } = createDeps();
+        booking.getBooking.mockResolvedValue(openBooking() as never);
+
+        const preview = await service.previewExecution(REQUEST_ID);
+
+        expect(preview.openObligations).toEqual([
+          expect.objectContaining({ consultationId: CONSULTATION_ID, status: 'scheduled', scheduledStartAt: '2026-10-01T09:00:00.000Z' }),
+        ]);
+        expect(search.deleteSearchQueriesForPatient).not.toHaveBeenCalled();
+        expect(promotion.anonymizePromotionCodeAttemptsForPatient).not.toHaveBeenCalled();
+        expect(patient.softDeleteForDeletionRequest).not.toHaveBeenCalled();
+      });
+
+      it('reports nothing when every consultation is terminal (the default fixture)', async () => {
+        const { service } = createDeps();
+        const preview = await service.previewExecution(REQUEST_ID);
+        expect(preview.openObligations).toEqual([]);
+      });
+
+      it('reports an open consultation for a DOCTOR request too, via listConsultationIdsForDoctor', async () => {
+        const { service, deletionRequests, booking } = createDeps();
+        deletionRequests.getRequest.mockResolvedValue(request({ patientId: null, doctorId: DOCTOR_ID }));
+        booking.listConsultationIdsForDoctor.mockResolvedValue([CONSULTATION_ID]);
+        booking.getBooking.mockResolvedValue(openBooking() as never);
+
+        const preview = await service.previewExecution(REQUEST_ID);
+
+        expect(booking.listConsultationIdsForDoctor).toHaveBeenCalledWith(DOCTOR_ID);
+        expect(preview.openObligations).toHaveLength(1);
+      });
+
+      it('includes the payment status when a payment row exists for the open consultation', async () => {
+        const { service, booking, payment } = createDeps();
+        booking.getBooking.mockResolvedValue(openBooking() as never);
+        payment.getByConsultationId.mockResolvedValue({ paymentId: 'pay-1', status: 'pending', paidAt: null });
+
+        const preview = await service.previewExecution(REQUEST_ID);
+
+        expect(preview.openObligations[0]).toMatchObject({ paymentStatus: 'pending' });
+      });
+    });
+
+    describe('executeForRequest', () => {
+      it('refuses with DATA_DELETION_OPEN_OBLIGATIONS and touches nothing when the account has an open consultation', async () => {
+        const { service, booking, search, promotion, patient, deletionRequests } = createDeps();
+        booking.getBooking.mockResolvedValue(openBooking() as never);
+
+        const error = await service.executeForRequest(REQUEST_ID, ADMIN_ACTOR).catch((e: unknown) => e);
+
+        expect(error).toBeInstanceOf(ConflictException);
+        expect(error).toMatchObject({ response: { code: 'DATA_DELETION_OPEN_OBLIGATIONS' } });
+        expect(search.deleteSearchQueriesForPatient).not.toHaveBeenCalled();
+        expect(promotion.anonymizePromotionCodeAttemptsForPatient).not.toHaveBeenCalled();
+        expect(patient.softDeleteForDeletionRequest).not.toHaveBeenCalled();
+        expect(deletionRequests.recordExecutionOutcome).not.toHaveBeenCalled();
+      });
+
+      it('proceeds when an ADMIN passes options.override: true, even with an open consultation', async () => {
+        const { service, booking, deletionRequests } = createDeps();
+        booking.getBooking.mockResolvedValue(openBooking() as never);
+        deletionRequests.recordExecutionOutcome.mockResolvedValue(request({ status: 'executed' }));
+
+        const result = await service.executeForRequest(REQUEST_ID, ADMIN_ACTOR, { override: true });
+
+        expect(result.status).toBe('executed');
+      });
+
+      /** *** THE OVERRIDE IS ADMIN-ONLY BY CONSTRUCTION. *** Even a caller mistakenly passing `override: true` alongside a SYSTEM actor must not bypass the check — see `DataRightsService#executeForRequest`'s own doc comment. */
+      it('a SYSTEM actor can never override, even if options.override is somehow true', async () => {
+        const { service, booking } = createDeps();
+        booking.getBooking.mockResolvedValue(openBooking() as never);
+
+        const error = await service.executeForRequest(REQUEST_ID, SYSTEM_ACTOR, { override: true }).catch((e: unknown) => e);
+
+        expect(error).toBeInstanceOf(ConflictException);
+        expect(error).toMatchObject({ response: { code: 'DATA_DELETION_OPEN_OBLIGATIONS' } });
+      });
+
+      it('a terminal-status consultation is never reported as an obligation', async () => {
+        const { service, booking, deletionRequests } = createDeps();
+        booking.getBooking.mockResolvedValue({ id: CONSULTATION_ID, status: 'cancelled', scheduledStartAt: null } as never);
+        deletionRequests.recordExecutionOutcome.mockResolvedValue(request({ status: 'executed' }));
+
+        await expect(service.executeForRequest(REQUEST_ID, ADMIN_ACTOR)).resolves.toMatchObject({ status: 'executed' });
+      });
+
+      it('does not call the payment lookup at all when there is nothing open — avoids an N+1 for the common case', async () => {
+        const { service, payment, deletionRequests } = createDeps();
+        deletionRequests.recordExecutionOutcome.mockResolvedValue(request({ status: 'executed' }));
+
+        await service.executeForRequest(REQUEST_ID, ADMIN_ACTOR);
+
+        expect(payment.getByConsultationId).not.toHaveBeenCalled();
+      });
     });
   });
 });

@@ -21,8 +21,8 @@ export class DataRightsFacade {
     return this.service.previewExecution(requestId);
   }
 
-  /** See `DataRightsService#executeForRequest`. */
-  async executeForRequest(requestId: string, actor: ExecutionActor): Promise<DataRightsExecutionResult> {
-    return this.service.executeForRequest(requestId, actor);
+  /** See `DataRightsService#executeForRequest`. `options.override` is ADDITIVE (open-obligations round) — admin-only by construction, see that method's own doc comment. */
+  async executeForRequest(requestId: string, actor: ExecutionActor, options?: { override?: boolean }): Promise<DataRightsExecutionResult> {
+    return this.service.executeForRequest(requestId, actor, options);
   }
 }

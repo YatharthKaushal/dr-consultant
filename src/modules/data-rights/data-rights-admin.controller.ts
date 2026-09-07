@@ -1,8 +1,9 @@
-import { Controller, Get, Param, Post } from '@nestjs/common';
+import { Body, Controller, Get, Param, Post } from '@nestjs/common';
 import { AccountType, CurrentUser, RequirePermission } from '../../shared/auth/auth.decorator';
 import type { AuthContext } from '../../shared/auth/auth.types';
 import { PERMISSIONS } from '../../shared/auth/permission.catalog';
 import { createUuidValidationPipe } from '../../shared/errors/uuid-param.pipe';
+import { ExecuteDataDeletionRequestDto } from './data-rights.dto';
 import { DataRightsFacade } from './data-rights.facade';
 
 /**
@@ -11,15 +12,18 @@ import { DataRightsFacade } from './data-rights.facade';
  * `DataDeletionAdminController` uses (`permission.catalog.ts`) — this
  * module adds no permission of its own.
  *
- * *** TWO ROUTES, TWO EXPLICIT ADMIN ACTIONS, NOTHING AUTOMATIC. ***
- * `GET :id/preview` computes and returns what WOULD happen — writes
- * nothing. `POST :id/execute` is a SEPARATE call that actually performs it.
- * There is no route, sweep, scheduler or event listener anywhere in this
- * codebase that can reach `DataRightsService#executeForRequest` other than
- * this one explicit, admin-initiated `POST`. Nested under the same
- * `admin/data-deletion-requests` resource `DataDeletionAdminController`
- * already serves (`GET /`, `GET /:id`, `PATCH /:id/review`) — these two
- * routes are the next two actions on that same resource, not a new one.
+ * *** TWO ROUTES, TWO EXPLICIT ADMIN ACTIONS. *** `GET :id/preview`
+ * computes and returns what WOULD happen — writes nothing, and reports any
+ * `openObligations` an admin should read before deciding. `POST :id/execute`
+ * is the separate call that actually performs it — the ONLY other caller
+ * that can ever reach `DataRightsService#executeForRequest` is the
+ * grace-period sweep (`data-rights-execution-sweep.service.ts`), which
+ * never sets `override` (see that method's own doc comment for why the
+ * override is admin-only by construction, not by convention). Nested under
+ * the same `admin/data-deletion-requests` resource
+ * `DataDeletionAdminController` already serves (`GET /`, `GET /:id`,
+ * `PATCH /:id/review`) — these two routes are the next two actions on that
+ * same resource, not a new one.
  */
 @Controller('admin/data-deletion-requests')
 @AccountType('admin')
@@ -33,10 +37,18 @@ export class DataRightsAdminController {
     return this.dataRights.previewExecution(id);
   }
 
-  /** The one place an ADMIN reaches the code that actually deletes or anonymizes an account's data (the sweep is the other — see `data-rights-execution-sweep.service.ts`). Refuses unless the request is currently `approved`. */
+  /**
+   * The one place an ADMIN reaches the code that actually deletes or
+   * anonymizes an account's data. Refuses unless the request is currently
+   * `approved`, and ADDITIVELY (open-obligations round) refuses when the
+   * account has an open consultation, unless the body sets
+   * `override: true` — an admin who has read the preview's
+   * `openObligations` and decided to proceed anyway. No body at all is the
+   * common case and behaves exactly as before this round.
+   */
   @Post(':id/execute')
   @RequirePermission(PERMISSIONS.COMPLIANCE_MANAGE_DELETION_REQUESTS)
-  execute(@CurrentUser() auth: AuthContext, @Param('id', createUuidValidationPipe('id')) id: string) {
-    return this.dataRights.executeForRequest(id, { actorType: 'admin', actorId: auth.accountId });
+  execute(@CurrentUser() auth: AuthContext, @Param('id', createUuidValidationPipe('id')) id: string, @Body() dto: ExecuteDataDeletionRequestDto) {
+    return this.dataRights.executeForRequest(id, { actorType: 'admin', actorId: auth.accountId }, { override: dto?.override });
   }
 }

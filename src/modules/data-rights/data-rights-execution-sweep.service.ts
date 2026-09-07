@@ -1,7 +1,8 @@
-import { Injectable, Logger, type OnApplicationShutdown, type OnModuleInit } from '@nestjs/common';
+import { ConflictException, Injectable, Logger, type OnApplicationShutdown, type OnModuleInit } from '@nestjs/common';
 import { AppConfigService } from '../../shared/app-config/app-config.service';
 import { DataDeletionExecutionFacade } from '../consent/data-deletion-execution.facade';
 import { DATA_DELETION_CONFIG_KEYS, DATA_DELETION_DEFAULT_AUTO_EXECUTE } from '../consent/data-deletion.constants';
+import { DATA_RIGHTS_ERROR_CODES } from './data-rights.constants';
 import { DataRightsService } from './data-rights.service';
 
 /**
@@ -74,7 +75,7 @@ export class DataRightsExecutionSweepService implements OnModuleInit, OnApplicat
     this.sweepInFlight = true;
     try {
       const result = await this.sweep();
-      if (result.executed > 0 || result.failed > 0) {
+      if (result.executed > 0 || result.failed > 0 || result.deferred > 0) {
         this.logger.log(`Data-deletion sweep: ${result.executed} executed, ${result.failed} failed, ${result.deferred} deferred, of ${result.examined} examined.`);
       }
     } catch (error) {
@@ -120,9 +121,25 @@ export class DataRightsExecutionSweepService implements OnModuleInit, OnApplicat
         // request that moved out from under this loop (an admin decided it
         // in the meantime) simply throws `ConflictException` here, caught
         // below like any other per-request failure.
+        // *** THE SWEEP NEVER PASSES `override`. *** No third argument here
+        // is deliberate, not an omission — see `DataRightsService
+        // #executeForRequest`'s own doc comment for why an unattended
+        // grace-period execution may defer on an open obligation but must
+        // never override one.
         await this.dataRights.executeForRequest(request.id, { actorType: 'system', actorId: null });
         result.executed += 1;
       } catch (error) {
+        // ADDITIVE (open-obligations round). An open-obligations refusal is
+        // not a FAILURE the same way an infrastructure error is — nothing
+        // went wrong, the request is simply not safe to auto-execute
+        // unattended. Counted and logged separately so an admin scanning
+        // sweep logs can tell "needs my judgement call" from "something
+        // broke".
+        if (error instanceof ConflictException && (error.getResponse() as { code?: string })?.code === DATA_RIGHTS_ERROR_CODES.DATA_DELETION_OPEN_OBLIGATIONS) {
+          result.deferred += 1;
+          this.logger.log(`Data-deletion sweep deferred request ${request.id} — open obligations; needs an admin's explicit review.`);
+          continue;
+        }
         result.failed += 1;
         const message = error instanceof Error ? error.message : String(error);
         this.logger.error(`Data-deletion sweep could not execute request ${request.id}: ${message}`);

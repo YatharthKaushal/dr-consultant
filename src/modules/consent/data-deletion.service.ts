@@ -1,14 +1,18 @@
-import { ConflictException, Inject, Injectable, NotFoundException } from '@nestjs/common';
+import { ConflictException, Inject, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import type { Database } from '../../config/db/database.config';
 import { DATABASE } from '../../config/db/database.module';
+import type { DataDeletionRequestRow } from '../../schema/data-deletion-requests.schema';
 import type { DeletableAccountType, DeletionStatus } from '../../schema/enums.schema';
 import { AppConfigService } from '../../shared/app-config/app-config.service';
 import { AuditService } from '../../shared/audit/audit.service';
+import type { DataDeletionNotificationPort, DataDeletionNotificationRequest } from './data-deletion-notification.contract';
 import {
   DATA_DELETION_AUDIT_ENTITY_TYPES,
   DATA_DELETION_CONFIG_KEYS,
   DATA_DELETION_DEFAULT_GRACE_PERIOD_DAYS,
   DATA_DELETION_ERROR_CODES,
+  DATA_DELETION_NOTIFICATION_PORT,
+  DATA_DELETION_NOTIFICATION_TEMPLATES,
 } from './data-deletion.constants';
 import { DataDeletionRepository } from './data-deletion.repository';
 import { toDataDeletionRequestRecord } from './data-deletion.mapper';
@@ -66,11 +70,14 @@ const CANCELLABLE_STATUSES = new Set<DeletionStatus>(['requested', 'in_review', 
  */
 @Injectable()
 export class DataDeletionService {
+  private readonly logger = new Logger(DataDeletionService.name);
+
   constructor(
     @Inject(DATABASE) private readonly db: Database,
     private readonly repo: DataDeletionRepository,
     private readonly appConfig: AppConfigService,
     private readonly audit: AuditService,
+    @Inject(DATA_DELETION_NOTIFICATION_PORT) private readonly notifications: DataDeletionNotificationPort,
   ) {}
 
   /* ---------------------------------------------------------------------- */
@@ -125,6 +132,12 @@ export class DataDeletionService {
       );
 
       return created;
+    });
+
+    await this.notify({
+      templateCode: DATA_DELETION_NOTIFICATION_TEMPLATES.REQUESTED,
+      audience: { kind: account.accountType, id: account.accountId },
+      variables: { scheduledFor: scheduledFor.toISOString() },
     });
 
     return toDataDeletionRequestRecord(row);
@@ -198,6 +211,11 @@ export class DataDeletionService {
       return row;
     });
 
+    await this.notify({
+      templateCode: DATA_DELETION_NOTIFICATION_TEMPLATES.CANCELLED,
+      audience: { kind: account.accountType, id: account.accountId },
+    });
+
     return toDataDeletionRequestRecord(updated);
   }
 
@@ -264,6 +282,15 @@ export class DataDeletionService {
       return row;
     });
 
+    if (input.status === 'approved' || input.status === 'rejected') {
+      const approved = input.status === 'approved';
+      await this.notify({
+        templateCode: approved ? DATA_DELETION_NOTIFICATION_TEMPLATES.APPROVED : DATA_DELETION_NOTIFICATION_TEMPLATES.REJECTED,
+        audience: this.notificationAudience(existing),
+        variables: approved && existing.scheduledFor ? { scheduledFor: existing.scheduledFor.toISOString() } : undefined,
+      });
+    }
+
     return toDataDeletionRequestRecord(updated);
   }
 
@@ -288,6 +315,7 @@ export class DataDeletionService {
    */
   async autoApproveForSweep(requestId: string): Promise<DataDeletionRequestRecord> {
     const reviewedAt = new Date();
+    let didApprove = false;
     const row = await this.db.transaction(async (tx) => {
       const updated = await this.repo.autoApprove(requestId, reviewedAt, tx);
       if (!updated) {
@@ -296,6 +324,7 @@ export class DataDeletionService {
         return current;
       }
 
+      didApprove = true;
       await this.audit.write(
         {
           actorType: 'system',
@@ -310,6 +339,18 @@ export class DataDeletionService {
 
       return updated;
     });
+
+    // ADDITIVE (notify-on-status-change round). Only when this call actually
+    // performed the transition — the idempotent no-op branch above (an
+    // admin already decided, or a concurrent sweep tick got there first)
+    // must not re-notify for a status change that didn't happen here.
+    if (didApprove) {
+      await this.notify({
+        templateCode: DATA_DELETION_NOTIFICATION_TEMPLATES.APPROVED,
+        audience: this.notificationAudience(row),
+        variables: row.scheduledFor ? { scheduledFor: row.scheduledFor.toISOString() } : undefined,
+      });
+    }
 
     return toDataDeletionRequestRecord(row);
   }
@@ -407,10 +448,44 @@ export class DataDeletionService {
       return row;
     });
 
+    // ADDITIVE (notify-on-status-change round). `executed` only — `failed`
+    // is an internal signal for an admin to retry (`reviewRequest`'s
+    // `failed -> approved` path), not something the account holder needs
+    // pushed to them; the account itself is unaffected by a failed attempt.
+    if (input.status === 'executed') {
+      await this.notify({
+        templateCode: DATA_DELETION_NOTIFICATION_TEMPLATES.EXECUTED,
+        audience: this.notificationAudience(existing),
+      });
+    }
+
     return toDataDeletionRequestRecord(updated);
   }
 
   /* ---------------------------------------------------------------------- */
+
+  private notificationAudience(row: Pick<DataDeletionRequestRow, 'patientId' | 'doctorId'>): { kind: 'patient' | 'doctor'; id: string } {
+    return row.patientId ? { kind: 'patient', id: row.patientId } : { kind: 'doctor', id: row.doctorId as string };
+  }
+
+  /**
+   * The one place this module talks to `DATA_DELETION_NOTIFICATION_PORT`.
+   * Wrapped even though the port's contract says `notify` MUST NOT throw —
+   * the same defensive wrap `followup-alert.service.ts#notify` applies,
+   * because a port is a promise about an interface, not a runtime
+   * guarantee, and a failed push must never fail (or roll back) the status
+   * transition this module just wrote.
+   */
+  private async notify(request: DataDeletionNotificationRequest): Promise<void> {
+    try {
+      const result = await this.notifications.notify(request);
+      if (!result.queued && result.reason && result.reason !== 'provider_unavailable') {
+        this.logger.debug(`Notification "${request.templateCode}" not queued: ${result.reason}`);
+      }
+    } catch (error) {
+      this.logger.warn(`Notification "${request.templateCode}" threw; ignoring. ${describeError(error)}`);
+    }
+  }
 
   private isOwnedBy(row: { patientId: string | null; doctorId: string | null }, account: DeletionAccountRef): boolean {
     if (account.accountType === 'patient') return row.patientId === account.accountId;
@@ -434,4 +509,8 @@ export class DataDeletionService {
       message: 'That data-deletion request does not exist.',
     });
   }
+}
+
+function describeError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }

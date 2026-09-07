@@ -1,4 +1,4 @@
-import type { DeletionStatus } from '../../schema/enums.schema';
+import type { ConsultationStatus, DeletionStatus } from '../../schema/enums.schema';
 
 /**
  * `'soft_delete'` is ADDITIVE (account-deletion lifecycle round) — replaces
@@ -48,6 +48,20 @@ export interface DataRightsTableEntry {
 }
 
 /**
+ * ADDITIVE (open-obligations round). One consultation `executeForRequest`
+ * would refuse to run past — see `DataRightsService#computeOpenObligations`.
+ * `paymentStatus` is `null` when no `payments` row exists at all for this
+ * consultation (an unpaid, never-checked-out draft is still an obligation —
+ * the slot itself is still held).
+ */
+export interface DataRightsOpenObligation {
+  consultationId: string;
+  status: ConsultationStatus;
+  scheduledStartAt: string | null;
+  paymentStatus: string | null;
+}
+
+/**
  * `previewExecution`'s full return value. Writes nothing — see
  * `data-rights.service.ts`.
  *
@@ -66,6 +80,14 @@ export interface DataRightsPreview {
   /** The request's CURRENT status at the moment of preview — read-only context, not a precondition preview itself enforces. */
   requestStatus: DeletionStatus;
   tables: DataRightsTableEntry[];
+  /**
+   * ADDITIVE (open-obligations round). Every consultation still open right
+   * now — an admin reviewing this preview BEFORE approving sees exactly
+   * what `executeForRequest` would refuse on. Empty when there is nothing
+   * outstanding. Reporting this here is informational only; `previewExecution`
+   * itself still writes nothing and enforces nothing.
+   */
+  openObligations: DataRightsOpenObligation[];
   generatedAt: string;
 }
 

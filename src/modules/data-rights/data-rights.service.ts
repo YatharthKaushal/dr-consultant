@@ -17,11 +17,12 @@ import { PricingFacade } from '../pricing/pricing.facade';
 import { PromotionFacade } from '../promotion/promotion.facade';
 import { SearchFacade } from '../search/search.facade';
 import { VideoFacade } from '../video/video.facade';
-import { DATA_RIGHTS_ERROR_CODES, DOCTOR_TABLE_SURVEY, STATIC_TABLE_SURVEY } from './data-rights.constants';
+import { DATA_RIGHTS_ERROR_CODES, DOCTOR_TABLE_SURVEY, OPEN_CONSULTATION_STATUSES, STATIC_TABLE_SURVEY } from './data-rights.constants';
 import { DeletedAccountsService } from './deleted-accounts.service';
 import type {
   DataRightsExecutionOutcome,
   DataRightsExecutionResult,
+  DataRightsOpenObligation,
   DataRightsPreview,
   DataRightsStepOutcome,
   DataRightsTableEntry,
@@ -98,19 +99,39 @@ export class DataRightsService {
     const request = await this.findRequestOrThrow(requestId);
 
     if (request.doctorId) {
+      const consultationIds = await this.booking.listConsultationIdsForDoctor(request.doctorId);
+      const openObligations = await this.computeOpenObligations(consultationIds);
       const tables = DOCTOR_TABLE_SURVEY.map((entry) => ({ ...entry, rowCount: 1 }));
-      return { requestId: request.id, patientId: null, doctorId: request.doctorId, requestStatus: request.status, tables, generatedAt: new Date().toISOString() };
+      return { requestId: request.id, patientId: null, doctorId: request.doctorId, requestStatus: request.status, tables, openObligations, generatedAt: new Date().toISOString() };
     }
 
     const patientId = request.patientId as string; // XOR-guaranteed by the schema's own check constraint
     const consultationIds = await this.booking.listConsultationIdsForPatient(patientId);
-    const tables = await this.buildTableEntries(patientId, consultationIds);
+    const [tables, openObligations] = await Promise.all([
+      this.buildTableEntries(patientId, consultationIds),
+      this.computeOpenObligations(consultationIds),
+    ]);
 
-    return { requestId: request.id, patientId, doctorId: null, requestStatus: request.status, tables, generatedAt: new Date().toISOString() };
+    return { requestId: request.id, patientId, doctorId: null, requestStatus: request.status, tables, openObligations, generatedAt: new Date().toISOString() };
   }
 
-  /** Performs what the preview describes. Refuses (`ConflictException`) unless the request is CURRENTLY `approved`. Branches on `request.doctorId` — see the class header. */
-  async executeForRequest(requestId: string, actor: ExecutionActor): Promise<DataRightsExecutionResult> {
+  /**
+   * Performs what the preview describes. Refuses (`ConflictException`)
+   * unless the request is CURRENTLY `approved`. Branches on
+   * `request.doctorId` — see the class header.
+   *
+   * *** ADDITIVE (open-obligations round): ALSO REFUSES WHEN
+   * `computeOpenObligations` FINDS SOMETHING OUTSTANDING. *** The concrete
+   * scenario this closes: a patient with a paid, upcoming consultation gets
+   * soft-deleted, and the doctor then meets a now-nameless patient — or a
+   * refund the platform still owes has nowhere left to be traced. An admin
+   * who has genuinely reviewed the obligations and decided to proceed
+   * anyway passes `options.override: true` — `executeForRequest`'s own
+   * doc comment on `options` states the one hard rule: the SWEEP never
+   * sets it, deliberately, so an unattended grace-period execution can
+   * defer but can never override.
+   */
+  async executeForRequest(requestId: string, actor: ExecutionActor, options: { override?: boolean } = {}): Promise<DataRightsExecutionResult> {
     const request = await this.findRequestOrThrow(requestId);
     if (request.status !== 'approved') {
       throw new ConflictException({
@@ -120,16 +141,38 @@ export class DataRightsService {
       });
     }
 
-    return request.doctorId ? this.executeDoctorRequest(request, actor) : this.executePatientRequest(request, actor);
+    const consultationIds = request.doctorId
+      ? await this.booking.listConsultationIdsForDoctor(request.doctorId)
+      : await this.booking.listConsultationIdsForPatient(request.patientId as string);
+
+    // *** THE OVERRIDE IS ADMIN-ONLY, BY CONSTRUCTION, NOT BY CONVENTION. ***
+    // `actor.actorType === 'admin'` is checked HERE, not trusted from the
+    // caller — a `system` actor (the sweep) passing `override: true` by
+    // mistake would still be refused, because the AND requires the actor
+    // type too. There is no code path that lets the sweep override.
+    const overriding = actor.actorType === 'admin' && options.override === true;
+    if (!overriding) {
+      const openObligations = await this.computeOpenObligations(consultationIds);
+      if (openObligations.length > 0) {
+        throw new ConflictException({
+          code: DATA_RIGHTS_ERROR_CODES.DATA_DELETION_OPEN_OBLIGATIONS,
+          message: `This account has ${openObligations.length} open consultation(s) — deletion is refused unless an admin explicitly overrides.`,
+          openObligations,
+        });
+      }
+    }
+
+    return request.doctorId
+      ? this.executeDoctorRequest(request, actor, consultationIds)
+      : this.executePatientRequest(request, actor, consultationIds);
   }
 
   /* ------------------------------------------------------------------ */
   /* Patient execution                                                    */
   /* ------------------------------------------------------------------ */
 
-  private async executePatientRequest(request: DataDeletionRequestRecord, actor: ExecutionActor): Promise<DataRightsExecutionResult> {
+  private async executePatientRequest(request: DataDeletionRequestRecord, actor: ExecutionActor, consultationIds: readonly string[]): Promise<DataRightsExecutionResult> {
     const patientId = request.patientId as string;
-    const consultationIds = await this.booking.listConsultationIdsForPatient(patientId);
     const retainedTables = await this.buildRetainedTableEntries(patientId, consultationIds);
 
     const mutatingSteps: DataRightsStepOutcome[] = [];
@@ -172,8 +215,13 @@ export class DataRightsService {
   /* Doctor execution — deliberately narrow, see DOCTOR_TABLE_SURVEY.      */
   /* ------------------------------------------------------------------ */
 
-  private async executeDoctorRequest(request: DataDeletionRequestRecord, actor: ExecutionActor): Promise<DataRightsExecutionResult> {
+  private async executeDoctorRequest(request: DataDeletionRequestRecord, actor: ExecutionActor, _consultationIds: readonly string[]): Promise<DataRightsExecutionResult> {
     const doctorId = request.doctorId as string;
+    // `_consultationIds` is accepted (not recomputed) purely for symmetry
+    // with the patient path and so `executeForRequest`'s single obligations
+    // check is the ONLY place either path ever lists a doctor's
+    // consultations — this method itself has nothing to build from them,
+    // since `DOCTOR_TABLE_SURVEY` names no per-consultation table.
     const mutatingSteps: DataRightsStepOutcome[] = [];
 
     mutatingSteps.push(
@@ -247,6 +295,45 @@ export class DataRightsService {
       this.logger.error(`Data-rights step failed — table=${table} module=${module} decision=${decision}: ${message}`);
       return { table, module, decision, status: 'failed', error: message };
     }
+  }
+
+  /**
+   * ADDITIVE (open-obligations round). *** THE ACTUAL CHECK. *** Reads
+   * `BookingFacade.getBooking` for every consultation this account is party
+   * to (patient or doctor — the caller passes whichever set applies) and
+   * keeps only the ones in `OPEN_CONSULTATION_STATUSES`. For each of THOSE
+   * (never for the whole set — a patient's terminal consultations vastly
+   * outnumber their open ones, and a payment lookup per terminal
+   * consultation would be pure waste), also reads
+   * `PaymentFacade.getByConsultationId` so the admin reviewing this sees
+   * whether money is genuinely in flight, not just that a slot is held.
+   *
+   * *** WHAT THIS DOES NOT CHECK, STATED PLAINLY. *** A REFUND already
+   * `pending`/`processing` against an otherwise-TERMINAL (cancelled/
+   * no_show/expired) consultation is invisible here — `PaymentContract` has
+   * no existing read surface for refund status alone, only the row counts
+   * `collectCounts` already uses for the preview survey, and adding one
+   * would mean widening `PaymentContract` for this feature alone. That is a
+   * real, narrower gap than the one this method closes (a doctor meeting a
+   * nameless patient mid-session, which is the scenario that motivated this
+   * whole check), and is flagged here rather than silently claimed as
+   * covered.
+   */
+  private async computeOpenObligations(consultationIds: readonly string[]): Promise<DataRightsOpenObligation[]> {
+    if (consultationIds.length === 0) return [];
+
+    const bookings = await Promise.all(consultationIds.map((id) => this.booking.getBooking(id)));
+    const open = bookings.filter((booking): booking is NonNullable<typeof booking> => booking !== null && OPEN_CONSULTATION_STATUSES.has(booking.status));
+    if (open.length === 0) return [];
+
+    const payments = await Promise.all(open.map((booking) => this.payment.getByConsultationId(booking.id)));
+
+    return open.map((booking, index) => ({
+      consultationId: booking.id,
+      status: booking.status,
+      scheduledStartAt: booking.scheduledStartAt ? booking.scheduledStartAt.toISOString() : null,
+      paymentStatus: payments[index]?.status ?? null,
+    }));
   }
 
   /** Every table in the survey, decision + live row count — what `previewExecution` returns (patient path). */

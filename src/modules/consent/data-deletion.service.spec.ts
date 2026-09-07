@@ -10,7 +10,8 @@ import type { Database } from '../../config/db/database.config';
 import type { DataDeletionRequestRow } from '../../schema/data-deletion-requests.schema';
 import type { AppConfigService } from '../../shared/app-config/app-config.service';
 import type { AuditService } from '../../shared/audit/audit.service';
-import { DATA_DELETION_AUDIT_ENTITY_TYPES, DATA_DELETION_ERROR_CODES } from './data-deletion.constants';
+import type { DataDeletionNotificationPort } from './data-deletion-notification.contract';
+import { DATA_DELETION_AUDIT_ENTITY_TYPES, DATA_DELETION_ERROR_CODES, DATA_DELETION_NOTIFICATION_TEMPLATES } from './data-deletion.constants';
 import type { DataDeletionRepository } from './data-deletion.repository';
 import { DataDeletionService } from './data-deletion.service';
 import type { DeletionAccountRef } from './data-deletion.types';
@@ -49,6 +50,7 @@ describe('DataDeletionService', () => {
   let repo: jest.Mocked<DataDeletionRepository>;
   let appConfig: jest.Mocked<AppConfigService>;
   let audit: jest.Mocked<AuditService>;
+  let notifications: jest.Mocked<DataDeletionNotificationPort>;
   let service: DataDeletionService;
 
   beforeEach(() => {
@@ -71,7 +73,12 @@ describe('DataDeletionService', () => {
 
     audit = { write: jest.fn().mockResolvedValue(undefined) } as unknown as jest.Mocked<AuditService>;
 
-    service = new DataDeletionService(db as unknown as Database, repo, appConfig, audit);
+    // ADDITIVE (notify-on-status-change round).
+    notifications = {
+      notify: jest.fn().mockResolvedValue({ queued: false, notificationId: null, reason: 'template_missing' }),
+    } as unknown as jest.Mocked<DataDeletionNotificationPort>;
+
+    service = new DataDeletionService(db as unknown as Database, repo, appConfig, audit, notifications);
   });
 
   /* ---------------------------------------------------------------------- */
@@ -446,6 +453,105 @@ describe('DataDeletionService', () => {
         }),
         db,
       );
+    });
+  });
+
+  /**
+   * ADDITIVE (notify-on-status-change round). Proves the WIRING itself —
+   * every other describe block above already exercises these methods
+   * without asserting on `notifications.notify`, and `notifications` degrades
+   * gracefully by default (`template_missing`), so those tests would keep
+   * passing even if a call site were silently dropped. These don't.
+   */
+  describe('notifications', () => {
+    const ADMIN_ACTOR = { actorType: 'admin' as const, actorId: ADMIN_ID };
+
+    it('raiseRequest notifies the requester with the scheduledFor date', async () => {
+      await service.raiseRequest(PATIENT, 'Closing my account.');
+
+      expect(notifications.notify).toHaveBeenCalledWith(
+        expect.objectContaining({
+          templateCode: DATA_DELETION_NOTIFICATION_TEMPLATES.REQUESTED,
+          audience: { kind: 'patient', id: PATIENT_ID },
+          variables: { scheduledFor: expect.any(String) as unknown },
+        }),
+      );
+    });
+
+    it('raiseRequest does NOT notify again when it returns an existing open request', async () => {
+      repo.findOpenByAccount.mockResolvedValue(requestRow());
+      await service.raiseRequest(PATIENT, 'Closing my account.');
+      expect(notifications.notify).not.toHaveBeenCalled();
+    });
+
+    it('cancelRequest notifies the requester', async () => {
+      repo.findById.mockResolvedValue(requestRow({ status: 'requested' }));
+      await service.cancelRequest(PATIENT, REQUEST_ID);
+
+      expect(notifications.notify).toHaveBeenCalledWith(
+        expect.objectContaining({ templateCode: DATA_DELETION_NOTIFICATION_TEMPLATES.CANCELLED, audience: { kind: 'patient', id: PATIENT_ID } }),
+      );
+    });
+
+    it('reviewRequest(approved) notifies the requester, DOCTOR audience when it is a doctor request', async () => {
+      repo.findById.mockResolvedValue(requestRow({ status: 'requested', patientId: null, doctorId: DOCTOR_ID }));
+      await service.reviewRequest(ADMIN_ID, REQUEST_ID, { status: 'approved' });
+
+      expect(notifications.notify).toHaveBeenCalledWith(
+        expect.objectContaining({ templateCode: DATA_DELETION_NOTIFICATION_TEMPLATES.APPROVED, audience: { kind: 'doctor', id: DOCTOR_ID } }),
+      );
+    });
+
+    it('reviewRequest(rejected) notifies the requester', async () => {
+      repo.findById.mockResolvedValue(requestRow({ status: 'requested' }));
+      await service.reviewRequest(ADMIN_ID, REQUEST_ID, { status: 'rejected' });
+
+      expect(notifications.notify).toHaveBeenCalledWith(
+        expect.objectContaining({ templateCode: DATA_DELETION_NOTIFICATION_TEMPLATES.REJECTED, audience: { kind: 'patient', id: PATIENT_ID } }),
+      );
+    });
+
+    it('reviewRequest(in_review) does NOT notify — not a decision yet', async () => {
+      repo.findById.mockResolvedValue(requestRow({ status: 'requested' }));
+      await service.reviewRequest(ADMIN_ID, REQUEST_ID, { status: 'in_review' });
+      expect(notifications.notify).not.toHaveBeenCalled();
+    });
+
+    it('autoApproveForSweep notifies on a real transition', async () => {
+      repo.autoApprove.mockResolvedValue(requestRow({ status: 'approved' }));
+      await service.autoApproveForSweep(REQUEST_ID);
+
+      expect(notifications.notify).toHaveBeenCalledWith(
+        expect.objectContaining({ templateCode: DATA_DELETION_NOTIFICATION_TEMPLATES.APPROVED, audience: { kind: 'patient', id: PATIENT_ID } }),
+      );
+    });
+
+    it('autoApproveForSweep does NOT notify on the idempotent no-op branch', async () => {
+      repo.autoApprove.mockResolvedValue(null);
+      repo.findById.mockResolvedValue(requestRow({ status: 'approved' }));
+      await service.autoApproveForSweep(REQUEST_ID);
+      expect(notifications.notify).not.toHaveBeenCalled();
+    });
+
+    it('recordExecutionOutcome(executed) notifies the requester', async () => {
+      repo.findById.mockResolvedValue(requestRow({ status: 'approved' }));
+      await service.recordExecutionOutcome(ADMIN_ACTOR, REQUEST_ID, { status: 'executed', executionOutcome: {} });
+
+      expect(notifications.notify).toHaveBeenCalledWith(
+        expect.objectContaining({ templateCode: DATA_DELETION_NOTIFICATION_TEMPLATES.EXECUTED, audience: { kind: 'patient', id: PATIENT_ID } }),
+      );
+    });
+
+    it('recordExecutionOutcome(failed) does NOT notify — internal-only, an admin retries via reviewRequest instead', async () => {
+      repo.findById.mockResolvedValue(requestRow({ status: 'approved' }));
+      await service.recordExecutionOutcome(ADMIN_ACTOR, REQUEST_ID, { status: 'failed', executionOutcome: {} });
+      expect(notifications.notify).not.toHaveBeenCalled();
+    });
+
+    it('a notify() throw is swallowed, never fails the caller', async () => {
+      repo.findById.mockResolvedValue(requestRow({ status: 'requested' }));
+      notifications.notify.mockRejectedValueOnce(new Error('provider exploded'));
+      await expect(service.cancelRequest(PATIENT, REQUEST_ID)).resolves.toMatchObject({ status: 'cancelled' });
     });
   });
 });

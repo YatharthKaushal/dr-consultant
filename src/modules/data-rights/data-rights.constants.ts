@@ -1,18 +1,45 @@
+import type { ConsultationStatus } from '../../schema/enums.schema';
 import type { DataRightsTableEntry } from './data-rights.types';
 
 /**
  * Error-code vocabulary this module's controller surfaces. No
  * `audit_log.entity_type` constant here — this module never calls
  * `AuditService` directly; every audit entry an execution produces is
- * written by the owning module doing the actual write (`patient.service.ts
- * #anonymizeForDeletion`) or by `DataDeletionService#recordExecutionOutcome`
- * itself for the request's own status transition.
+ * written by the owning module doing the actual write
+ * (`patient.service.ts#softDeleteForDeletionRequest`,
+ * `doctor.service.ts#softDeleteForDeletionRequest`) or by
+ * `DataDeletionService#recordExecutionOutcome` itself for the request's own
+ * status transition.
  */
 export const DATA_RIGHTS_ERROR_CODES = {
   DATA_DELETION_REQUEST_NOT_FOUND: 'DATA_DELETION_REQUEST_NOT_FOUND',
   /** Mirrors `DataDeletionService#recordExecutionOutcome`'s own guard — surfaced here so a caller of THIS module's endpoints sees the same code without reading M-03's. */
   DATA_DELETION_NOT_APPROVED: 'DATA_DELETION_NOT_APPROVED',
+  /**
+   * ADDITIVE (open-obligations round). `executeForRequest` found at least
+   * one consultation still in an `OPEN_CONSULTATION_STATUSES` state and no
+   * admin override was given — see `DataRightsService#computeOpenObligations`'s
+   * own header for the concrete scenario this exists to stop (a doctor
+   * meeting a now-nameless patient mid-session; a refund with no one left
+   * to pay it to).
+   */
+  DATA_DELETION_OPEN_OBLIGATIONS: 'DATA_DELETION_OPEN_OBLIGATIONS',
 } as const;
+
+/**
+ * ADDITIVE (open-obligations round). Every `ConsultationStatus` that is NOT
+ * a terminal one — `completed`/`cancelled`/`no_show`/`expired` are the
+ * complement. A consultation in one of these states still has something
+ * genuinely outstanding: money not yet settled, a session not yet held, or
+ * documentation not yet finalised.
+ */
+export const OPEN_CONSULTATION_STATUSES: ReadonlySet<ConsultationStatus> = new Set([
+  'pending_payment',
+  'scheduled',
+  'awaiting_doctor',
+  'in_progress',
+  'awaiting_documentation',
+]);
 
 /**
  * *** THE M-21 PER-TABLE SURVEY — THE POLICY, KEPT IN ONE PLACE. ***

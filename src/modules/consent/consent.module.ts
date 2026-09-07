@@ -1,8 +1,11 @@
 import { Module } from '@nestjs/common';
+import { NotificationFacade } from '../notification/notification.facade';
+import { NotificationModule } from '../notification/notification.module';
 import { ConsentController } from './consent.controller';
 import { ConsentFacade } from './consent.facade';
 import { ConsentRepository } from './consent.repository';
 import { ConsentService } from './consent.service';
+import { DATA_DELETION_NOTIFICATION_PORT } from './data-deletion.constants';
 import { DataDeletionAdminController } from './data-deletion-admin.controller';
 import { DataDeletionController } from './data-deletion.controller';
 import { DataDeletionExecutionFacade } from './data-deletion-execution.facade';
@@ -21,9 +24,12 @@ import { LegalDocumentService } from './legal-document.service';
  * exported `ConsentFacade` to its own port.
  *
  * `DATABASE` and `AuditService` are both `@Global()` (`DatabaseModule`,
- * `AuditModule`), so no `imports` are needed.
+ * `AuditModule`), so no `imports` are needed beyond `NotificationModule` —
+ * ADDITIVE (notify-on-status-change round), for `DataDeletionService`'s own
+ * `DATA_DELETION_NOTIFICATION_PORT` binding below.
  */
 @Module({
+  imports: [NotificationModule],
   controllers: [
     LegalDocumentController,
     LegalDocumentAdminController,
@@ -45,6 +51,11 @@ import { LegalDocumentService } from './legal-document.service';
     // separate facade — see `data-deletion-execution.contract.ts`'s header
     // for why this is not a widening of `ConsentFacade`/`ConsentContract`.
     DataDeletionExecutionFacade,
+    // ADDITIVE (notify-on-status-change round) — see
+    // `data-deletion-notification.contract.ts`'s header for why this
+    // indirection exists even though `NotificationFacade` is real and
+    // already imported above.
+    { provide: DATA_DELETION_NOTIFICATION_PORT, useExisting: NotificationFacade },
   ],
   exports: [ConsentFacade, DataDeletionExecutionFacade],
 })

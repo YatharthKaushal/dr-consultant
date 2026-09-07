@@ -65,6 +65,7 @@ import { specialtiesTable } from '../../schema/specialties.schema';
 import { AppConfigService } from '../../shared/app-config/app-config.service';
 import { AuditService } from '../../shared/audit/audit.service';
 import type { BookingFacade } from '../booking/booking.facade';
+import { toBookingView } from '../booking/booking.mapper';
 import { BookingRepository } from '../booking/booking.repository';
 import type { CareHubFacade } from '../carehub/carehub.facade';
 import type { ClarificationFacade } from '../clarification/clarification.facade';
@@ -80,6 +81,7 @@ import type { FollowupFacade } from '../followup/followup.facade';
 import type { IdentityFacade } from '../identity/identity.facade';
 import { IdentityRepository } from '../identity/identity.repository';
 import type { InstantFacade } from '../instant/instant.facade';
+import type { DataDeletionNotificationPort } from '../consent/data-deletion-notification.contract';
 import type { NotificationFacade } from '../notification/notification.facade';
 import { PatientFacade } from '../patient/patient.facade';
 import { PatientRepository } from '../patient/patient.repository';
@@ -242,14 +244,32 @@ describe('M-21 data-rights execution, against a real database', () => {
     };
 
     const bookingRepo = new BookingRepository(db);
-    const bookingStandIn: Pick<BookingFacade, 'listConsultationIdsForPatient'> = {
+    // ADDITIVE (open-obligations round): the real read paths, via the same
+    // repository this stand-in already wraps — `getBooking`/
+    // `listConsultationIdsForDoctor` mirror `BookingFacade`'s own
+    // implementations exactly (`booking.facade.ts`), so this fixture's
+    // already-`completed` consultation (see the insert above) correctly
+    // resolves to zero open obligations without a second stub type.
+    const bookingStandIn: Pick<BookingFacade, 'listConsultationIdsForPatient' | 'listConsultationIdsForDoctor' | 'getBooking'> = {
       listConsultationIdsForPatient: (patientId: string) => bookingRepo.listConsultationIdsForPatient(patientId),
+      listConsultationIdsForDoctor: (doctorId: string) => bookingRepo.listConsultationIdsForDoctor(doctorId),
+      getBooking: async (consultationId: string) => {
+        const row = await bookingRepo.findById(consultationId);
+        return row ? toBookingView(row) : null;
+      },
     };
 
     const deletionRepo = new DataDeletionRepository(db);
     const consentRepo = new ConsentRepository(db);
     const appConfig = new AppConfigService(db);
-    const dataDeletionService = new DataDeletionService(db, deletionRepo, appConfig, audit);
+    // ADDITIVE (notify-on-status-change round): a stub that never queues —
+    // this file exercises the deletion STATE MACHINE and the real write
+    // paths, not notification delivery, which `data-deletion.service.spec.ts`
+    // already covers with hand-rolled mocks.
+    const notificationStandIn: DataDeletionNotificationPort = {
+      notify: async () => ({ queued: false, notificationId: null, reason: 'template_missing' }),
+    };
+    const dataDeletionService = new DataDeletionService(db, deletionRepo, appConfig, audit, notificationStandIn);
     const deletionExecutionFacade = new DataDeletionExecutionFacade(dataDeletionService, consentRepo);
 
     // ── ADDITIVE (account-deletion lifecycle round): the real deleted_accounts
@@ -305,8 +325,9 @@ describe('M-21 data-rights execution, against a real database', () => {
     const pricing = zeroCounts<Pick<PricingFacade, 'countDataRightsRowsForPatient'>>({
       countDataRightsRowsForPatient: async () => ({ priceQuotes: 0, priceQuoteComponents: 0, refundComponents: 0 }),
     }) as PricingFacade;
-    const payment = zeroCounts<Pick<PaymentFacade, 'countDataRightsRowsForConsultations'>>({
+    const payment = zeroCounts<Pick<PaymentFacade, 'countDataRightsRowsForConsultations' | 'getByConsultationId'>>({
       countDataRightsRowsForConsultations: async () => ({ payments: 0, refunds: 0, paymentEvents: 0 }),
+      getByConsultationId: async () => null,
     }) as PaymentFacade;
 
     service = new DataRightsService(

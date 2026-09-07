@@ -112,6 +112,17 @@ export interface BookingContract {
   /** Every consultation id for one patient, any status/doctor. Empty array, never a throw. */
   listConsultationIdsForPatient(patientId: string): Promise<string[]>;
 
+  /**
+   * ADDITIVE (account-deletion lifecycle round). Every consultation id for
+   * one doctor, any status/patient. Empty array, never a throw. Mirrors
+   * `listConsultationIdsForPatient` above — `data-rights`'s open-obligations
+   * check (`data-rights.service.ts`) needs the doctor-side set for the
+   * identical reason it needs the patient-side one: a doctor's own deletion
+   * request must be able to see whether they are mid-consultation with a
+   * patient before soft-deleting them.
+   */
+  listConsultationIdsForDoctor(doctorId: string): Promise<string[]>;
+
   /* ── General reads other modules will need ─────────────────────────────── */
 
   /** The full booking view by id, or `null`. For M-12/M-14/M-15/M-19, which each hang their own record off a consultation id. */
