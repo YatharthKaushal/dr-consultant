@@ -29,6 +29,8 @@
     "db:seed:pricing": "ts-node -r tsconfig-paths/register src/modules/pricing/pricing.seed.ts",
     "db:seed:promotions": "ts-node -r tsconfig-paths/register src/modules/promotion/promotion.seed.ts",
     "db:seed:video": "ts-node -r tsconfig-paths/register src/modules/video/video.seed.ts",
+    "db:seed:followup": "ts-node -r tsconfig-paths/register src/modules/followup/followup.seed.ts",
+    "db:seed:carehub": "ts-node -r tsconfig-paths/register src/modules/carehub/carehub.seed.ts",
     "db:seed:demo": "ts-node -r tsconfig-paths/register src/demo.seed.ts"
   },
   "dependencies": {
