@@ -1,6 +1,16 @@
 import type { DeletionStatus } from '../../schema/enums.schema';
 
-export type DataRightsDecision = 'hard_delete' | 'anonymize' | 'retain';
+/**
+ * `'soft_delete'` is ADDITIVE (account-deletion lifecycle round) — replaces
+ * what `patients` used to be (`'anonymize'`, destroying `fullName`/
+ * `dateOfBirth` in place). A soft delete keeps identity fields live in
+ * storage (masked at READ time instead, `shared/privacy/mask.util.ts`) and
+ * is REVERSIBLE by an admin `restore` — an `anonymize` never was. See
+ * `patient.service.ts#softDeleteForDeletionRequest`'s header for the full
+ * account of why the earlier design made "the admin can restore any
+ * deleted account forever" untrue.
+ */
+export type DataRightsDecision = 'hard_delete' | 'anonymize' | 'soft_delete' | 'retain';
 
 /**
  * One row of the M-21 per-table survey (see `data-rights.constants.ts`),
@@ -37,10 +47,22 @@ export interface DataRightsTableEntry {
   humanDecisionNote?: string;
 }
 
-/** `previewExecution`'s full return value. Writes nothing — see `data-rights.service.ts`. */
+/**
+ * `previewExecution`'s full return value. Writes nothing — see
+ * `data-rights.service.ts`.
+ *
+ * *** ADDITIVE (account-deletion lifecycle round): `doctorId` JOINS
+ * `patientId`, BOTH NOW NULLABLE. *** Exactly one is set, mirroring
+ * `data-deletion-requests.schema.ts`'s own `account_xor_check` — a doctor's
+ * own request previews the (much shorter) `DOCTOR_TABLE_SURVEY` instead of
+ * the patient one. Kept as a pair rather than renamed to a generic
+ * `accountType`/`accountId` to minimise churn on every existing
+ * patient-path caller/test that already reads `.patientId`.
+ */
 export interface DataRightsPreview {
   requestId: string;
-  patientId: string;
+  patientId: string | null;
+  doctorId: string | null;
   /** The request's CURRENT status at the moment of preview — read-only context, not a precondition preview itself enforces. */
   requestStatus: DeletionStatus;
   tables: DataRightsTableEntry[];
@@ -51,7 +73,7 @@ export interface DataRightsPreview {
 export interface DataRightsStepOutcome {
   table: string;
   module: string;
-  decision: Extract<DataRightsDecision, 'hard_delete' | 'anonymize'>;
+  decision: Extract<DataRightsDecision, 'hard_delete' | 'anonymize' | 'soft_delete'>;
   status: 'success' | 'failed';
   /** Rows removed (hard_delete) or rows changed (anonymize). Present only on `status: 'success'`. */
   rowsAffected?: number;
@@ -67,7 +89,9 @@ export interface DataRightsStepOutcome {
  */
 export interface DataRightsExecutionOutcome {
   requestId: string;
-  patientId: string;
+  /** ADDITIVE (account-deletion lifecycle round): `doctorId` joins `patientId`, both nullable — exactly one set, same as `DataRightsPreview`. */
+  patientId: string | null;
+  doctorId: string | null;
   executedAt: string;
   /**
    * `'executed'` only when EVERY mutating step succeeded. `'failed'` the
@@ -88,7 +112,8 @@ export interface DataRightsExecutionOutcome {
 
 export interface DataRightsExecutionResult {
   requestId: string;
-  patientId: string;
+  patientId: string | null;
+  doctorId: string | null;
   status: Extract<DeletionStatus, 'executed' | 'failed'>;
   executionOutcome: DataRightsExecutionOutcome;
 }

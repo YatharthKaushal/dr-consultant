@@ -24,10 +24,24 @@ export const patientsTable = pgTable(
     tokenVersion: smallint('token_version').notNull().default(0),
     pushToken: text('push_token'),
     deviceId: varchar('device_id', { length: 120 }),
+    /**
+     * ADDITIVE (account-deletion lifecycle round). Set the moment a
+     * data-deletion request against this patient EXECUTES —
+     * `deleted-accounts.service.ts#softDelete`. `status` moves to `deleted`
+     * in the same write (kept, not replaced by this column, so every
+     * existing `status = 'deleted'` check in `identity.repository.ts`/
+     * `patient.service.ts` keeps working unchanged). `full_name`/
+     * `date_of_birth` are DELIBERATELY NOT nulled — a soft delete keeps
+     * them so a restore is a real restore, not a re-collection; other
+     * modules read a soft-deleted patient's identity only through
+     * `PatientFacade.getProfileSummary`, which masks it whenever this
+     * column is set (`shared/privacy/mask.util.ts`).
+     */
+    deletedAt: timestamp('deleted_at', { withTimezone: true, mode: 'date' }),
     createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'date' }).notNull().defaultNow(),
   },
-  (table) => [index().on(table.status), index().on(table.pushToken)],
+  (table) => [index().on(table.status), index().on(table.pushToken), index().on(table.deletedAt)],
 );
 
 export type PatientRow = typeof patientsTable.$inferSelect;

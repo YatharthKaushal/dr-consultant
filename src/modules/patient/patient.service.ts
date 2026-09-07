@@ -3,6 +3,7 @@ import type { AccountStatus } from '../../schema/enums.schema';
 import type { PatientRow } from '../../schema/patients.schema';
 import { AuditService } from '../../shared/audit/audit.service';
 import { IdentityFacade } from '../identity/identity.facade';
+import type { DeletionActor, PatientDeletionSnapshot } from './patient.contract';
 import { PATIENT_AUDIT_ENTITY_TYPES, PATIENT_ERROR_CODES } from './patient.constants';
 import type { UpdatePatientProfileDto } from './patient.dto';
 import { PatientRepository } from './patient.repository';
@@ -120,56 +121,99 @@ export class PatientService {
   }
 
   /**
-   * ADDITIVE (M-21/data rights execution). See `PatientContract
-   * #anonymizeForDeletion`'s header for the idempotency contract.
+   * ADDITIVE (account-deletion lifecycle round — replaces the earlier
+   * `anonymizeForDeletion`). See `PatientContract
+   * #softDeleteForDeletionRequest`'s header for the idempotency contract.
    *
-   * *** WHY `patients` IS ANONYMIZED, NEVER HARD-DELETED. *** The M-21
-   * survey retains `consultations`, `clinical_records`, `payments`,
+   * *** WHY `patients` IS SOFT-DELETED, NEVER HARD-DELETED — AND WHY IT
+   * KEEPS `fullName`/`dateOfBirth` NOW, UNLIKE THE OLD `anonymizeForDeletion`. ***
+   * The M-21 survey retains `consultations`, `clinical_records`, `payments`,
    * `audit_log` and every other clinical/financial table for a deleted
    * patient — medical-record and financial retention obligations
    * (`docs/SRS.md` §5.3, §8) that a single deletion request does not
-   * override. Every one of those tables carries a NOT NULL `patient_id` FK
-   * to this row. Hard-deleting it would either violate that FK or force
+   * override; every one of those tables carries a NOT NULL `patient_id` FK
+   * to this row, so hard-deleting it would either violate that FK or force
    * cascading through tables this survey deliberately decided NOT to touch.
-   * Anonymizing severs the identity while every FK keeps resolving.
+   * The earlier design ALSO destroyed `fullName`/`dateOfBirth` in place,
+   * which made "the admin can restore any deleted account forever" a lie —
+   * there was nothing left to restore TO. This version keeps them (a real,
+   * separate `deleted_accounts` snapshot exists too, owned by `data-rights`,
+   * as the "second copy for safety") and relies on `deleted_at` — not a
+   * destroyed name — as the signal other modules mask against
+   * (`shared/privacy/mask.util.ts`, applied in `PatientFacade.
+   * getProfileSummary`).
+   *
+   * Returns the PRE-mutation row as `snapshot` (jsonb-safe) plus the
+   * account's real `originalMobileNumber` — `data-rights`'s own
+   * `DeletedAccountsService` is what persists those into `deleted_accounts`
+   * (a table this module does not own and never writes).
    *
    * Four writes, deliberately not one transaction spanning modules
    * (`backend/README.md` §2 forbids a cross-module transaction):
-   *   1. This table's own identifying columns, nulled.
-   *   2. `status` -> `deleted`, reusing `updateStatus` — which also revokes
-   *      every live session (`REVOKING_STATUSES` already includes
-   *      `'deleted'`) and writes its own audit entry for the transition.
-   *   3. `mobileNumber`, anonymized through `IdentityFacade` — identity
-   *      owns that column, never this module (see `patient.repository.ts`'s
-   *      header and `anonymizeIdentity`'s own comment).
-   *   4. A `delete`-action audit entry for the anonymization itself,
-   *      distinct from `updateStatus`'s own `update`-action entry for the
-   *      status transition.
+   *   1. `repo.softDelete` — `status` -> `deleted`, `deleted_at` stamped,
+   *      `pushToken`/`deviceId` cleared (device hygiene: a deleted account
+   *      must stop receiving pushes). Identity fields untouched.
+   *   2. Sessions revoked through `IdentityFacade` — the same call
+   *      `updateStatus` used to make via `REVOKING_STATUSES`, made
+   *      directly here since this method no longer routes through
+   *      `updateStatus` (that method's own `update`-action audit entry
+   *      would misrepresent this as an ordinary moderation edit).
+   *   3. `mobileNumber`, vacated through `IdentityFacade` — identity owns
+   *      that column, never this module. THIS is what makes "sign up again
+   *      if you try to access the deleted account" true:
+   *      `findOrCreatePatientByMobile` sees the real number as free.
+   *   4. A `delete`-action audit entry, attributed to `actor` (an admin, or
+   *      `system` for the grace-period sweep — see `data-deletion.types.ts
+   *      #DeletionExecutionActor`).
    *
-   * The caller (`data-rights` module) is responsible for deciding what
-   * happens if a later step in ITS OWN sequence fails — this method either
-   * completes all four writes or throws; it does not partially apply.
+   * The caller (`data-rights` module) decides what happens if a later step
+   * in ITS OWN sequence fails — this method either completes all four
+   * writes or throws; it does not partially apply.
    */
-  async anonymizeForDeletion(patientId: string, actorAdminId: string): Promise<{ anonymized: boolean }> {
+  async softDeleteForDeletionRequest(patientId: string, actor: DeletionActor): Promise<PatientDeletionSnapshot> {
     const existing = await this.findOrThrow(patientId);
-    if (existing.status === 'deleted') {
-      return { anonymized: false };
+    if (existing.deletedAt) {
+      return { softDeleted: false, snapshot: null, originalMobileNumber: null };
     }
 
-    await this.repo.anonymizeIdentity(patientId);
-    await this.updateStatus(actorAdminId, patientId, 'deleted');
+    const originalMobileNumber = existing.mobileNumber;
+    const snapshot: Record<string, unknown> = { ...existing };
+
+    const softDeleted = await this.repo.softDelete(patientId, new Date());
+    if (!softDeleted) {
+      // Lost a race with a concurrent execution — treat as already done.
+      return { softDeleted: false, snapshot: null, originalMobileNumber: null };
+    }
+
+    await this.identity.revokeAllSessions('patient', patientId, { actorType: actor.actorType, actorId: actor.actorId ?? patientId });
     await this.identity.anonymizeMobileNumber('patient', patientId);
 
     await this.audit.write({
-      actorType: 'admin',
-      actorId: actorAdminId,
+      actorType: actor.actorType,
+      actorId: actor.actorId,
       action: 'delete',
       entityType: PATIENT_AUDIT_ENTITY_TYPES.PATIENT,
       entityId: patientId,
       metadata: { reason: 'data_deletion_request_executed' },
     });
 
-    return { anonymized: true };
+    return { softDeleted: true, snapshot, originalMobileNumber };
+  }
+
+  /**
+   * ADDITIVE (account-deletion lifecycle round). The un-do —
+   * `deleted-accounts.service.ts#restore`'s patient half. Restores
+   * `mobileNumber` (identity's column) and this table's own `status`/
+   * `deleted_at` in that order — mobile FIRST, so a unique-constraint
+   * failure (the number was reassigned since) leaves the account still
+   * cleanly `deleted` rather than half-restored with no working sign-in
+   * identifier. `data-rights` orchestrates the ordering; this method is the
+   * one call it makes once the mobile write has already succeeded.
+   */
+  async restoreFromDeletion(patientId: string): Promise<{ restored: boolean }> {
+    const row = await this.repo.restore(patientId);
+    if (!row) return { restored: false };
+    return { restored: true };
   }
 
   private async findOrThrow(patientId: string): Promise<PatientRow> {

@@ -23,7 +23,8 @@ describe('DataRightsFacade', () => {
     const { facade, service } = createDeps();
     service.executeForRequest.mockResolvedValue({ requestId: 'r1', status: 'executed' } as never);
 
-    await expect(facade.executeForRequest('r1', 'admin-1')).resolves.toEqual({ requestId: 'r1', status: 'executed' });
-    expect(service.executeForRequest).toHaveBeenCalledWith('r1', 'admin-1');
+    const actor = { actorType: 'admin' as const, actorId: 'admin-1' };
+    await expect(facade.executeForRequest('r1', actor)).resolves.toEqual({ requestId: 'r1', status: 'executed' });
+    expect(service.executeForRequest).toHaveBeenCalledWith('r1', actor);
   });
 });

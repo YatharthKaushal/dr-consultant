@@ -343,6 +343,19 @@ export class IdentityRepository {
     return { changed: !!row };
   }
 
+  /** See `IdentityContract#restoreMobileNumber`. Unconditional (no placeholder-only guard) — throws on a unique-constraint violation, which the caller is documented to catch. */
+  async restoreMobileNumber(accountType: AccountType, id: string, mobileNumber: string, executor: Executor = this.db): Promise<void> {
+    if (accountType === 'patient') {
+      await executor.update(patientsTable).set({ mobileNumber, updatedAt: new Date() }).where(eq(patientsTable.id, id));
+      return;
+    }
+    if (accountType === 'doctor') {
+      await executor.update(doctorsTable).set({ mobileNumber, updatedAt: new Date() }).where(eq(doctorsTable.id, id));
+      return;
+    }
+    await executor.update(adminsTable).set({ mobileNumber, updatedAt: new Date() }).where(eq(adminsTable.id, id));
+  }
+
   /** Returns the new `tokenVersion`. Used by `logout-all` and by a status change that must kill live sessions immediately. */
   async bumpTokenVersion(accountType: AccountType, id: string, executor: Executor = this.db): Promise<number> {
     if (accountType === 'patient') {

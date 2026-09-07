@@ -6,6 +6,7 @@ export function toDataDeletionRequestRecord(row: DataDeletionRequestRow): DataDe
   return {
     id: row.id,
     patientId: row.patientId,
+    doctorId: row.doctorId,
     status: row.status,
     reason: row.reason,
     reviewedByAdminId: row.reviewedByAdminId,
@@ -13,6 +14,8 @@ export function toDataDeletionRequestRecord(row: DataDeletionRequestRow): DataDe
     reviewNote: row.reviewNote,
     executedAt: row.executedAt?.toISOString() ?? null,
     executionOutcome: row.executionOutcome ?? null,
+    scheduledFor: row.scheduledFor?.toISOString() ?? null,
+    cancelledAt: row.cancelledAt?.toISOString() ?? null,
     createdAt: row.createdAt.toISOString(),
   };
 }

@@ -33,10 +33,10 @@ export class DataRightsAdminController {
     return this.dataRights.previewExecution(id);
   }
 
-  /** The one place in this codebase that actually deletes or anonymizes a patient's data. Refuses unless the request is currently `approved`. */
+  /** The one place an ADMIN reaches the code that actually deletes or anonymizes an account's data (the sweep is the other — see `data-rights-execution-sweep.service.ts`). Refuses unless the request is currently `approved`. */
   @Post(':id/execute')
   @RequirePermission(PERMISSIONS.COMPLIANCE_MANAGE_DELETION_REQUESTS)
   execute(@CurrentUser() auth: AuthContext, @Param('id', createUuidValidationPipe('id')) id: string) {
-    return this.dataRights.executeForRequest(id, auth.accountId);
+    return this.dataRights.executeForRequest(id, { actorType: 'admin', actorId: auth.accountId });
   }
 }

@@ -1,5 +1,5 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { and, asc, eq, exists, inArray, isNull, lte, notInArray, sql } from 'drizzle-orm';
+import { and, asc, eq, exists, inArray, isNotNull, isNull, lte, notInArray, sql } from 'drizzle-orm';
 import { DATABASE } from '../../config/db/database.module';
 import type { Database, DatabaseTransaction } from '../../config/db/database.config';
 import { doctorSpecialtiesTable } from '../../schema/doctor-specialties.schema';
@@ -236,6 +236,45 @@ export class DoctorRepository {
       .update(doctorsTable)
       .set({ seniorityLevel, updatedAt: new Date() })
       .where(eq(doctorsTable.id, id))
+      .returning();
+    return row ?? null;
+  }
+
+  /**
+   * ADDITIVE (account-deletion lifecycle round). Mirrors `PatientRepository
+   * #softDelete` — identity fields (`fullName`, `qualification`,
+   * `registrationNumber`, ...) are DELIBERATELY KEPT, unlike a destructive
+   * anonymize, so a restore is real. Also sets `verificationStatus ->
+   * 'suspended'` (the existing `DOCTOR_INACTIVE_STATUSES` set in
+   * `identity.repository.ts` already treats this as "cannot sign in", so a
+   * soft-deleted doctor is blocked at auth with NO new status value needed)
+   * and `isListed -> false` (a deleted doctor must not appear in any
+   * listing). Guarded on `deleted_at IS NULL` for retry-safety.
+   */
+  async softDelete(id: string, deletedAt: Date, executor: Executor = this.db): Promise<DoctorRow | null> {
+    const [row] = await executor
+      .update(doctorsTable)
+      .set({ deletedAt, verificationStatus: 'suspended', isListed: false, allowInstantConsult: false, presence: 'offline', pushToken: null, deviceId: null, updatedAt: new Date() })
+      .where(and(eq(doctorsTable.id, id), isNull(doctorsTable.deletedAt)))
+      .returning();
+    return row ?? null;
+  }
+
+  /**
+   * ADDITIVE (account-deletion lifecycle round). The un-do. `verificationStatus`
+   * is restored to WHATEVER THE CALLER PASSES (the pre-delete snapshot's own
+   * value) rather than assumed `'verified'` — a doctor who was `pending`/
+   * `under_review` at the moment of deletion should come back exactly
+   * there, not skip straight to bookable. `isListed` intentionally stays
+   * `false` regardless — a restored doctor needs a fresh admin decision to
+   * re-list, the same posture a newly-verified doctor already starts from
+   * (`doctors.schema.ts`'s own default).
+   */
+  async restore(id: string, verificationStatus: DoctorVerificationStatus, executor: Executor = this.db): Promise<DoctorRow | null> {
+    const [row] = await executor
+      .update(doctorsTable)
+      .set({ deletedAt: null, verificationStatus, updatedAt: new Date() })
+      .where(and(eq(doctorsTable.id, id), isNotNull(doctorsTable.deletedAt)))
       .returning();
     return row ?? null;
   }

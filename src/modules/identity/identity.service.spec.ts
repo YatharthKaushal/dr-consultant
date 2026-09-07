@@ -47,7 +47,11 @@ function createDeps() {
     countRecentAttemptsByIp: jest.fn().mockResolvedValue(0),
     findDoctorAuthStateByMobile: jest.fn(),
     findAdminAuthStateByMobile: jest.fn(),
-    findPatientAuthStateById: jest.fn(),
+    // Default: an active patient — most tests exercising an EXISTING
+    // account (`isNewAccount: false`) don't care about this check and
+    // should not have to opt in to it; the suspended-refusal tests below
+    // override it explicitly.
+    findPatientAuthStateById: jest.fn().mockResolvedValue({ id: 'patient-1', isActive: true, tokenVersion: 0 }),
     findDoctorAuthStateById: jest.fn(),
     findAdminAuthStateById: jest.fn(),
     findOrCreatePatientByMobile: jest.fn(),
@@ -263,6 +267,47 @@ describe('IdentityService', () => {
       await service.verifyOtp({ challengeId: 'challenge-1', code: '123456' });
 
       expect(otp.verifyToken).toHaveBeenCalledTimes(1);
+    });
+
+    /** *** BUG FIX (account-deletion lifecycle audit). *** A suspended patient's mobile number is unchanged, so `findOrCreatePatientByMobile` matches the existing row — this proves that no longer mints a token silently. */
+    it('refuses a SUSPENDED patient — an existing account with an unchanged (never-vacated) mobile number', async () => {
+      const { service, repo, otp, tokenService } = createDeps();
+      repo.findChallengeById.mockResolvedValue(baseChallenge() as never);
+      otp.verify.mockResolvedValue({ accessToken: 'slide.jwt' });
+      otp.verifyToken.mockResolvedValue({ verified: true, identifier: '+919876543210', verifiedAt: NOW.toISOString() });
+      repo.findOrCreatePatientByMobile.mockResolvedValue({ id: 'patient-1', isNewAccount: false, tokenVersion: 0 });
+      repo.findPatientAuthStateById.mockResolvedValue({ id: 'patient-1', isActive: false, tokenVersion: 0 });
+
+      await expect(service.verifyOtp({ challengeId: 'challenge-1', code: '123456' })).rejects.toBeInstanceOf(ForbiddenException);
+      expect(tokenService.mintTokenPair).not.toHaveBeenCalled();
+    });
+
+    it('never checks patient auth-state for a brand-new account — nothing to be suspended from yet', async () => {
+      const { service, repo, otp } = createDeps();
+      repo.findChallengeById.mockResolvedValue(baseChallenge() as never);
+      otp.verify.mockResolvedValue({ accessToken: 'slide.jwt' });
+      otp.verifyToken.mockResolvedValue({ verified: true, identifier: '+919876543210', verifiedAt: NOW.toISOString() });
+      repo.findOrCreatePatientByMobile.mockResolvedValue({ id: 'patient-1', isNewAccount: true, tokenVersion: 0 });
+
+      await service.verifyOtp({ challengeId: 'challenge-1', code: '123456' });
+
+      expect(repo.findPatientAuthStateById).not.toHaveBeenCalled();
+    });
+
+    it('a DELETED patient signs back in as a brand-new account, never refused — the mobile number was vacated at execution, so this is the intended "sign up again" path, not the suspended one', async () => {
+      const { service, repo, otp, tokenService } = createDeps();
+      repo.findChallengeById.mockResolvedValue(baseChallenge() as never);
+      otp.verify.mockResolvedValue({ accessToken: 'slide.jwt' });
+      otp.verifyToken.mockResolvedValue({ verified: true, identifier: '+919876543210', verifiedAt: NOW.toISOString() });
+      // A deleted account's row keeps its OWN vacated number — a real
+      // still-registered number that reaches this point is, by definition,
+      // either active or a fresh signup, so `findOrCreatePatientByMobile`
+      // inserts a genuinely new row (`isNewAccount: true`).
+      repo.findOrCreatePatientByMobile.mockResolvedValue({ id: 'patient-2', isNewAccount: true, tokenVersion: 0 });
+
+      await service.verifyOtp({ challengeId: 'challenge-1', code: '123456' });
+
+      expect(tokenService.mintTokenPair).toHaveBeenCalledWith('patient', 'patient-2', 0);
     });
   });
 

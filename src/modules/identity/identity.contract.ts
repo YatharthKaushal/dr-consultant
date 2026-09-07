@@ -74,4 +74,24 @@ export interface IdentityContract {
    * mobile number is already the deterministic placeholder for its id.
    */
   anonymizeMobileNumber(accountType: AccountType, id: string): Promise<{ changed: boolean }>;
+
+  /**
+   * ADDITIVE (account-deletion lifecycle round). `deleted-accounts.
+   * service.ts#restore`'s own write for undoing `anonymizeMobileNumber` —
+   * writes `mobileNumber` back onto `(accountType, id)` UNCONDITIONALLY
+   * (no placeholder-only guard the way `anonymizeMobileNumber` needs one,
+   * since restore is a deliberate, one-time admin act, not something
+   * retried blindly).
+   *
+   * *** THROWS ON A UNIQUE-CONSTRAINT VIOLATION — THE CALLER MUST CATCH IT. ***
+   * If a NEWER account has since taken this mobile number (the very thing
+   * vacating it at execution time was FOR — see `anonymizeMobileNumber`'s
+   * own comment on "if the user tries to access the account they have to
+   * sign up again"), this throws the raw Postgres unique-violation rather
+   * than silently refusing or overwriting. `deleted-accounts.service.ts`
+   * catches it via `isUniqueConstraintViolation` and reports
+   * `MOBILE_NUMBER_REASSIGNED` — this method itself stays a plain, honest
+   * write with no awareness of that HTTP-facing decision.
+   */
+  restoreMobileNumber(accountType: AccountType, id: string, mobileNumber: string): Promise<void>;
 }

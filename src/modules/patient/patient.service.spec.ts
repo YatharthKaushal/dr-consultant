@@ -16,6 +16,7 @@ function basePatient(overrides: Record<string, unknown> = {}) {
     tokenVersion: 0,
     pushToken: null,
     deviceId: null,
+    deletedAt: null,
     createdAt: new Date('2026-01-01T00:00:00.000Z'),
     updatedAt: new Date('2026-01-01T00:00:00.000Z'),
     ...overrides,
@@ -29,6 +30,8 @@ function createDeps() {
     updateProfile: jest.fn(),
     updateStatus: jest.fn(),
     anonymizeIdentity: jest.fn(),
+    softDelete: jest.fn(),
+    restore: jest.fn(),
   } as unknown as jest.Mocked<PatientRepository>;
 
   const identity = {
@@ -261,41 +264,50 @@ describe('PatientService', () => {
     });
   });
 
-  describe('anonymizeForDeletion', () => {
-    it('nulls the identifying columns, sets status to deleted, revokes sessions, anonymizes the mobile number, and audits a delete action', async () => {
+  describe('softDeleteForDeletionRequest (account-deletion lifecycle round)', () => {
+    it('soft-deletes (keeping fullName/dateOfBirth), revokes sessions, vacates the mobile number, audits a delete action, and returns the pre-mutation snapshot', async () => {
       const { service, repo, identity, audit } = createDeps();
-      repo.findById.mockResolvedValue(basePatient({ status: 'active', fullName: 'Jane Doe' }) as never);
-      repo.anonymizeIdentity.mockResolvedValue(basePatient({ status: 'active', fullName: null }) as never);
-      repo.updateStatus.mockResolvedValue(basePatient({ status: 'deleted', fullName: null }) as never);
+      const existing = basePatient({ status: 'active', fullName: 'Jane Doe', mobileNumber: '+919876543210' });
+      repo.findById.mockResolvedValue(existing as never);
+      repo.softDelete.mockResolvedValue(basePatient({ status: 'deleted', fullName: 'Jane Doe', deletedAt: new Date() }) as never);
 
-      await expect(service.anonymizeForDeletion('patient-1', 'admin-1')).resolves.toEqual({ anonymized: true });
+      const result = await service.softDeleteForDeletionRequest('patient-1', { actorType: 'admin', actorId: 'admin-1' });
 
-      expect(repo.anonymizeIdentity).toHaveBeenCalledWith('patient-1');
-      expect(repo.updateStatus).toHaveBeenCalledWith('patient-1', 'deleted');
-      expect(identity.revokeAllSessions).toHaveBeenCalledWith('patient', 'patient-1', {
-        actorType: 'admin',
-        actorId: 'admin-1',
-      });
+      expect(result.softDeleted).toBe(true);
+      expect(result.originalMobileNumber).toBe('+919876543210');
+      // The identity fields survive the snapshot — this is a soft delete, not a destructive anonymize.
+      expect(result.snapshot).toMatchObject({ id: 'patient-1', fullName: 'Jane Doe' });
+
+      expect(repo.softDelete).toHaveBeenCalledWith('patient-1', expect.any(Date));
+      expect(identity.revokeAllSessions).toHaveBeenCalledWith('patient', 'patient-1', { actorType: 'admin', actorId: 'admin-1' });
       expect(identity.anonymizeMobileNumber).toHaveBeenCalledWith('patient', 'patient-1');
       expect(audit.write).toHaveBeenCalledWith(
-        expect.objectContaining({
-          actorType: 'admin',
-          actorId: 'admin-1',
-          action: 'delete',
-          entityType: 'patient',
-          entityId: 'patient-1',
-        }),
+        expect.objectContaining({ actorType: 'admin', actorId: 'admin-1', action: 'delete', entityType: 'patient', entityId: 'patient-1' }),
       );
     });
 
-    it('is idempotent — a patient already deleted is a no-op, with no writes at all', async () => {
+    it('attributes the sweep correctly — actorType system, actorId null on the audit entry, self-attributed session revocation', async () => {
       const { service, repo, identity, audit } = createDeps();
-      repo.findById.mockResolvedValue(basePatient({ status: 'deleted' }) as never);
+      repo.findById.mockResolvedValue(basePatient({ status: 'active' }) as never);
+      repo.softDelete.mockResolvedValue(basePatient({ status: 'deleted', deletedAt: new Date() }) as never);
 
-      await expect(service.anonymizeForDeletion('patient-1', 'admin-1')).resolves.toEqual({ anonymized: false });
+      await service.softDeleteForDeletionRequest('patient-1', { actorType: 'system', actorId: null });
 
-      expect(repo.anonymizeIdentity).not.toHaveBeenCalled();
-      expect(repo.updateStatus).not.toHaveBeenCalled();
+      expect(identity.revokeAllSessions).toHaveBeenCalledWith('patient', 'patient-1', { actorType: 'system', actorId: 'patient-1' });
+      expect(audit.write).toHaveBeenCalledWith(expect.objectContaining({ actorType: 'system', actorId: null }));
+    });
+
+    it('is idempotent — a patient already soft-deleted is a no-op, with no writes at all', async () => {
+      const { service, repo, identity, audit } = createDeps();
+      repo.findById.mockResolvedValue(basePatient({ status: 'deleted', deletedAt: new Date() }) as never);
+
+      await expect(service.softDeleteForDeletionRequest('patient-1', { actorType: 'admin', actorId: 'admin-1' })).resolves.toEqual({
+        softDeleted: false,
+        snapshot: null,
+        originalMobileNumber: null,
+      });
+
+      expect(repo.softDelete).not.toHaveBeenCalled();
       expect(identity.anonymizeMobileNumber).not.toHaveBeenCalled();
       expect(audit.write).not.toHaveBeenCalled();
     });
@@ -304,7 +316,24 @@ describe('PatientService', () => {
       const { service, repo } = createDeps();
       repo.findById.mockResolvedValue(null);
 
-      await expect(service.anonymizeForDeletion('missing', 'admin-1')).rejects.toBeInstanceOf(NotFoundException);
+      await expect(service.softDeleteForDeletionRequest('missing', { actorType: 'admin', actorId: 'admin-1' })).rejects.toBeInstanceOf(NotFoundException);
+    });
+  });
+
+  describe('restoreFromDeletion (account-deletion lifecycle round)', () => {
+    it('restores via the repository and reports true', async () => {
+      const { service, repo } = createDeps();
+      repo.restore.mockResolvedValue(basePatient({ status: 'active', deletedAt: null }) as never);
+
+      expect(await service.restoreFromDeletion('patient-1')).toEqual({ restored: true });
+      expect(repo.restore).toHaveBeenCalledWith('patient-1');
+    });
+
+    it('reports false when the repository guard refuses (not actually deleted)', async () => {
+      const { service, repo } = createDeps();
+      repo.restore.mockResolvedValue(null);
+
+      expect(await service.restoreFromDeletion('patient-1')).toEqual({ restored: false });
     });
   });
 });

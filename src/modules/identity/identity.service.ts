@@ -300,6 +300,26 @@ export class IdentityService {
   ): Promise<{ id: string; tokenVersion: number; isNewAccount: boolean }> {
     if (audience === 'patient') {
       const result = await this.repo.findOrCreatePatientByMobile(mobileNumber, tx);
+
+      // *** BUG FIX (account-deletion lifecycle audit). *** A brand-new
+      // number always signs in (FR-1.1's open self-signup, `isNewAccount`
+      // true) — no status to check yet. An EXISTING row, though, was
+      // previously trusted unconditionally: a `suspended` patient's mobile
+      // number is UNCHANGED (only a `deleted` account's is vacated, which
+      // is what correctly forces that case through `isNewAccount: true`
+      // instead), so `findOrCreatePatientByMobile` matched the row and
+      // handed back a real token pair regardless of `status` — the doctor
+      // and admin branches below already guard exactly this, and the
+      // patient branch simply never did. `bumpTokenVersion` (session
+      // revocation on suspend) only invalidates ALREADY-ISSUED tokens; a
+      // fresh OTP verify was never blocked from minting a new one.
+      if (!result.isNewAccount) {
+        const state = await this.repo.findPatientAuthStateById(result.id, tx);
+        if (!state || !state.isActive) {
+          throw new ForbiddenException({ code: IDENTITY_ERROR_CODES.ACCOUNT_NOT_FOUND_FOR_ROLE, message: 'This account is suspended.' });
+        }
+      }
+
       return { id: result.id, tokenVersion: result.tokenVersion, isNewAccount: result.isNewAccount };
     }
 

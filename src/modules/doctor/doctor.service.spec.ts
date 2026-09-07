@@ -4,6 +4,7 @@ import type { AuditService } from '../../shared/audit/audit.service';
 import type { AuthContext } from '../../shared/auth/auth.types';
 import type { CatalogueFacade } from '../catalogue/catalogue.facade';
 import type { PublicSpecialty } from '../catalogue/catalogue.contract';
+import type { IdentityFacade } from '../identity/identity.facade';
 import { DoctorDocumentRepository } from './doctor-document.repository';
 import { DoctorSpecialtyRepository } from './doctor-specialty.repository';
 import { DoctorRepository } from './doctor.repository';
@@ -51,6 +52,7 @@ function baseDoctor(overrides: Partial<DoctorRow> = {}): DoctorRow {
     allowInstantConsult: false,
     presence: 'offline',
     blockedByConsultationId: null,
+    deletedAt: null,
     createdAt: NOW,
     updatedAt: NOW,
     ...overrides,
@@ -66,6 +68,8 @@ function createDeps() {
     create: jest.fn(),
     updateProfileFields: jest.fn(),
     updateOwnProfile: jest.fn(),
+    softDelete: jest.fn(),
+    restore: jest.fn(),
   } as unknown as jest.Mocked<DoctorRepository>;
 
   const specialtyRepo = {
@@ -82,8 +86,13 @@ function createDeps() {
     getSpecialtyById: jest.fn().mockResolvedValue(baseCatalogueSpecialty()),
   } as unknown as jest.Mocked<CatalogueFacade>;
 
-  const service = new DoctorService(repo, specialtyRepo, documentRepo, audit, catalogue);
-  return { service, repo, specialtyRepo, documentRepo, audit, catalogue };
+  const identity = {
+    revokeAllSessions: jest.fn().mockResolvedValue(undefined),
+    anonymizeMobileNumber: jest.fn().mockResolvedValue({ changed: true }),
+  } as unknown as jest.Mocked<IdentityFacade>;
+
+  const service = new DoctorService(repo, specialtyRepo, documentRepo, audit, catalogue, identity);
+  return { service, repo, specialtyRepo, documentRepo, audit, catalogue, identity };
 }
 
 describe('DoctorService', () => {
@@ -501,6 +510,68 @@ describe('DoctorService', () => {
       repo.updateProfileFields.mockRejectedValue(dbError);
 
       await expect(service.adminUpdateProfileFields('admin-1', 'doctor-1', { fullName: 'New Name' })).rejects.toBe(dbError);
+    });
+  });
+
+  describe('softDeleteForDeletionRequest / restoreFromDeletion (account-deletion lifecycle round)', () => {
+    it('soft-deletes, revokes sessions, vacates the mobile number, audits, and returns the pre-mutation snapshot', async () => {
+      const { service, repo, identity, audit } = createDeps();
+      const existing = baseDoctor({ mobileNumber: '+919876543210', fullName: 'Dr. Test' });
+      repo.findById.mockResolvedValue(existing);
+      repo.softDelete.mockResolvedValue(baseDoctor({ deletedAt: NOW }));
+
+      const result = await service.softDeleteForDeletionRequest('doctor-1', { actorType: 'admin', actorId: 'admin-1' });
+
+      expect(result.softDeleted).toBe(true);
+      expect(result.originalMobileNumber).toBe('+919876543210');
+      expect(result.snapshot).toMatchObject({ id: 'doctor-1', fullName: 'Dr. Test' });
+      expect(identity.revokeAllSessions).toHaveBeenCalledWith('doctor', 'doctor-1', { actorType: 'admin', actorId: 'admin-1' });
+      expect(identity.anonymizeMobileNumber).toHaveBeenCalledWith('doctor', 'doctor-1');
+      expect(audit.write).toHaveBeenCalledWith(
+        expect.objectContaining({ actorType: 'admin', actorId: 'admin-1', action: 'delete', entityType: 'doctor', entityId: 'doctor-1' }),
+      );
+    });
+
+    it('attributes the sweep correctly — actorType system, actorId null', async () => {
+      const { service, repo, identity } = createDeps();
+      repo.findById.mockResolvedValue(baseDoctor());
+      repo.softDelete.mockResolvedValue(baseDoctor({ deletedAt: NOW }));
+
+      await service.softDeleteForDeletionRequest('doctor-1', { actorType: 'system', actorId: null });
+
+      expect(identity.revokeAllSessions).toHaveBeenCalledWith('doctor', 'doctor-1', { actorType: 'system', actorId: 'doctor-1' });
+    });
+
+    it('is idempotent — already-deleted returns softDeleted:false without touching identity', async () => {
+      const { service, repo, identity } = createDeps();
+      repo.findById.mockResolvedValue(baseDoctor({ deletedAt: NOW }));
+
+      const result = await service.softDeleteForDeletionRequest('doctor-1', { actorType: 'admin', actorId: 'admin-1' });
+
+      expect(result).toEqual({ softDeleted: false, snapshot: null, originalMobileNumber: null });
+      expect(identity.anonymizeMobileNumber).not.toHaveBeenCalled();
+    });
+
+    it('404s when the doctor does not exist', async () => {
+      const { service, repo } = createDeps();
+      repo.findById.mockResolvedValue(null);
+      await expect(service.softDeleteForDeletionRequest('missing', { actorType: 'admin', actorId: 'admin-1' })).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    it('restoreFromDeletion delegates the caller-supplied verificationStatus straight to the repository', async () => {
+      const { service, repo } = createDeps();
+      repo.restore.mockResolvedValue(baseDoctor({ verificationStatus: 'verified' }));
+
+      const result = await service.restoreFromDeletion('doctor-1', 'verified');
+
+      expect(repo.restore).toHaveBeenCalledWith('doctor-1', 'verified');
+      expect(result).toEqual({ restored: true });
+    });
+
+    it('restoreFromDeletion reports false when the repository guard refuses (not actually deleted)', async () => {
+      const { service, repo } = createDeps();
+      repo.restore.mockResolvedValue(null);
+      expect(await service.restoreFromDeletion('doctor-1', 'pending')).toEqual({ restored: false });
     });
   });
 });

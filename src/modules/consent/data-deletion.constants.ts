@@ -22,8 +22,28 @@ export const DATA_DELETION_ERROR_CODES = {
    * was never reviewed, was rejected, or has already been executed once.
    */
   DATA_DELETION_NOT_APPROVED: 'DATA_DELETION_NOT_APPROVED',
+  /** ADDITIVE (account-deletion lifecycle round). `cancelRequest` called against a request no longer in `requested`/`in_review`/`approved`. */
+  DATA_DELETION_NOT_CANCELLABLE: 'DATA_DELETION_NOT_CANCELLABLE',
 } as const;
 export type DataDeletionErrorCode = (typeof DATA_DELETION_ERROR_CODES)[keyof typeof DATA_DELETION_ERROR_CODES];
 
 export const DEFAULT_DATA_DELETION_PAGE_SIZE = 20;
 export const MAX_DATA_DELETION_PAGE_SIZE = 100;
+
+/**
+ * ADDITIVE (account-deletion lifecycle round). This module's own
+ * `app_config` keys — read via `AppConfigService`, same shared/memoized
+ * read-only surface every other module's config uses. There is no WRITE
+ * path/admin screen for these yet (a deliberate, stated scope cut — see the
+ * build report); an admin who wants a different grace period edits the
+ * `app_config` row directly until one exists.
+ */
+export const DATA_DELETION_CONFIG_KEYS = {
+  /** Days between a request being raised and the sweep becoming eligible to auto-approve and execute it. */
+  GRACE_PERIOD_DAYS: 'compliance.deletion_grace_period_days',
+  /** Whether the sweep auto-executes a due, still-undecided request at all — `false` makes the grace period informational only, requiring an admin to act. */
+  AUTO_EXECUTE: 'compliance.deletion_auto_execute',
+} as const;
+
+export const DATA_DELETION_DEFAULT_GRACE_PERIOD_DAYS = 30;
+export const DATA_DELETION_DEFAULT_AUTO_EXECUTE = true;

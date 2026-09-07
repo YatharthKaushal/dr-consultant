@@ -34,6 +34,10 @@ export class IdentityFacade implements IdentityContract {
     return this.repo.anonymizeMobileNumber(accountType, id);
   }
 
+  async restoreMobileNumber(accountType: AccountType, id: string, mobileNumber: string): Promise<void> {
+    return this.repo.restoreMobileNumber(accountType, id, mobileNumber);
+  }
+
   async getContactIdentity(accountType: AccountType, id: string): Promise<ContactIdentity | null> {
     const state = await this.getAuthState(accountType, id);
     if (!state) {

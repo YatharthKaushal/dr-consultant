@@ -3,12 +3,16 @@ import { AuditService } from '../../shared/audit/audit.service';
 import type { AuthContext } from '../../shared/auth/auth.types';
 import { isUniqueConstraintViolation } from '../../shared/errors/postgres-error.util';
 import { CatalogueFacade } from '../catalogue/catalogue.facade';
+import { IdentityFacade } from '../identity/identity.facade';
+import { maskFullName } from '../../shared/privacy/mask.util';
 import { DoctorDocumentRepository } from './doctor-document.repository';
 import { DoctorSpecialtyRepository } from './doctor-specialty.repository';
 import type { CreateDoctorDto, UpdateDoctorDto } from './doctor-admin.dto';
 import type { UpdateOwnDoctorProfileDto } from './doctor.dto';
 import { DOCTOR_AUDIT_ENTITY_TYPES, DOCTOR_ERROR_CODES } from './doctor.constants';
 import type {
+  DeletionActor,
+  DoctorDeletionSnapshot,
   DoctorSchedulingParametersById,
   ListedDoctorFilter,
   ListedDoctorSummary,
@@ -27,6 +31,7 @@ import {
 import { normalizeMobileNumber } from './doctor-phone.util';
 import { DoctorRepository, type DoctorProfileFieldsUpdate } from './doctor.repository';
 import type { DoctorSpecialtyRow } from '../../schema/doctor-specialties.schema';
+import type { DoctorVerificationStatus } from '../../schema/enums.schema';
 import type { DoctorRow } from '../../schema/doctors.schema';
 
 export interface DoctorProfileWithDetails extends SafeDoctorRow {
@@ -58,6 +63,7 @@ export class DoctorService {
     private readonly documentRepo: DoctorDocumentRepository,
     private readonly audit: AuditService,
     private readonly catalogue: CatalogueFacade,
+    private readonly identity: IdentityFacade,
   ) {}
 
   /**
@@ -154,12 +160,62 @@ export class DoctorService {
   /* Contract-backing reads (doctor.facade.ts)                               */
   /* ---------------------------------------------------------------------- */
 
+  /** *** MASKED WHEN SOFT-DELETED. *** See `PublicDoctorProfile#isDeleted`'s own doc comment — same posture `PatientFacade.getProfileSummary` takes. */
   async getPublicProfile(doctorId: string): Promise<PublicDoctorProfile | null> {
     const doctor = await this.repo.findById(doctorId);
     if (!doctor) return null;
     const specialtyRows = await this.specialtyRepo.listByDoctor(doctorId);
     const specialties = await this.enrichSpecialties(specialtyRows);
-    return toPublicDoctorProfile(doctor, specialties);
+    const profile = toPublicDoctorProfile(doctor, specialties);
+    const isDeleted = doctor.deletedAt !== null;
+    return { ...profile, isDeleted, fullName: isDeleted ? (maskFullName(profile.fullName) ?? profile.fullName) : profile.fullName, bio: isDeleted ? null : profile.bio };
+  }
+
+  /* ── ADDITIVE (account-deletion lifecycle round) ────────────────────────── */
+
+  /**
+   * See `DoctorContract#softDeleteForDeletionRequest`. Mirrors
+   * `patient.service.ts#softDeleteForDeletionRequest` almost exactly — see
+   * that method's header for the full architectural account; the one real
+   * difference is `registrationNumber` staying live (a medical council
+   * credential, never vacated) and `verificationStatus`/`isListed` moving
+   * to `suspended`/`false` as part of the same write (`doctor.repository.ts
+   * #softDelete`'s own comment).
+   */
+  async softDeleteForDeletionRequest(doctorId: string, actor: DeletionActor): Promise<DoctorDeletionSnapshot> {
+    const existing = await this.repo.findById(doctorId);
+    if (!existing) throw doctorNotFound();
+    if (existing.deletedAt) {
+      return { softDeleted: false, snapshot: null, originalMobileNumber: null };
+    }
+
+    const originalMobileNumber = existing.mobileNumber;
+    const snapshot: Record<string, unknown> = { ...existing };
+
+    const softDeleted = await this.repo.softDelete(doctorId, new Date());
+    if (!softDeleted) {
+      return { softDeleted: false, snapshot: null, originalMobileNumber: null };
+    }
+
+    await this.identity.revokeAllSessions('doctor', doctorId, { actorType: actor.actorType, actorId: actor.actorId ?? doctorId });
+    await this.identity.anonymizeMobileNumber('doctor', doctorId);
+
+    await this.audit.write({
+      actorType: actor.actorType,
+      actorId: actor.actorId,
+      action: 'delete',
+      entityType: DOCTOR_AUDIT_ENTITY_TYPES.DOCTOR,
+      entityId: doctorId,
+      metadata: { reason: 'data_deletion_request_executed' },
+    });
+
+    return { softDeleted: true, snapshot, originalMobileNumber };
+  }
+
+  /** See `DoctorContract#restoreFromDeletion`. */
+  async restoreFromDeletion(doctorId: string, verificationStatus: DoctorVerificationStatus): Promise<{ restored: boolean }> {
+    const row = await this.repo.restore(doctorId, verificationStatus);
+    return { restored: row !== null };
   }
 
   async isVerifiedAndListed(doctorId: string): Promise<boolean> {

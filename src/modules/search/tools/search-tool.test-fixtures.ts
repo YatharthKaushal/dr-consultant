@@ -49,6 +49,7 @@ export function doctor(overrides: Partial<PublicDoctorProfile> = {}): PublicDoct
     consultationFeeInr: '1500.00',
     consultationDurationMinutes: 30,
     specialties: [{ id: '11111111-1111-4111-8111-111111111111', code: 'psychiatry', name: 'Psychiatry', isPrimary: true }],
+    isDeleted: false,
     ...overrides,
   };
 }

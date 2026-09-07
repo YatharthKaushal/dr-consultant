@@ -4,7 +4,9 @@ import { DoctorReliabilityService } from './doctor-reliability.service';
 import { DoctorSpecialtyService } from './doctor-specialty.service';
 import type {
   CompletionGateResult,
+  DeletionActor,
   DoctorContract,
+  DoctorDeletionSnapshot,
   DoctorPresenceState,
   DoctorReliabilityMetrics,
   DoctorSchedulingParameters,
@@ -19,6 +21,7 @@ import type {
   PublicDoctorProfile,
   ResetPresenceInput,
 } from './doctor.contract';
+import type { DoctorVerificationStatus } from '../../schema/enums.schema';
 import { DoctorService } from './doctor.service';
 
 @Injectable()
@@ -96,5 +99,15 @@ export class DoctorFacade implements DoctorContract {
   /** ADDITIVE (M-20/governance and quality) — see `doctor.contract.ts`. */
   async getReliabilityMetrics(doctorId: string): Promise<DoctorReliabilityMetrics> {
     return this.reliabilityService.getMetrics(doctorId);
+  }
+
+  /* ── ADDITIVE (account-deletion lifecycle round) ────────────────────────── */
+
+  async softDeleteForDeletionRequest(doctorId: string, actor: DeletionActor): Promise<DoctorDeletionSnapshot> {
+    return this.doctorService.softDeleteForDeletionRequest(doctorId, actor);
+  }
+
+  async restoreFromDeletion(doctorId: string, verificationStatus: DoctorVerificationStatus): Promise<{ restored: boolean }> {
+    return this.doctorService.restoreFromDeletion(doctorId, verificationStatus);
   }
 }

@@ -1,4 +1,4 @@
-import type { DoctorPresence } from '../../schema/enums.schema';
+import type { DoctorPresence, DoctorVerificationStatus } from '../../schema/enums.schema';
 import type { DoctorReliabilityMetrics } from './doctor-reliability.service';
 
 /**
@@ -32,6 +32,29 @@ export interface PublicDoctorProfile {
   consultationFeeInr: string;
   consultationDurationMinutes: number;
   specialties: PublicDoctorSpecialty[];
+  /** ADDITIVE (account-deletion lifecycle round). `true` when this account is soft-deleted — `fullName`/`bio` come back masked (`shared/privacy/mask.util.ts`) when this is `true`. */
+  isDeleted: boolean;
+}
+
+/**
+ * Who is executing a data-deletion request. Structurally identical to
+ * `patient`'s own `DeletionActor`/consent's `DeletionExecutionActor` by
+ * design, not by import — see `patient.contract.ts`'s header for why this
+ * module does not import either directly.
+ */
+export interface DeletionActor {
+  actorType: 'admin' | 'system';
+  actorId: string | null;
+}
+
+/** See `DoctorContract#softDeleteForDeletionRequest`. */
+export interface DoctorDeletionSnapshot {
+  /** `false` when the account was already deleted (idempotent retry) or lost a race with a concurrent execution — nothing was written. */
+  softDeleted: boolean;
+  /** The whole row as it stood immediately before this write, jsonb-safe. `null` when `softDeleted` is `false`. */
+  snapshot: Record<string, unknown> | null;
+  /** The real mobile number this account had before it was vacated. `null` when `softDeleted` is `false`. */
+  originalMobileNumber: string | null;
 }
 
 /**
@@ -186,6 +209,20 @@ export interface DoctorContract {
    * throws there — see `DoctorReliabilityService#getMetrics`.
    */
   getReliabilityMetrics(doctorId: string): Promise<DoctorReliabilityMetrics>;
+
+  /* ── ADDITIVE (account-deletion lifecycle round) ────────────────────────── */
+
+  /**
+   * The `doctors` half of a data-deletion request's execution — see
+   * `doctor.service.ts#softDeleteForDeletionRequest` for the full account
+   * of what it does. Idempotent: a doctor already `deleted_at IS NOT NULL`
+   * is a no-op, returning `{ softDeleted: false, snapshot: null,
+   * originalMobileNumber: null }`.
+   */
+  softDeleteForDeletionRequest(doctorId: string, actor: DeletionActor): Promise<DoctorDeletionSnapshot>;
+
+  /** The un-do — see `doctor.repository.ts#restore`'s own comment on why `verificationStatus` comes from the caller (the snapshot), not an assumption. */
+  restoreFromDeletion(doctorId: string, verificationStatus: DoctorVerificationStatus): Promise<{ restored: boolean }>;
 }
 
 /** Who is driving a presence or completion-gate write. `system` is the router and the sweeps; `doctor` is a self-service change; `admin` is an operator override. */

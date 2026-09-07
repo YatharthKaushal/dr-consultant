@@ -280,11 +280,17 @@ export const DELETION_STATUSES = [
   'in_review',
   'approved',
   'rejected',
+  'cancelled',
   'executed',
   'failed',
 ] as const;
 export type DeletionStatus = (typeof DELETION_STATUSES)[number];
 export const deletionStatusEnum = pgEnum('deletion_status', DELETION_STATUSES);
+
+/** Which account table a `data_deletion_requests`/`deleted_accounts` row is about. Not `AccountType`: an admin never requests their own deletion through this feature. */
+export const DELETABLE_ACCOUNT_TYPES = ['patient', 'doctor'] as const;
+export type DeletableAccountType = (typeof DELETABLE_ACCOUNT_TYPES)[number];
+export const deletableAccountTypeEnum = pgEnum('deletable_account_type', DELETABLE_ACCOUNT_TYPES);
 
 export const NOTIFICATION_STATUSES = ['queued', 'sent', 'failed'] as const;
 export type NotificationStatus = (typeof NOTIFICATION_STATUSES)[number];

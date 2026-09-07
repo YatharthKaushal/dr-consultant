@@ -14,10 +14,12 @@ export class RaiseDataDeletionRequestDto {
 
 /**
  * The admin review. Only `in_review`/`approved`/`rejected` are ACCEPTABLE
- * values here — `requested` (going backwards) and `executed`/`failed` (M-21's
- * job, and it also writes `executed_at`/`execution_outcome` in the same act)
- * are refused before the request body is even valid, per
- * `DataDeletionService`'s state machine.
+ * values here — `requested`/`cancelled` (going backwards) and
+ * `executed`/`failed` (M-21's job, and it also writes
+ * `executed_at`/`execution_outcome` in the same act) are refused before the
+ * request body is even valid, per `DataDeletionService`'s state machine.
+ * `status: 'approved'` is ALSO how an admin retries a `failed` execution —
+ * see `data-deletion.service.ts#LEGAL_REVIEW_TRANSITIONS`'s header.
  */
 export class ReviewDataDeletionRequestDto {
   @IsIn(['in_review', 'approved', 'rejected'])

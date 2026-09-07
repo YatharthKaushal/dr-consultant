@@ -12,12 +12,14 @@ import { DataDeletionService } from './data-deletion.service';
  * permission (`permission.catalog.ts`) — this module adds no permission of its
  * own.
  *
- * *** EXECUTION IS NOT HERE, AND NEVER WILL BE THROUGH THIS CONTROLLER. ***
+ * *** EXECUTION IS NOT HERE, AND NEVER THROUGH THIS CONTROLLER. ***
  * `PATCH :id/review` moves a request through `requested -> in_review ->
- * approved`/`rejected` only. Actually deleting (or lawfully retaining) the
- * patient's data — the `executed`/`failed` states, `executed_at`,
- * `execution_outcome` — is M-21's job, which does not exist yet. See
- * `DataDeletionService#reviewRequest`'s header comment.
+ * approved`/`rejected` (and `failed -> approved`, the retry path) only.
+ * Actually deleting (or lawfully retaining) the account's data — the
+ * `executed`/`failed` states, `executed_at`, `execution_outcome` — is M-21's
+ * job (`modules/data-rights`, `admin/data-deletion-requests/:id/execute`),
+ * or the sweep's (`data-rights-execution-sweep.service.ts`), never this
+ * controller's. See `DataDeletionService#reviewRequest`'s header comment.
  */
 @Controller('admin/data-deletion-requests')
 @AccountType('admin')

@@ -331,15 +331,25 @@ describe('M-03 legal documents and consent, against a real database', () => {
       });
     });
 
-    it('answers a closed `false` for a document type with nothing published at all', async () => {
-      // `terms_of_use` is untouched by this run and unseeded by the codebase.
+    it('answers a closed `false` for an unrelated document type this patient has never accepted', async () => {
+      // `terms_of_use` now carries a real, permanently-seeded current version
+      // (`consent.seed.ts` — the force-update/legal-pages round publishes a
+      // placeholder for every deployment) — it is no longer "nothing
+      // published at all" the way it was before that seed existed. The
+      // meaningful assertion survives unchanged: an unrelated type this
+      // patient never accepted answers a closed `false`, naming whichever
+      // version IS current for it rather than a fabricated `null`. The
+      // separate `current === null` branch (genuinely nothing published for
+      // a type) stays covered at the unit level in
+      // `consent.service.spec.ts` — see the case mocking
+      // `legalDocuments.findCurrent` to resolve `null`.
       await expect(
         facade.checkPatientConsent({ patientId, documentType: 'terms_of_use' }),
       ).resolves.toEqual({
         hasCurrentConsent: false,
         acceptedVersion: null,
         acceptedAt: null,
-        currentVersion: null,
+        currentVersion: 'placeholder-v1',
       });
     });
 

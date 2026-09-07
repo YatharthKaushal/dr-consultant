@@ -18,14 +18,22 @@ export class DataDeletionExecutionFacade implements DataDeletionExecutionContrac
   }
 
   async recordExecutionOutcome(
-    actingAdminId: string,
+    actor: { actorType: 'admin' | 'system'; actorId: string | null },
     requestId: string,
     input: { status: Extract<DeletionStatus, 'executed' | 'failed'>; executionOutcome: unknown },
   ): Promise<DataDeletionRequestRecord> {
-    return this.service.recordExecutionOutcome(actingAdminId, requestId, input);
+    return this.service.recordExecutionOutcome(actor, requestId, input);
   }
 
   async countConsentsForPatient(patientId: string): Promise<number> {
     return this.consents.countPatientAcceptances(patientId);
+  }
+
+  async listDueForSweep(limit: number): Promise<DataDeletionRequestRecord[]> {
+    return this.service.listDueForSweep(limit);
+  }
+
+  async autoApproveForSweep(requestId: string): Promise<DataDeletionRequestRecord> {
+    return this.service.autoApproveForSweep(requestId);
   }
 }

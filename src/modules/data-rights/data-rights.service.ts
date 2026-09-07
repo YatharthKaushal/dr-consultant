@@ -6,6 +6,7 @@ import { ClinicalFacade } from '../clinical/clinical.facade';
 import { DataDeletionExecutionFacade } from '../consent/data-deletion-execution.facade';
 import type { DataDeletionRequestRecord } from '../consent/data-deletion.types';
 import { DocumentFacade } from '../document/document.facade';
+import { DoctorFacade } from '../doctor/doctor.facade';
 import { FeedbackFacade } from '../feedback/feedback.facade';
 import { FollowupFacade } from '../followup/followup.facade';
 import { InstantFacade } from '../instant/instant.facade';
@@ -16,7 +17,8 @@ import { PricingFacade } from '../pricing/pricing.facade';
 import { PromotionFacade } from '../promotion/promotion.facade';
 import { SearchFacade } from '../search/search.facade';
 import { VideoFacade } from '../video/video.facade';
-import { DATA_RIGHTS_ERROR_CODES, STATIC_TABLE_SURVEY } from './data-rights.constants';
+import { DATA_RIGHTS_ERROR_CODES, DOCTOR_TABLE_SURVEY, STATIC_TABLE_SURVEY } from './data-rights.constants';
+import { DeletedAccountsService } from './deleted-accounts.service';
 import type {
   DataRightsExecutionOutcome,
   DataRightsExecutionResult,
@@ -25,25 +27,42 @@ import type {
   DataRightsTableEntry,
 } from './data-rights.types';
 
+/** Who is executing — an admin's explicit action, or the grace-period sweep. See `data-deletion.types.ts#DeletionExecutionActor`'s own header. */
+export type ExecutionActor = { actorType: 'admin'; actorId: string } | { actorType: 'system'; actorId: null };
+
 /**
  * M-21's execution half: given an APPROVED `data_deletion_requests` row,
  * `previewExecution` computes and reports what would happen — writing
- * NOTHING — and `executeForRequest` is the separate, explicit admin action
- * that actually performs it. Both are documented at length in the coordinator's
- * build report; the short version:
+ * NOTHING — and `executeForRequest` is the separate, explicit action that
+ * actually performs it (an admin's `POST .../execute`, or the sweep's own
+ * call — `data-rights-execution-sweep.service.ts`). Both are documented at
+ * length in the coordinator's build report; the short version:
  *
- *   - No sweep, no scheduler, no automatic trigger. Both methods are called
- *     ONLY from `data-rights-admin.controller.ts`'s two explicit HTTP routes,
- *     each gated on `compliance.manage_deletion_requests`.
- *   - This module owns no table of its own (like `GovernanceModule`) — every
- *     count, hard-delete and anonymize call goes through the owning module's
- *     facade. This service never opens a transaction that spans another
- *     module's write (`backend/README.md` §2 forbids a cross-module
- *     transaction) — see `executeForRequest`'s own header for how a PARTIAL
- *     failure is therefore represented honestly rather than hidden.
- *   - The compliance POLICY (which table is hard-deleted/anonymized/retained,
- *     and why) lives in `data-rights.constants.ts#STATIC_TABLE_SURVEY`, not
- *     scattered across the fifteen owning modules this service composes.
+ *   - No implicit trigger inside a review transition. `reviewRequest`
+ *     moving a request to `approved` NEVER itself executes anything — only
+ *     the two callers named above ever reach `executeForRequest`.
+ *   - *** THIS MODULE OWNS NO TABLE OF ITS OWN, WITH ONE ADDITIVE EXCEPTION
+ *     (account-deletion lifecycle round): `deleted_accounts`. *** Every
+ *     count, hard-delete, anonymize and soft-delete call for a PATIENT/
+ *     DOCTOR'S OWN account still goes through the owning module's facade —
+ *     this service never opens a transaction that spans another module's
+ *     write (`backend/README.md` §2 forbids a cross-module transaction).
+ *     `deleted_accounts` is the one table this module writes directly,
+ *     through `DeletedAccountsService`, because "another copy, for safety"
+ *     is the compliance function this module itself exists to perform, not
+ *     something any owning module could sensibly hold instead.
+ *   - The compliance POLICY (which table is hard-deleted/anonymized/
+ *     retained, and why) lives in `data-rights.constants.ts#
+ *     STATIC_TABLE_SURVEY`/`DOCTOR_TABLE_SURVEY`, not scattered across the
+ *     owning modules this service composes.
+ *
+ * *** PATIENT VS. DOCTOR (account-deletion lifecycle round). *** A request
+ * now carries exactly one of `patientId`/`doctorId`
+ * (`data-deletion-requests.schema.ts#account_xor_check`). The patient path
+ * is unchanged in shape from before this round (the 30-ish-table survey);
+ * the doctor path is deliberately much narrower — see
+ * `DOCTOR_TABLE_SURVEY`'s own header for why a doctor's deletion touches
+ * exactly one table.
  */
 @Injectable()
 export class DataRightsService {
@@ -66,70 +85,32 @@ export class DataRightsService {
     private readonly pricing: PricingFacade,
     private readonly payment: PaymentFacade,
     private readonly patient: PatientFacade,
+    private readonly doctor: DoctorFacade,
+    private readonly deletedAccounts: DeletedAccountsService,
   ) {}
 
   /**
-   * *** WRITES ABSOLUTELY NOTHING. *** Reads the request, reads every
-   * owning module's live row count for this patient, and merges each with
-   * `STATIC_TABLE_SURVEY`'s decision/reason. Safe to call any number of
-   * times, in any request status — it is a report, not a precondition
-   * check; `executeForRequest` is what enforces `status === 'approved'`.
+   * *** WRITES ABSOLUTELY NOTHING. *** Safe to call any number of times, in
+   * any request status — it is a report, not a precondition check;
+   * `executeForRequest` is what enforces `status === 'approved'`.
    */
   async previewExecution(requestId: string): Promise<DataRightsPreview> {
     const request = await this.findRequestOrThrow(requestId);
-    const consultationIds = await this.booking.listConsultationIdsForPatient(request.patientId);
-    const tables = await this.buildTableEntries(request.patientId, consultationIds);
 
-    return {
-      requestId: request.id,
-      patientId: request.patientId,
-      requestStatus: request.status,
-      tables,
-      generatedAt: new Date().toISOString(),
-    };
+    if (request.doctorId) {
+      const tables = DOCTOR_TABLE_SURVEY.map((entry) => ({ ...entry, rowCount: 1 }));
+      return { requestId: request.id, patientId: null, doctorId: request.doctorId, requestStatus: request.status, tables, generatedAt: new Date().toISOString() };
+    }
+
+    const patientId = request.patientId as string; // XOR-guaranteed by the schema's own check constraint
+    const consultationIds = await this.booking.listConsultationIdsForPatient(patientId);
+    const tables = await this.buildTableEntries(patientId, consultationIds);
+
+    return { requestId: request.id, patientId, doctorId: null, requestStatus: request.status, tables, generatedAt: new Date().toISOString() };
   }
 
-  /**
-   * Performs what the preview describes. Refuses (`ConflictException`)
-   * unless the request is CURRENTLY `approved` — checked here, BEFORE any
-   * table is touched, so a request in the wrong state fails closed with
-   * nothing attempted; `DataDeletionExecutionFacade.recordExecutionOutcome`
-   * enforces the identical precondition a second time at the final write,
-   * which is defence in depth, not redundancy this method may skip.
-   *
-   * *** THE SEQUENCE, AND WHY IT IS NOT ONE TRANSACTION. *** Three owning
-   * modules each perform ONE write: `search.deleteSearchQueriesForPatient`,
-   * `promotion.anonymizePromotionCodeAttemptsForPatient`,
-   * `patient.anonymizeForDeletion`. `backend/README.md` §2 forbids a
-   * transaction spanning modules, so each call is its own commit, attempted
-   * independently — a failure in one does NOT skip or roll back the others.
-   * Order is deliberately least-consequential-first: `search_queries` and
-   * `promotion_code_attempts` are pure hygiene with no downstream reader;
-   * `patients` (identity, sessions, the account's ability to sign in) runs
-   * last, once the record is confirmed genuinely necessary regardless.
-   *
-   * *** PARTIAL FAILURE, STATED HONESTLY. *** `deletion_status` has exactly
-   * two outcomes this method may reach: `executed` (every step succeeded)
-   * and `failed` (ANY step did not — one, two, or all three). There is no
-   * third "partially executed" status in `DELETION_STATUSES`, so this
-   * method never invents one; instead `executionOutcome.mutatingSteps`
-   * carries a `status: 'success' | 'failed'` PER TABLE, which is the actual
-   * honest record of what happened. A caller reading only `status: 'failed'`
-   * knows execution did not fully complete; a caller reading
-   * `executionOutcome` knows exactly which of the three tables it still
-   * needs to retry.
-   *
-   * *** RETRY. *** `recordExecutionOutcome` refuses a request that is not
-   * CURRENTLY `approved` — once this method has written `failed`, the
-   * existing M-03 review state machine (`DataDeletionService
-   * #LEGAL_REVIEW_TRANSITIONS`) has no transition OUT of `failed` back to
-   * `approved`. That is a real, deliberate gap this build does not close:
-   * retrying a partial failure today needs a manual/support intervention
-   * (or a future added transition), not an automatic retry path — flagged
-   * plainly here and in the coordinator's report rather than papered over
-   * with a false "it just retries".
-   */
-  async executeForRequest(requestId: string, actorAdminId: string): Promise<DataRightsExecutionResult> {
+  /** Performs what the preview describes. Refuses (`ConflictException`) unless the request is CURRENTLY `approved`. Branches on `request.doctorId` — see the class header. */
+  async executeForRequest(requestId: string, actor: ExecutionActor): Promise<DataRightsExecutionResult> {
     const request = await this.findRequestOrThrow(requestId);
     if (request.status !== 'approved') {
       throw new ConflictException({
@@ -139,7 +120,15 @@ export class DataRightsService {
       });
     }
 
-    const patientId = request.patientId;
+    return request.doctorId ? this.executeDoctorRequest(request, actor) : this.executePatientRequest(request, actor);
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* Patient execution                                                    */
+  /* ------------------------------------------------------------------ */
+
+  private async executePatientRequest(request: DataDeletionRequestRecord, actor: ExecutionActor): Promise<DataRightsExecutionResult> {
+    const patientId = request.patientId as string;
     const consultationIds = await this.booking.listConsultationIdsForPatient(patientId);
     const retainedTables = await this.buildRetainedTableEntries(patientId, consultationIds);
 
@@ -160,19 +149,70 @@ export class DataRightsService {
     );
 
     mutatingSteps.push(
-      await this.runStep('patients', 'patient', 'anonymize', async () => {
-        const { anonymized } = await this.patient.anonymizeForDeletion(patientId, actorAdminId);
-        return anonymized ? 1 : 0;
+      await this.runStep('patients', 'patient', 'soft_delete', async () => {
+        const result = await this.patient.softDeleteForDeletionRequest(patientId, actor);
+        if (result.softDeleted && result.snapshot && result.originalMobileNumber) {
+          await this.deletedAccounts.recordSnapshot({
+            accountType: 'patient',
+            accountId: patientId,
+            deletionRequestId: request.id,
+            snapshot: result.snapshot,
+            originalMobileNumber: result.originalMobileNumber,
+            deletedByAdminId: actor.actorType === 'admin' ? actor.actorId : null,
+          });
+        }
+        return result.softDeleted ? 1 : 0;
       }),
     );
 
-    const overallStatus: 'executed' | 'failed' = mutatingSteps.every((step) => step.status === 'success')
-      ? 'executed'
-      : 'failed';
+    return this.finishExecution(request, actor, mutatingSteps, retainedTables);
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* Doctor execution — deliberately narrow, see DOCTOR_TABLE_SURVEY.      */
+  /* ------------------------------------------------------------------ */
+
+  private async executeDoctorRequest(request: DataDeletionRequestRecord, actor: ExecutionActor): Promise<DataRightsExecutionResult> {
+    const doctorId = request.doctorId as string;
+    const mutatingSteps: DataRightsStepOutcome[] = [];
+
+    mutatingSteps.push(
+      await this.runStep('doctors', 'doctor', 'soft_delete', async () => {
+        const result = await this.doctor.softDeleteForDeletionRequest(doctorId, actor);
+        if (result.softDeleted && result.snapshot && result.originalMobileNumber) {
+          await this.deletedAccounts.recordSnapshot({
+            accountType: 'doctor',
+            accountId: doctorId,
+            deletionRequestId: request.id,
+            snapshot: result.snapshot,
+            originalMobileNumber: result.originalMobileNumber,
+            deletedByAdminId: actor.actorType === 'admin' ? actor.actorId : null,
+          });
+        }
+        return result.softDeleted ? 1 : 0;
+      }),
+    );
+
+    // Nothing to retain-report for a doctor beyond the survey's own entry —
+    // there is no per-consultation table this execution touches, so there
+    // is nothing else to enumerate as "deliberately left alone".
+    return this.finishExecution(request, actor, mutatingSteps, []);
+  }
+
+  /* ------------------------------------------------------------------ */
+
+  private async finishExecution(
+    request: DataDeletionRequestRecord,
+    actor: ExecutionActor,
+    mutatingSteps: DataRightsStepOutcome[],
+    retainedTables: DataRightsTableEntry[],
+  ): Promise<DataRightsExecutionResult> {
+    const overallStatus: 'executed' | 'failed' = mutatingSteps.every((step) => step.status === 'success') ? 'executed' : 'failed';
 
     const executionOutcome: DataRightsExecutionOutcome = {
-      requestId,
-      patientId,
+      requestId: request.id,
+      patientId: request.patientId,
+      doctorId: request.doctorId,
       executedAt: new Date().toISOString(),
       overallStatus,
       mutatingSteps,
@@ -181,27 +221,22 @@ export class DataRightsService {
 
     if (overallStatus === 'failed') {
       this.logger.error(
-        `Data-deletion execution for request ${requestId} (patient ${patientId}) did not fully complete: ${JSON.stringify(
+        `Data-deletion execution for request ${request.id} (${request.patientId ? `patient ${request.patientId}` : `doctor ${request.doctorId}`}) did not fully complete: ${JSON.stringify(
           mutatingSteps.filter((s) => s.status === 'failed'),
         )}`,
       );
     }
 
-    const updated = await this.deletionRequests.recordExecutionOutcome(actorAdminId, requestId, {
-      status: overallStatus,
-      executionOutcome,
-    });
+    const updated = await this.deletionRequests.recordExecutionOutcome(actor, request.id, { status: overallStatus, executionOutcome });
 
-    return { requestId: updated.id, patientId: updated.patientId, status: overallStatus, executionOutcome };
+    return { requestId: updated.id, patientId: updated.patientId, doctorId: updated.doctorId, status: overallStatus, executionOutcome };
   }
-
-  /* ------------------------------------------------------------------ */
 
   /** Runs one mutating step, converting a throw into an honest `failed` entry rather than aborting the whole sequence. */
   private async runStep(
     table: string,
     module: string,
-    decision: Extract<DataRightsTableEntry['decision'], 'hard_delete' | 'anonymize'>,
+    decision: Extract<DataRightsTableEntry['decision'], 'hard_delete' | 'anonymize' | 'soft_delete'>,
     run: () => Promise<number>,
   ): Promise<DataRightsStepOutcome> {
     try {
@@ -214,17 +249,14 @@ export class DataRightsService {
     }
   }
 
-  /** Every table in the survey, decision + live row count — what `previewExecution` returns. */
+  /** Every table in the survey, decision + live row count — what `previewExecution` returns (patient path). */
   private async buildTableEntries(patientId: string, consultationIds: readonly string[]): Promise<DataRightsTableEntry[]> {
     const counts = await this.collectCounts(patientId, consultationIds);
     return STATIC_TABLE_SURVEY.map((entry) => ({ ...entry, rowCount: counts.get(entry.table) ?? null }));
   }
 
-  /** Only the RETAIN rows, decision + live row count — what `executeForRequest` freezes into `execution_outcome.retainedTables`. */
-  private async buildRetainedTableEntries(
-    patientId: string,
-    consultationIds: readonly string[],
-  ): Promise<DataRightsTableEntry[]> {
+  /** Only the RETAIN rows, decision + live row count — what `executeForRequest` freezes into `execution_outcome.retainedTables` (patient path). */
+  private async buildRetainedTableEntries(patientId: string, consultationIds: readonly string[]): Promise<DataRightsTableEntry[]> {
     const all = await this.buildTableEntries(patientId, consultationIds);
     return all.filter((entry) => entry.decision === 'retain');
   }

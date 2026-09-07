@@ -1,4 +1,5 @@
 import { Injectable } from '@nestjs/common';
+import type { ExecutionActor } from './data-rights.service';
 import { DataRightsService } from './data-rights.service';
 import type { DataRightsExecutionResult, DataRightsPreview } from './data-rights.types';
 
@@ -21,7 +22,7 @@ export class DataRightsFacade {
   }
 
   /** See `DataRightsService#executeForRequest`. */
-  async executeForRequest(requestId: string, actorAdminId: string): Promise<DataRightsExecutionResult> {
-    return this.service.executeForRequest(requestId, actorAdminId);
+  async executeForRequest(requestId: string, actor: ExecutionActor): Promise<DataRightsExecutionResult> {
+    return this.service.executeForRequest(requestId, actor);
   }
 }

@@ -45,12 +45,17 @@ export const DATA_RIGHTS_ERROR_CODES = {
  * silently guesses.
  */
 export const STATIC_TABLE_SURVEY: ReadonlyArray<Omit<DataRightsTableEntry, 'rowCount'>> = [
-  // ── The one table this execution actually anonymizes as its centrepiece ──
+  // ── The one table this execution actually SOFT-DELETES as its centrepiece ──
+  // (ADDITIVE, account-deletion lifecycle round — was `anonymize`, which
+  // destroyed `full_name`/`date_of_birth` in place; see
+  // `data-rights.types.ts#DataRightsDecision`'s own header for why that
+  // changed. `mobile_number` is still VACATED, not kept — see
+  // `patient.service.ts#softDeleteForDeletionRequest`.)
   {
     table: 'patients',
     module: 'patient',
-    decision: 'anonymize',
-    columnsAffected: ['full_name', 'date_of_birth', 'mobile_number', 'push_token', 'device_id', 'status (-> deleted)'],
+    decision: 'soft_delete',
+    columnsAffected: ['mobile_number', 'push_token', 'device_id', 'status (-> deleted)', 'deleted_at'],
   },
 
   // ── Hard-deleted ──────────────────────────────────────────────────────
@@ -262,5 +267,31 @@ export const STATIC_TABLE_SURVEY: ReadonlyArray<Omit<DataRightsTableEntry, 'rowC
     module: 'payment',
     decision: 'retain',
     reason: 'Durable webhook-delivery audit trail underneath the payments/refunds idempotency guarantee — financial audit trail.',
+  },
+];
+
+/**
+ * *** ADDITIVE (account-deletion lifecycle round) — A SEPARATE, MUCH
+ * SHORTER SURVEY FOR A DOCTOR'S OWN DELETION REQUEST. ***
+ *
+ * Deliberately not folded into `STATIC_TABLE_SURVEY` above: that list
+ * answers "what happens to a PATIENT's data" for every table linked to
+ * THEM. A doctor's own deletion touches exactly one table — `doctors`
+ * itself. Every clinical/financial table a doctor's past consultations
+ * touch (`consultations`, `clinical_records`, `payments`, ...) is ALREADY
+ * `retain` in the survey above, under the SAME lawful grounds regardless of
+ * whether it is the patient or the doctor being deleted — a doctor's
+ * `doctor_id` FK on those rows keeps resolving exactly like a patient's
+ * `patient_id` FK does, because neither row is ever hard-deleted. There is
+ * no separate `promotion_code_attempts`/`search_queries`-style hygiene step
+ * for a doctor: those are patient-initiated-search artefacts with no
+ * doctor equivalent.
+ */
+export const DOCTOR_TABLE_SURVEY: ReadonlyArray<Omit<DataRightsTableEntry, 'rowCount'>> = [
+  {
+    table: 'doctors',
+    module: 'doctor',
+    decision: 'soft_delete',
+    columnsAffected: ['mobile_number', 'push_token', 'device_id', 'verification_status (-> suspended)', 'is_listed (-> false)', 'deleted_at'],
   },
 ];

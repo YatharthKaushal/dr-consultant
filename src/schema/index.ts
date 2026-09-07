@@ -72,6 +72,7 @@ export * from './complaints.schema';
 export * from './feedback.schema';
 export * from './consents.schema';
 export * from './data-deletion-requests.schema';
+export * from './deleted-accounts.schema';
 export * from './notifications.schema';
 
 // Pricing — the bill becomes a priced list of components, each with its own

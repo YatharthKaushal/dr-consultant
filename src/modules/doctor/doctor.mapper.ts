@@ -76,5 +76,10 @@ export function toPublicDoctorProfile(doctor: DoctorRow, specialties: DoctorSpec
     consultationFeeInr: doctor.consultationFeeInr,
     consultationDurationMinutes: doctor.consultationDurationMinutes,
     specialties: toPublicDoctorSpecialties(specialties),
+    // Overwritten by `doctor.service.ts#getPublicProfile`, which alone
+    // knows `deletedAt` and applies masking — this mapper stays a pure,
+    // unmasked projection, same discipline `PatientFacade.getProfileSummary`
+    // keeps its own repository read separate from its masking decision.
+    isDeleted: false,
   };
 }

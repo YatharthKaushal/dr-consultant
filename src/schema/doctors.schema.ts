@@ -69,6 +69,15 @@ export const doctorsTable = pgTable(
     blockedByConsultationId: uuid('blocked_by_consultation_id').references(
       (): AnyPgColumn => consultationsTable.id,
     ),
+    /**
+     * ADDITIVE (account-deletion lifecycle round). Mirrors `patients.
+     * deleted_at` — see that column's own comment. `registration_number` is
+     * DELIBERATELY NOT vacated on soft delete (unlike `mobile_number`): it
+     * is a medical council credential printed on retained clinical records,
+     * and doctor accounts are admin-created (FR-1.2, no self-signup), so
+     * re-onboarding is a restore, not a fresh sign-up.
+     */
+    deletedAt: timestamp('deleted_at', { withTimezone: true, mode: 'date' }),
     createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'date' }).notNull().defaultNow(),
   },
@@ -77,6 +86,7 @@ export const doctorsTable = pgTable(
     index().on(table.presence, table.allowInstantConsult),
     index().on(table.seniorityLevel),
     index().on(table.pushToken),
+    index().on(table.deletedAt),
   ],
 );
 

@@ -581,8 +581,21 @@ describe('consent module — real HTTP endpoint tests', () => {
   /* ====================================================================== */
 
   describe('data-deletion-requests — auth boundary', () => {
-    it('a doctor token is refused as the wrong account type', async () => {
+    /**
+     * ADDITIVE (account-deletion lifecycle round): widened from
+     * `@AccountType('patient')` to `@AccountType('patient','doctor')` — a
+     * doctor's own deletion request goes through this exact same route now.
+     * The doctor-path BEHAVIOUR (raise/cancel/execute) has its own dedicated
+     * coverage in `account-deletion-lifecycle.endpoint.spec.ts`; this file
+     * only needs to prove the boundary itself moved correctly.
+     */
+    it('a doctor token is now ALLOWED — the route is patient-or-doctor, not patient-only', async () => {
       const response = await app.inject({ method: 'GET', url: '/api/data-deletion-requests', headers: auth(tokens.doctor) });
+      expect(response.statusCode).toBe(200);
+    });
+
+    it('an admin token is refused as the wrong account type — this route is never the admin queue', async () => {
+      const response = await app.inject({ method: 'GET', url: '/api/data-deletion-requests', headers: auth(tokens.adminAll) });
       expect(response.statusCode).toBe(403);
       expect(payload<{ code: string }>(response).code).toBe('WRONG_ACCOUNT_TYPE');
     });

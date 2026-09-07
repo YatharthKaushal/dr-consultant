@@ -6,10 +6,13 @@
  * This file proves, against real Postgres:
  *
  *   1. HARD-DELETE really removes the row — `search_queries`.
- *   2. ANONYMIZE really nulls EXACTLY the claimed columns and nothing
- *      else — `patients` (fullName/dateOfBirth/mobileNumber/pushToken/
- *      deviceId, status -> deleted) and `promotion_code_attempts`
- *      (patientId/ipAddress, leaving `outcome`/`createdAt` untouched).
+ *   2. SOFT DELETE (`patients` — mobileNumber vacated, pushToken/deviceId
+ *      cleared, status -> deleted, deletedAt stamped) really KEEPS
+ *      fullName/dateOfBirth (unlike the earlier destructive anonymize this
+ *      round replaced), and a `deleted_accounts` snapshot really exists
+ *      carrying the pre-mutation identity. ANONYMIZE (`promotion_code_
+ *      attempts`) really nulls EXACTLY patientId/ipAddress, leaving
+ *      `outcome`/`createdAt` untouched.
  *   3. A RETAINED table is provably untouched — `consultations`, read back
  *      byte-for-byte identical before and after.
  *   4. A PARTIAL FAILURE mid-sequence leaves `data_deletion_requests` in an
@@ -54,10 +57,12 @@ import { loadEnvFiles } from '../../config/env/env.validation';
 import { adminsTable } from '../../schema/admins.schema';
 import { consultationsTable } from '../../schema/consultations.schema';
 import { dataDeletionRequestsTable } from '../../schema/data-deletion-requests.schema';
+import { deletedAccountsTable } from '../../schema/deleted-accounts.schema';
 import { patientsTable } from '../../schema/patients.schema';
 import { promotionCodeAttemptsTable } from '../../schema/promotion-code-attempts.schema';
 import { searchQueriesTable } from '../../schema/search-queries.schema';
 import { specialtiesTable } from '../../schema/specialties.schema';
+import { AppConfigService } from '../../shared/app-config/app-config.service';
 import { AuditService } from '../../shared/audit/audit.service';
 import type { BookingFacade } from '../booking/booking.facade';
 import { BookingRepository } from '../booking/booking.repository';
@@ -68,6 +73,7 @@ import { ConsentRepository } from '../consent/consent.repository';
 import { DataDeletionExecutionFacade } from '../consent/data-deletion-execution.facade';
 import { DataDeletionRepository } from '../consent/data-deletion.repository';
 import { DataDeletionService } from '../consent/data-deletion.service';
+import type { DoctorFacade } from '../doctor/doctor.facade';
 import type { DocumentFacade } from '../document/document.facade';
 import type { FeedbackFacade } from '../feedback/feedback.facade';
 import type { FollowupFacade } from '../followup/followup.facade';
@@ -86,6 +92,8 @@ import { SearchRepository } from '../search/search.repository';
 import type { SearchFacade } from '../search/search.facade';
 import type { VideoFacade } from '../video/video.facade';
 import { DataRightsService } from './data-rights.service';
+import { DeletedAccountsRepository } from './deleted-accounts.repository';
+import { DeletedAccountsService } from './deleted-accounts.service';
 
 jest.setTimeout(30_000);
 
@@ -155,6 +163,8 @@ async function seedPatientScenario(db: Database, shared: Fixtures, tag: string) 
 }
 
 async function teardownPatientScenario(db: Database, patientId: string, requestId: string, consultationId: string) {
+  // deleted_accounts FKs to data_deletion_requests with no ON DELETE CASCADE — must go first.
+  await db.delete(deletedAccountsTable).where(eq(deletedAccountsTable.deletionRequestId, requestId));
   await db.delete(dataDeletionRequestsTable).where(eq(dataDeletionRequestsTable.id, requestId));
   await db.delete(searchQueriesTable).where(eq(searchQueriesTable.patientId, patientId));
   await db.delete(promotionCodeAttemptsTable).where(eq(promotionCodeAttemptsTable.patientId, patientId));
@@ -238,8 +248,30 @@ describe('M-21 data-rights execution, against a real database', () => {
 
     const deletionRepo = new DataDeletionRepository(db);
     const consentRepo = new ConsentRepository(db);
-    const dataDeletionService = new DataDeletionService(db, deletionRepo, audit);
+    const appConfig = new AppConfigService(db);
+    const dataDeletionService = new DataDeletionService(db, deletionRepo, appConfig, audit);
     const deletionExecutionFacade = new DataDeletionExecutionFacade(dataDeletionService, consentRepo);
+
+    // ── ADDITIVE (account-deletion lifecycle round): the real deleted_accounts
+    //    write path — this file's own header principle ("the actual state
+    //    machine this module writes through" is real) applies to this table
+    //    exactly as much as to `data_deletion_requests` itself.
+    const deletedAccountsRepo = new DeletedAccountsRepository(db);
+    const doctorStandIn: Pick<DoctorFacade, 'softDeleteForDeletionRequest' | 'restoreFromDeletion'> = {
+      softDeleteForDeletionRequest: async () => {
+        throw new Error('This file is patient-only — the doctor path has its own coverage elsewhere.');
+      },
+      restoreFromDeletion: async () => {
+        throw new Error('This file is patient-only — the doctor path has its own coverage elsewhere.');
+      },
+    };
+    const deletedAccountsService = new DeletedAccountsService(
+      deletedAccountsRepo,
+      identityStandIn as IdentityFacade,
+      patientFacade,
+      doctorStandIn as DoctorFacade,
+      audit,
+    );
 
     // ── The ten RETAIN-only modules this execution never writes to ─────
     // Stubbed, deliberately — see this file's header for the reasoning.
@@ -294,6 +326,8 @@ describe('M-21 data-rights execution, against a real database', () => {
       pricing,
       payment,
       patientFacade,
+      doctorStandIn as DoctorFacade,
+      deletedAccountsService,
     );
   });
 
@@ -316,7 +350,7 @@ describe('M-21 data-rights execution, against a real database', () => {
         const preview = await service.previewExecution(request.id);
 
         const byTable = new Map(preview.tables.map((t) => [t.table, t]));
-        expect(byTable.get('patients')).toEqual(expect.objectContaining({ decision: 'anonymize', rowCount: 1 }));
+        expect(byTable.get('patients')).toEqual(expect.objectContaining({ decision: 'soft_delete', rowCount: 1 }));
         expect(byTable.get('search_queries')).toEqual(expect.objectContaining({ decision: 'hard_delete', rowCount: 2 }));
         expect(byTable.get('promotion_code_attempts')).toEqual(expect.objectContaining({ decision: 'anonymize', rowCount: 1 }));
         expect(byTable.get('consultations')).toEqual(expect.objectContaining({ decision: 'retain', rowCount: 1 }));
@@ -347,7 +381,7 @@ describe('M-21 data-rights execution, against a real database', () => {
       try {
         const [consultationBefore] = await db.select().from(consultationsTable).where(eq(consultationsTable.id, consultation.id));
 
-        const result = await service.executeForRequest(request.id, shared.adminId);
+        const result = await service.executeForRequest(request.id, { actorType: 'admin', actorId: shared.adminId });
 
         expect(result.status).toBe('executed');
         expect(result.executionOutcome.overallStatus).toBe('executed');
@@ -361,13 +395,16 @@ describe('M-21 data-rights execution, against a real database', () => {
         const remainingQueries = await db.select().from(searchQueriesTable).where(eq(searchQueriesTable.patientId, patient.id));
         expect(remainingQueries).toHaveLength(0);
 
-        // 2a. ANONYMIZE: patients — exactly the claimed columns, nothing else.
+        // 2a. SOFT DELETE: patients — deleted_at set, mobile vacated, device
+        // hygiene columns cleared, BUT fullName/dateOfBirth SURVIVE (the whole
+        // point of a soft delete over the earlier destructive anonymize).
         const [patientAfter] = await db.select().from(patientsTable).where(eq(patientsTable.id, patient.id));
-        expect(patientAfter.fullName).toBeNull();
-        expect(patientAfter.dateOfBirth).toBeNull();
+        expect(patientAfter.fullName).toBe(patient.fullName);
+        expect(patientAfter.dateOfBirth).toBe(patient.dateOfBirth);
         expect(patientAfter.pushToken).toBeNull();
         expect(patientAfter.deviceId).toBeNull();
         expect(patientAfter.status).toBe('deleted');
+        expect(patientAfter.deletedAt).not.toBeNull();
         expect(patientAfter.mobileNumber).not.toBe(patient.mobileNumber);
         expect(patientAfter.mobileNumber.startsWith('+')).toBe(false);
         expect(patientAfter.mobileNumber).toHaveLength(16);
@@ -376,6 +413,18 @@ describe('M-21 data-rights execution, against a real database', () => {
         expect(patientAfter.gender).toBe(patient.gender);
         expect(patientAfter.preferredLanguage).toBe(patient.preferredLanguage);
         expect(patientAfter.createdAt).toEqual(patient.createdAt);
+
+        // 2c. "ANOTHER COPY, FOR SAFETY": a deleted_accounts snapshot really
+        // exists, carries the pre-mutation identity (proving restore has
+        // something real to restore to), and the ORIGINAL mobile number.
+        const [snapshotRow] = await db.select().from(deletedAccountsTable).where(eq(deletedAccountsTable.deletionRequestId, request.id));
+        expect(snapshotRow).toBeDefined();
+        expect(snapshotRow.accountType).toBe('patient');
+        expect(snapshotRow.accountId).toBe(patient.id);
+        expect(snapshotRow.originalMobileNumber).toBe(patient.mobileNumber);
+        expect(snapshotRow.deletedByAdminId).toBe(shared.adminId);
+        expect(snapshotRow.restoredAt).toBeNull();
+        expect((snapshotRow.snapshot as { fullName: string | null }).fullName).toBe(patient.fullName);
 
         // 2b. ANONYMIZE: promotion_code_attempts — patient_id/ip_address only.
         const [attemptAfter] = await db
@@ -406,7 +455,7 @@ describe('M-21 data-rights execution, against a real database', () => {
       try {
         await db.update(dataDeletionRequestsTable).set({ status: 'requested' }).where(eq(dataDeletionRequestsTable.id, request.id));
 
-        await expect(service.executeForRequest(request.id, shared.adminId)).rejects.toBeDefined();
+        await expect(service.executeForRequest(request.id, { actorType: 'admin', actorId: shared.adminId })).rejects.toBeDefined();
 
         const [patientAfter] = await db.select().from(patientsTable).where(eq(patientsTable.id, patient.id));
         expect(patientAfter.fullName).toBe(patient.fullName);
@@ -424,8 +473,8 @@ describe('M-21 data-rights execution, against a real database', () => {
       const { patient, consultation, request } = await seedPatientScenario(db, shared, 'rc');
       try {
         const results = await Promise.allSettled([
-          service.executeForRequest(request.id, shared.adminId),
-          service.executeForRequest(request.id, shared.adminId),
+          service.executeForRequest(request.id, { actorType: 'admin', actorId: shared.adminId }),
+          service.executeForRequest(request.id, { actorType: 'admin', actorId: shared.adminId }),
         ]);
 
         const fulfilled = results.filter((r) => r.status === 'fulfilled');
@@ -459,7 +508,7 @@ describe('M-21 data-rights execution, against a real database', () => {
       const { patient, consultation, request, attempt } = await seedPatientScenario(db, shared, 'pf');
       throwSearchForPatientId = patient.id;
       try {
-        const result = await service.executeForRequest(request.id, shared.adminId);
+        const result = await service.executeForRequest(request.id, { actorType: 'admin', actorId: shared.adminId });
 
         expect(result.status).toBe('failed');
         expect(result.executionOutcome.overallStatus).toBe('failed');
@@ -483,7 +532,11 @@ describe('M-21 data-rights execution, against a real database', () => {
         expect(attemptAfter?.patientId).toBeNull();
         const [patientAfter] = await db.select().from(patientsTable).where(eq(patientsTable.id, patient.id));
         expect(patientAfter.status).toBe('deleted');
-        expect(patientAfter.fullName).toBeNull();
+        expect(patientAfter.deletedAt).not.toBeNull();
+        // A soft delete keeps fullName — this step succeeded independently
+        // of the sibling search_queries failure, and "succeeded" for a soft
+        // delete means the identity fields survive, not that they vanish.
+        expect(patientAfter.fullName).toBe(patient.fullName);
 
         // The permanent record is honest, not a false "success".
         const [requestAfter] = await db.select().from(dataDeletionRequestsTable).where(eq(dataDeletionRequestsTable.id, request.id));

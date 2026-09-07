@@ -8,6 +8,7 @@ import { DataDeletionController } from './data-deletion.controller';
 import { DataDeletionExecutionFacade } from './data-deletion-execution.facade';
 import { DataDeletionRepository } from './data-deletion.repository';
 import { DataDeletionService } from './data-deletion.service';
+import { DataDeletionPageController } from './data-deletion-page.controller';
 import { LegalDocumentAdminController } from './legal-document-admin.controller';
 import { LegalDocumentController } from './legal-document.controller';
 import { LegalDocumentPublicController } from './legal-document-public.controller';
@@ -30,6 +31,7 @@ import { LegalDocumentService } from './legal-document.service';
     ConsentController,
     DataDeletionController,
     DataDeletionAdminController,
+    DataDeletionPageController,
   ],
   providers: [
     LegalDocumentRepository,

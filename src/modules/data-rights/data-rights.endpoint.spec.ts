@@ -50,13 +50,13 @@
  *
  * ── FIXTURE ISOLATION — WHY THIS FILE NEVER MATCHES BY MOBILE NUMBER ──────
  *
- * `patient.service.ts#anonymizeForDeletion` REPLACES `mobile_number` with a
- * deterministic placeholder (`DEL` + the id's own hex, stripped of dashes) —
- * so a teardown clause written as `WHERE mobile_number = <original>` would
- * silently stop matching the row the instant this test's own subject under
- * test succeeds. Every fixture below is tracked and torn down BY ID, never
- * by mobile number, precisely because this file expects that mutation to
- * really happen.
+ * `patient.service.ts#softDeleteForDeletionRequest` REPLACES `mobile_number`
+ * with a deterministic placeholder (`DEL` + the id's own hex, stripped of
+ * dashes) — so a teardown clause written as `WHERE mobile_number =
+ * <original>` would silently stop matching the row the instant this test's
+ * own subject under test succeeds. Every fixture below is tracked and torn
+ * down BY ID, never by mobile number, precisely because this file expects
+ * that mutation to really happen.
  *
  * Requires a reachable Postgres — reads `.env`/`.env.local` exactly as
  * `app.e2e.integration.spec.ts` does, and fails loudly rather than skipping.
@@ -71,6 +71,7 @@ import { adminPermissionGrantsTable } from '../../schema/admin-permission-grants
 import { adminsTable } from '../../schema/admins.schema';
 import { consultationsTable } from '../../schema/consultations.schema';
 import { dataDeletionRequestsTable } from '../../schema/data-deletion-requests.schema';
+import { deletedAccountsTable } from '../../schema/deleted-accounts.schema';
 import { doctorSpecialtiesTable } from '../../schema/doctor-specialties.schema';
 import { doctorsTable } from '../../schema/doctors.schema';
 import { feedbackTable } from '../../schema/feedback.schema';
@@ -95,6 +96,8 @@ function payload<T>(response: { json: () => unknown }): T {
 interface PatientSubject {
   patientId: string;
   mobileNumber: string;
+  fullName: string;
+  dateOfBirth: string;
   searchQueryIds: number[];
   promotionAttemptId: number;
   requestId: string;
@@ -131,13 +134,15 @@ async function seedPatientSubject(
   requestStatus: 'approved' | 'requested',
 ): Promise<PatientSubject> {
   const mobileNumber = `DRT${runId}${seq}`.slice(0, 16);
+  const fullName = `Data Rights Subject ${seq} ${runId}`;
+  const dateOfBirth = '1990-01-01';
   const [patient] = await db
     .insert(patientsTable)
     .values({
       mobileNumber,
-      fullName: `Data Rights Subject ${seq} ${runId}`,
+      fullName,
       status: 'active',
-      dateOfBirth: '1990-01-01',
+      dateOfBirth,
       pushToken: `push-token-${runId}-${seq}`,
       deviceId: `device-${runId}-${seq}`,
     })
@@ -164,6 +169,8 @@ async function seedPatientSubject(
   return {
     patientId: patient.id,
     mobileNumber,
+    fullName,
+    dateOfBirth,
     searchQueryIds: searchRows.map((r) => r.id),
     promotionAttemptId: promotionAttempt.id,
     requestId: request.id,
@@ -254,6 +261,8 @@ async function teardown(db: Database, fixtures: Fixtures): Promise<void> {
   // Every table this test could have mutated OR left alone — always matched by ID, never by mobile number (see file header).
   await db.delete(feedbackTable).where(eq(feedbackTable.id, fixtures.executeSubject.feedbackId));
   await db.delete(consultationsTable).where(eq(consultationsTable.id, fixtures.executeSubject.consultationId));
+  // deleted_accounts FKs to data_deletion_requests with no ON DELETE CASCADE — must go first.
+  await db.delete(deletedAccountsTable).where(inArray(deletedAccountsTable.deletionRequestId, allRequestIds));
   await db.delete(dataDeletionRequestsTable).where(inArray(dataDeletionRequestsTable.id, allRequestIds));
   // search_queries: delete by id where still present (execute's own hard-delete may already have removed some).
   const allSearchQueryIds = [
@@ -398,7 +407,7 @@ describe('*** DATA RIGHTS — preview and execute, every route, real HTTP ***', 
       expect(body.requestStatus).toBe('approved');
 
       const byTable = new Map(body.tables.map((t) => [t.table, t]));
-      expect(byTable.get('patients')).toMatchObject({ decision: 'anonymize', rowCount: 1 });
+      expect(byTable.get('patients')).toMatchObject({ decision: 'soft_delete', rowCount: 1 });
       expect(byTable.get('search_queries')).toMatchObject({ decision: 'hard_delete', rowCount: 2 });
       expect(byTable.get('promotion_code_attempts')).toMatchObject({ decision: 'anonymize', rowCount: 1 });
     });
@@ -464,8 +473,8 @@ describe('*** DATA RIGHTS — preview and execute, every route, real HTTP ***', 
   /* EXECUTE on a genuinely approved request — THE REAL THING               */
   /* ====================================================================== */
 
-  describe('POST execute — a genuinely approved request is really anonymized/deleted', () => {
-    it('201s, anonymizes patients, hard-deletes search_queries, anonymizes promotion_code_attempts, and LEAVES feedback (a retain table) untouched — verified with direct SQL, not the response', async () => {
+  describe('POST execute — a genuinely approved request is really soft-deleted/deleted', () => {
+    it('201s, soft-deletes patients, hard-deletes search_queries, anonymizes promotion_code_attempts, and LEAVES feedback (a retain table) untouched — verified with direct SQL, not the response', async () => {
       const subject = fixtures.executeSubject;
       const expectedMobilePlaceholder = anonymizedMobilePlaceholder(subject.patientId);
 
@@ -496,13 +505,21 @@ describe('*** DATA RIGHTS — preview and execute, every route, real HTTP ***', 
       /* ── THE REAL PROOF: FRESH SQL, NOT THE HTTP RESPONSE'S OWN SAY-SO ── */
 
       const patientRow = (await db.select().from(patientsTable).where(eq(patientsTable.id, subject.patientId)))[0];
-      expect(patientRow.fullName).toBeNull();
-      expect(patientRow.dateOfBirth).toBeNull();
+      // A SOFT delete, not the earlier destructive anonymize: fullName/dateOfBirth
+      // SURVIVE — see `patient.service.ts#softDeleteForDeletionRequest`'s header.
+      expect(patientRow.fullName).toBe(subject.fullName);
+      expect(patientRow.dateOfBirth).toBe(subject.dateOfBirth);
       expect(patientRow.pushToken).toBeNull();
       expect(patientRow.deviceId).toBeNull();
       expect(patientRow.status).toBe('deleted');
+      expect(patientRow.deletedAt).not.toBeNull();
       expect(patientRow.mobileNumber).toBe(expectedMobilePlaceholder);
       expect(patientRow.mobileNumber).not.toBe(subject.mobileNumber);
+
+      // "Another copy, for safety": a deleted_accounts snapshot really exists.
+      const [snapshotRow] = await db.select().from(deletedAccountsTable).where(eq(deletedAccountsTable.deletionRequestId, subject.requestId));
+      expect(snapshotRow).toBeDefined();
+      expect(snapshotRow.originalMobileNumber).toBe(subject.mobileNumber);
 
       const remainingSearchQueries = await db
         .select()
@@ -524,7 +541,7 @@ describe('*** DATA RIGHTS — preview and execute, every route, real HTTP ***', 
       expect(feedbackRow).toBeDefined();
       expect(feedbackRow.rating).toBe(5);
       expect(feedbackRow.comment).toBe('must survive execution');
-      expect(feedbackRow.patientId).toBe(subject.patientId); // the FK still resolves — the patient row still exists, merely anonymized.
+      expect(feedbackRow.patientId).toBe(subject.patientId); // the FK still resolves — the patient row still exists, merely soft-deleted.
 
       const requestRow = (
         await db.select().from(dataDeletionRequestsTable).where(eq(dataDeletionRequestsTable.id, subject.requestId))

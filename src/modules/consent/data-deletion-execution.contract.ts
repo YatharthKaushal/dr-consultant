@@ -43,9 +43,16 @@ export interface DataDeletionExecutionContract {
    * shape of its own to it. `data-deletion-requests.schema.ts`'s own
    * comment on the column already states the contract: "per-table counts,
    * lawful retention grounds, or a failure reason."
+   *
+   * `actor` is `{actorType:'admin', actorId}` for an explicit admin action
+   * (`POST admin/data-deletion-requests/:id/execute`), or
+   * `{actorType:'system', actorId:null}` for the grace-period sweep
+   * (ADDITIVE, account-deletion lifecycle round) — widened from a bare
+   * admin id so a sweep-driven execution's audit trail honestly says the
+   * system acted, never a fabricated admin.
    */
   recordExecutionOutcome(
-    actingAdminId: string,
+    actor: { actorType: 'admin' | 'system'; actorId: string | null },
     requestId: string,
     input: { status: Extract<DeletionStatus, 'executed' | 'failed'>; executionOutcome: unknown },
   ): Promise<DataDeletionRequestRecord>;
@@ -57,4 +64,21 @@ export interface DataDeletionExecutionContract {
    * a pure count for the preview report; nothing here is ever written.
    */
   countConsentsForPatient(patientId: string): Promise<number>;
+
+  /**
+   * ADDITIVE (account-deletion lifecycle round). The grace-period sweep's
+   * own read — every request whose `scheduled_for` has elapsed and is
+   * still `requested`/`in_review`/`approved`. Lives here (not a new,
+   * separate M-03 surface) because it is squarely execution-adjacent, the
+   * same reasoning `recordExecutionOutcome` above already applies.
+   */
+  listDueForSweep(limit: number): Promise<DataDeletionRequestRecord[]>;
+
+  /**
+   * ADDITIVE (account-deletion lifecycle round). `requested`/`in_review` ->
+   * `approved` on the SYSTEM'S authority, when no admin decided within the
+   * grace period — see `data-deletion.service.ts#autoApproveForSweep`'s
+   * own header for the idempotency contract.
+   */
+  autoApproveForSweep(requestId: string): Promise<DataDeletionRequestRecord>;
 }
