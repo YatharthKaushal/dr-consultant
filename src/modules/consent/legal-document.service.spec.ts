@@ -21,9 +21,11 @@ function row(overrides: Partial<LegalDocumentRow> = {}): LegalDocumentRow {
   return {
     id: 'd0000000-0000-4000-8000-000000000001',
     documentType: 'privacy_policy',
+    audience: 'all',
     version: 'v1',
     title: 'Privacy Policy',
     body: 'The text.',
+    contentFormat: 'markdown',
     isCurrent: false,
     createdAt: new Date('2026-01-01T00:00:00.000Z'),
     ...overrides,
@@ -141,7 +143,7 @@ describe('LegalDocumentService', () => {
     it('demotes every other current version of the type, excluding the new row', async () => {
       await service.adminCreate(ADMIN_ID, { ...dto, publish: true });
 
-      expect(repo.clearCurrent).toHaveBeenCalledWith('privacy_policy', 'd0000000-0000-4000-8000-0000000000ff', db);
+      expect(repo.clearCurrent).toHaveBeenCalledWith('privacy_policy', 'all', 'd0000000-0000-4000-8000-0000000000ff', db);
     });
 
     /** Legal evidence: a published version with no record of who published it is not an acceptable half-success. */
@@ -193,7 +195,7 @@ describe('LegalDocumentService', () => {
       const published = await service.adminPublish(ADMIN_ID, 'd1');
 
       expect(calls).toEqual(['lock', 'clearCurrent', 'setCurrent', 'audit']);
-      expect(repo.clearCurrent).toHaveBeenCalledWith('privacy_policy', 'd1', db);
+      expect(repo.clearCurrent).toHaveBeenCalledWith('privacy_policy', 'all', 'd1', db);
       expect(published.isCurrent).toBe(true);
     });
 
@@ -265,6 +267,89 @@ describe('LegalDocumentService', () => {
         ForbiddenException,
       );
       expect(repo.findCurrent).not.toHaveBeenCalled();
+    });
+
+    describe('per-app audience override', () => {
+      it("getCurrentForAccountType tries the account type's own audience first, falling back to the shared 'all' document", async () => {
+        repo.findCurrent.mockResolvedValueOnce(null); // no patient-audience override published
+        repo.findCurrent.mockResolvedValueOnce(row({ id: 'shared', audience: 'all' }));
+
+        const detail = await service.getCurrentForAccountType('privacy_policy', 'patient');
+
+        expect(repo.findCurrent).toHaveBeenNthCalledWith(1, 'privacy_policy', 'patient');
+        expect(repo.findCurrent).toHaveBeenNthCalledWith(2, 'privacy_policy', 'all');
+        expect(detail.id).toBe('shared');
+      });
+
+      it("a published per-app override wins over the shared 'all' document, and 'all' is never even queried", async () => {
+        repo.findCurrent.mockResolvedValueOnce(row({ id: 'override', audience: 'patient' }));
+
+        const detail = await service.getCurrentForAccountType('privacy_policy', 'patient');
+
+        expect(repo.findCurrent).toHaveBeenCalledTimes(1);
+        expect(detail.id).toBe('override');
+      });
+
+      it("listCurrentForAccountType prefers a patient's own audience row over 'all' for the same type, per type independently", async () => {
+        repo.listCurrent.mockResolvedValue([
+          row({ id: 'shared-privacy', documentType: 'privacy_policy', audience: 'all', isCurrent: true }),
+          row({ id: 'patient-privacy', documentType: 'privacy_policy', audience: 'patient', isCurrent: true }),
+          row({ id: 'shared-terms', documentType: 'terms_of_use', audience: 'all', isCurrent: true }),
+          row({ id: 'doctor-terms', documentType: 'terms_of_use', audience: 'doctor', isCurrent: true }),
+        ]);
+
+        const patientView = await service.listCurrentForAccountType('patient');
+
+        expect(patientView.map((doc) => doc.id).sort()).toEqual(['patient-privacy', 'shared-terms']);
+      });
+
+      it('listCurrentForAccountType(admin) returns every current row across every audience, not deduped', async () => {
+        repo.listCurrent.mockResolvedValue([
+          row({ id: 'shared-privacy', documentType: 'privacy_policy', audience: 'all', isCurrent: true }),
+          row({ id: 'patient-privacy', documentType: 'privacy_policy', audience: 'patient', isCurrent: true }),
+          row({ id: 'doctor-privacy', documentType: 'privacy_policy', audience: 'doctor', isCurrent: true }),
+        ]);
+
+        const adminView = await service.listCurrentForAccountType('admin');
+
+        expect(adminView.map((doc) => doc.id).sort()).toEqual(['doctor-privacy', 'patient-privacy', 'shared-privacy']);
+      });
+    });
+  });
+
+  describe('getCurrentForAudience (public, unauthenticated read)', () => {
+    it('resolves the exact audience requested when a current row exists for it', async () => {
+      repo.findCurrent.mockResolvedValueOnce(row({ id: 'doctor-row', audience: 'doctor' }));
+
+      const detail = await service.getCurrentForAudience('terms_of_use', 'doctor');
+
+      expect(repo.findCurrent).toHaveBeenCalledWith('terms_of_use', 'doctor');
+      expect(detail.id).toBe('doctor-row');
+    });
+
+    it("falls back to 'all' when the requested audience has no current row", async () => {
+      repo.findCurrent.mockResolvedValueOnce(null);
+      repo.findCurrent.mockResolvedValueOnce(row({ id: 'shared-row', audience: 'all' }));
+
+      const detail = await service.getCurrentForAudience('terms_of_use', 'doctor');
+
+      expect(detail.id).toBe('shared-row');
+    });
+
+    it("audience 'all' queries 'all' directly, once", async () => {
+      repo.findCurrent.mockResolvedValueOnce(row({ id: 'shared-row', audience: 'all' }));
+
+      await service.getCurrentForAudience('terms_of_use', 'all');
+
+      expect(repo.findCurrent).toHaveBeenCalledTimes(1);
+      expect(repo.findCurrent).toHaveBeenCalledWith('terms_of_use', 'all');
+    });
+
+    it('404s when nothing is published for the requested audience or the shared fallback', async () => {
+      repo.findCurrent.mockResolvedValue(null);
+      await expect(service.getCurrentForAudience('terms_of_use', 'patient')).rejects.toMatchObject({
+        response: { code: CONSENT_ERROR_CODES.NO_CURRENT_LEGAL_DOCUMENT },
+      });
     });
   });
 

@@ -1,5 +1,5 @@
 import { IsBoolean, IsIn, IsOptional, IsString, Length, Matches } from 'class-validator';
-import { LEGAL_DOCUMENT_TYPES, type LegalDocumentType } from '../../schema/enums.schema';
+import { CONTENT_FORMATS, LEGAL_AUDIENCES, LEGAL_DOCUMENT_TYPES, type ContentFormat, type LegalAudience, type LegalDocumentType } from '../../schema/enums.schema';
 
 /**
  * A new version is a NEW ROW — there is deliberately no update DTO. Once a
@@ -10,6 +10,16 @@ import { LEGAL_DOCUMENT_TYPES, type LegalDocumentType } from '../../schema/enums
 export class CreateLegalDocumentDto {
   @IsIn(LEGAL_DOCUMENT_TYPES)
   documentType!: LegalDocumentType;
+
+  /** Defaults to `'all'` (one shared document) — see `enums.schema.ts#LEGAL_AUDIENCES`. */
+  @IsOptional()
+  @IsIn(LEGAL_AUDIENCES)
+  audience?: LegalAudience;
+
+  /** Defaults to `'markdown'`. */
+  @IsOptional()
+  @IsIn(CONTENT_FORMATS)
+  contentFormat?: ContentFormat;
 
   /**
    * Client-set (`legal-documents.schema.ts`) and unique per type. Constrained

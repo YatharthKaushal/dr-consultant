@@ -53,5 +53,12 @@ export type ConsentErrorCode = (typeof CONSENT_ERROR_CODES)[keyof typeof CONSENT
  * reasoning ("the invariant spans rows, so no unique index can express it"), as
  * `referral.repository.ts#lockReferrerGuard` and
  * `availability-rule.service.ts#lockDateGuard`.
+ *
+ * *** THE LOCK KEY MUST INCLUDE `audience`. *** (Public rich-text pages
+ * round.) The uniqueness invariant is now per `(document_type, audience)`,
+ * not per `document_type` alone — `legal-document.repository.ts
+ * #lockDocumentTypeGuard` hashes `${prefix}:${documentType}:${audience}`, so
+ * publishing a patient-audience privacy policy no longer serialises against
+ * a doctor-audience or shared `'all'` publish of the same type.
  */
 export const LEGAL_DOCUMENT_CURRENT_LOCK_PREFIX = 'consent.legal_document_current';

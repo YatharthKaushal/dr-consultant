@@ -162,7 +162,10 @@ export class ConsentService {
    * instead of silently reporting "no consent".
    */
   async checkPatientConsent(patientId: string, documentType: LegalDocumentType): Promise<ConsentCheck> {
-    const current = await this.legalDocuments.findCurrent(documentType);
+    // A patient's own audience override wins if published, else the shared
+    // `'all'` document — same resolution `legal-document.service.ts
+    // #getCurrentForAccountType` uses for a signed-in patient's read.
+    const current = (await this.legalDocuments.findCurrent(documentType, 'patient')) ?? (await this.legalDocuments.findCurrent(documentType, 'all'));
     const latest = await this.repo.findLatestPatientAcceptance(patientId, documentType);
 
     if (current) {

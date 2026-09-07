@@ -1,4 +1,4 @@
-import type { LegalDocumentType } from '../../schema/enums.schema';
+import type { ContentFormat, LegalAudience, LegalDocumentType } from '../../schema/enums.schema';
 
 /**
  * HTTP-facing shapes for this module's controllers. Deliberately NOT in
@@ -16,6 +16,7 @@ import type { LegalDocumentType } from '../../schema/enums.schema';
 export interface LegalDocumentSummary {
   id: string;
   documentType: LegalDocumentType;
+  audience: LegalAudience;
   version: string;
   title: string;
   isCurrent: boolean;
@@ -24,6 +25,7 @@ export interface LegalDocumentSummary {
 
 /** The full document, as shown on the screen a patient reads and accepts. */
 export interface LegalDocumentDetail extends LegalDocumentSummary {
+  contentFormat: ContentFormat;
   body: string;
 }
 

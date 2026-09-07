@@ -24,9 +24,11 @@ function document(overrides: Partial<LegalDocumentRow> = {}): LegalDocumentRow {
   return {
     id: 'l0000000-0000-4000-8000-000000000002',
     documentType: 'teleconsultation_consent',
+    audience: 'all',
     version: 'v2',
     title: 'Teleconsultation Consent',
     body: 'The text.',
+    contentFormat: 'markdown',
     isCurrent: true,
     createdAt: new Date('2026-02-01T00:00:00.000Z'),
     ...overrides,

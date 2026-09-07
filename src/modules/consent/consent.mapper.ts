@@ -14,6 +14,7 @@ export function toLegalDocumentSummary(row: LegalDocumentRow): LegalDocumentSumm
   return {
     id: row.id,
     documentType: row.documentType,
+    audience: row.audience,
     version: row.version,
     title: row.title,
     isCurrent: row.isCurrent,
@@ -22,7 +23,7 @@ export function toLegalDocumentSummary(row: LegalDocumentRow): LegalDocumentSumm
 }
 
 export function toLegalDocumentDetail(row: LegalDocumentRow): LegalDocumentDetail {
-  return { ...toLegalDocumentSummary(row), body: row.body };
+  return { ...toLegalDocumentSummary(row), contentFormat: row.contentFormat, body: row.body };
 }
 
 export function toConsentRecord(acceptance: ConsentAcceptance): ConsentRecord {

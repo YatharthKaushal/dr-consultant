@@ -252,6 +252,29 @@ export const LEGAL_DOCUMENT_TYPES = [
 export type LegalDocumentType = (typeof LEGAL_DOCUMENT_TYPES)[number];
 export const legalDocumentTypeEnum = pgEnum('legal_document_type', LEGAL_DOCUMENT_TYPES);
 
+/**
+ * Which app a legal document version is written for. `'all'` is a single
+ * shared version (the launch default — every existing row migrates to
+ * `'all'`); `'patient'`/`'doctor'` is a per-app override that wins over an
+ * `'all'` row of the same type when one is published. Not `AccountType`
+ * (`patient`/`doctor`/`admin`) — an admin never accepts or is shown a
+ * per-app legal document, so a third value here would be meaningless.
+ */
+export const LEGAL_AUDIENCES = ['all', 'patient', 'doctor'] as const;
+export type LegalAudience = (typeof LEGAL_AUDIENCES)[number];
+export const legalAudienceEnum = pgEnum('legal_audience', LEGAL_AUDIENCES);
+
+/**
+ * How `legal_documents.body` is authored. `markdown` is rendered server-side
+ * by `shared/richtext/markdown.util.ts` (escape-first, so it is safe with no
+ * sanitiser dependency); `plain_text` is shown verbatim, HTML-escaped, no
+ * markdown constructs applied — for a short document where an admin wants
+ * zero risk of a stray `*`/`#` being interpreted as formatting.
+ */
+export const CONTENT_FORMATS = ['markdown', 'plain_text'] as const;
+export type ContentFormat = (typeof CONTENT_FORMATS)[number];
+export const contentFormatEnum = pgEnum('content_format', CONTENT_FORMATS);
+
 export const DELETION_STATUSES = [
   'requested',
   'in_review',

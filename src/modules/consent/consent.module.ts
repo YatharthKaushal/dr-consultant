@@ -10,6 +10,7 @@ import { DataDeletionRepository } from './data-deletion.repository';
 import { DataDeletionService } from './data-deletion.service';
 import { LegalDocumentAdminController } from './legal-document-admin.controller';
 import { LegalDocumentController } from './legal-document.controller';
+import { LegalDocumentPublicController } from './legal-document-public.controller';
 import { LegalDocumentRepository } from './legal-document.repository';
 import { LegalDocumentService } from './legal-document.service';
 
@@ -25,6 +26,7 @@ import { LegalDocumentService } from './legal-document.service';
   controllers: [
     LegalDocumentController,
     LegalDocumentAdminController,
+    LegalDocumentPublicController,
     ConsentController,
     DataDeletionController,
     DataDeletionAdminController,
