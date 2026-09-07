@@ -82,6 +82,8 @@ export const PERMISSIONS = {
 
   COMPLIANCE_MANAGE_LEGAL_DOCUMENTS: 'compliance.manage_legal_documents',
   COMPLIANCE_MANAGE_DELETION_REQUESTS: 'compliance.manage_deletion_requests',
+  /** View and edit the force-update policy — one permission gates both, same shape as `PAYMENTS_MANAGE_CONFIG`. */
+  RELEASE_MANAGE: 'release.manage',
 
   AUDIT_READ: 'audit.read',
   AUDIT_EXPORT: 'audit.export',
@@ -170,6 +172,7 @@ const DESCRIPTIONS: Record<PermissionKey, string> = {
   [PERMISSIONS.FEEDBACK_MANAGE_COMPLAINTS]: 'Work a complaint through to resolution.',
   [PERMISSIONS.COMPLIANCE_MANAGE_LEGAL_DOCUMENTS]: 'Publish a new version of a legal document.',
   [PERMISSIONS.COMPLIANCE_MANAGE_DELETION_REQUESTS]: 'Review and execute a data-deletion request.',
+  [PERMISSIONS.RELEASE_MANAGE]: 'View and edit the force-update policy (minimum/latest version per app and platform).',
   [PERMISSIONS.AUDIT_READ]: 'Search the audit log.',
   [PERMISSIONS.AUDIT_EXPORT]: 'Export audit log entries.',
   [PERMISSIONS.CONFIG_READ]: 'View app configuration values.',
@@ -272,6 +275,9 @@ export const ROLE_PERMISSIONS: Record<RoleCode, readonly PermissionKey[]> = {
     PERMISSIONS.FEEDBACK_MANAGE_COMPLAINTS,
     PERMISSIONS.CONFIG_READ,
     PERMISSIONS.CONFIG_MANAGE,
+    // Force-update policy is operational rollout control, not a clinical or
+    // compliance decision — grouped with CONFIG_MANAGE, same reasoning.
+    PERMISSIONS.RELEASE_MANAGE,
     PERMISSIONS.AUDIT_READ,
     // Read-only. Diagnosing "why is symptom search degraded" is day-to-day
     // support work; `ai.manage` (spend + third-party credentials) is not, and

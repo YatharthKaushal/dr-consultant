@@ -27,6 +27,7 @@ import { PatientModule } from './modules/patient/patient.module';
 import { PaymentModule } from './modules/payment/payment.module';
 import { PricingModule } from './modules/pricing/pricing.module';
 import { PromotionModule } from './modules/promotion/promotion.module';
+import { ReleaseModule } from './modules/release/release.module';
 import { SearchModule } from './modules/search/search.module';
 import { SearchToolModule } from './modules/search/tools/search-tool.module';
 import { StorageModule } from './modules/storage/storage.module';
@@ -212,6 +213,11 @@ import { ErrorsModule } from './shared/errors/errors.module';
     // module's facade it needs directly (see `data-rights.module.ts`'s own
     // header); exports nothing, since nothing downstream consumes it.
     DataRightsModule,
+    // Force-update policy (`GET /api/app/release-status`, public) — no SRS
+    // module number of its own; a supporting/store-readiness feature added
+    // after M-01..M-21. Owns no table, imports no feature module — see
+    // `release.module.ts`'s own header.
+    ReleaseModule,
     HealthModule,
   ],
 })
