@@ -1,4 +1,4 @@
-import { Body, Controller, Delete, Get, HttpCode, HttpStatus, Param, Patch, Post } from '@nestjs/common';
+import { Body, Controller, Delete, Get, HttpCode, HttpStatus, Param, Patch, Post, Query } from '@nestjs/common';
 import { AccountType, CurrentUser, RequirePermission } from '../../shared/auth/auth.decorator';
 import type { AuthContext } from '../../shared/auth/auth.types';
 import { PERMISSIONS } from '../../shared/auth/permission.catalog';
@@ -6,6 +6,7 @@ import { createUuidValidationPipe } from '../../shared/errors/uuid-param.pipe';
 import {
   AssignDoctorSpecialtyDto,
   CreateDoctorDto,
+  ListDoctorsQueryDto,
   ReviewDoctorDocumentDto,
   UpdateDoctorDto,
   UpdateDoctorExpertRoleDto,
@@ -33,8 +34,8 @@ export class DoctorAdminController {
 
   @Get()
   @RequirePermission(PERMISSIONS.DOCTORS_READ)
-  list() {
-    return this.doctorService.adminList();
+  list(@Query() query: ListDoctorsQueryDto) {
+    return this.doctorService.adminList(query);
   }
 
   @Get(':id')
@@ -116,6 +117,17 @@ export class DoctorAdminController {
   @RequirePermission(PERMISSIONS.DOCTORS_READ)
   listDocuments(@Param('id', createUuidValidationPipe('id')) id: string) {
     return this.documentService.listForAdmin(id);
+  }
+
+  /** A short-lived signed URL so an admin can actually READ the credential before deciding on it — `doctors.read`, not `doctors.verify`: looking is not deciding, and Finance/Care Coordinator hold read without verify. */
+  @Get(':id/documents/:documentId/download')
+  @RequirePermission(PERMISSIONS.DOCTORS_READ)
+  getDocumentDownloadUrl(
+    @CurrentUser() auth: AuthContext,
+    @Param('id', createUuidValidationPipe('id')) id: string,
+    @Param('documentId', createUuidValidationPipe('documentId')) documentId: string,
+  ) {
+    return this.documentService.getDownloadUrlForAdmin(auth.accountId, id, documentId);
   }
 
   @Patch(':id/documents/:documentId/review')

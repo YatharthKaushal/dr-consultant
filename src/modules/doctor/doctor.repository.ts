@@ -1,10 +1,12 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { and, asc, eq, exists, inArray, isNotNull, isNull, lte, notInArray, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, exists, ilike, inArray, isNotNull, isNull, lte, notInArray, or, sql, type SQL } from 'drizzle-orm';
 import { DATABASE } from '../../config/db/database.module';
 import type { Database, DatabaseTransaction } from '../../config/db/database.config';
 import { doctorSpecialtiesTable } from '../../schema/doctor-specialties.schema';
 import { doctorsTable, type DoctorRow } from '../../schema/doctors.schema';
 import type { DoctorPresence, DoctorSeniority, DoctorVerificationStatus } from '../../schema/enums.schema';
+import type { DoctorListSortField, DoctorListSortOrder } from './doctor.constants';
+import { doctorStageCondition, type DoctorOnboardingStage } from './doctor-stage';
 import type { Executor } from '../identity/identity.repository';
 
 export interface DoctorProfileFieldsUpdate {
@@ -28,6 +30,29 @@ export interface DoctorVerificationUpdate {
   /** Forced `false` in the same statement when the transition demotes the doctor — see `doctor-verification.service.ts`. */
   isListed?: boolean;
 }
+
+/** Resolved filter for the admin doctor list — every field already defaulted by the service, so the repository never guesses. */
+export interface AdminDoctorListFilter {
+  search?: string;
+  verificationStatus?: DoctorVerificationStatus;
+  stage?: DoctorOnboardingStage;
+  isListed?: boolean;
+  allowInstantConsult?: boolean;
+  specialtyId?: string;
+  includeDeleted: boolean;
+  sortBy: DoctorListSortField;
+  sortOrder: DoctorListSortOrder;
+  limit: number;
+  offset: number;
+}
+
+/** Sort-field allowlist -> column. A lookup, never string interpolation into ORDER BY. */
+const ADMIN_LIST_SORT_COLUMNS = {
+  fullName: doctorsTable.fullName,
+  createdAt: doctorsTable.createdAt,
+  verifiedAt: doctorsTable.verifiedAt,
+  consultationFeeInr: doctorsTable.consultationFeeInr,
+} as const;
 
 export interface DoctorListingUpdate {
   isListed?: boolean;
@@ -88,9 +113,111 @@ export class DoctorRepository {
     return row ?? null;
   }
 
-  /** Plain list, every status — no pagination, mirroring `identity.repository.ts`'s `listAdmins`. */
+  /** Plain list, every status, no pagination. Retained for internal callers that genuinely want the whole table; the ADMIN list is `listForAdmin` below. */
   async list(executor: Executor = this.db): Promise<DoctorRow[]> {
     return executor.select().from(doctorsTable).orderBy(doctorsTable.fullName);
+  }
+
+  /**
+   * The admin doctor list: filter, sort and page, all server-side.
+   *
+   * `listForAdmin` and `countForAdmin` share `buildAdminListConditions` so
+   * the page and its total can never be computed from different predicates —
+   * that mismatch is the classic way a paginated table ends up claiming 40
+   * results and rendering 12.
+   */
+  async listForAdmin(filter: AdminDoctorListFilter, executor: Executor = this.db): Promise<DoctorRow[]> {
+    const conditions = this.buildAdminListConditions(filter, executor);
+    const direction = filter.sortOrder === 'desc' ? desc : asc;
+
+    return executor
+      .select()
+      .from(doctorsTable)
+      .where(and(...conditions))
+      // `id` is the tiebreaker on every sort. None of the sortable columns
+      // is unique — two doctors share a name, a thousand share a ₹0 fee —
+      // and `limit`/`offset` over a non-deterministic order silently repeats
+      // and skips rows between pages. Same reasoning as `listListedDoctors`.
+      .orderBy(direction(ADMIN_LIST_SORT_COLUMNS[filter.sortBy]), asc(doctorsTable.id))
+      .limit(filter.limit)
+      .offset(filter.offset);
+  }
+
+  /** Total matching rows, for the `{items,total,limit,offset}` envelope. */
+  async countForAdmin(filter: AdminDoctorListFilter, executor: Executor = this.db): Promise<number> {
+    const conditions = this.buildAdminListConditions(filter, executor);
+    const [row] = await executor
+      .select({ count: sql<number>`count(*)::int` })
+      .from(doctorsTable)
+      .where(and(...conditions));
+    return row?.count ?? 0;
+  }
+
+  private buildAdminListConditions(filter: AdminDoctorListFilter, executor: Executor): SQL[] {
+    const conditions: SQL[] = [];
+
+    if (!filter.includeDeleted) {
+      conditions.push(isNull(doctorsTable.deletedAt));
+    }
+
+    if (filter.verificationStatus) {
+      conditions.push(eq(doctorsTable.verificationStatus, filter.verificationStatus));
+    }
+
+    if (filter.stage) {
+      conditions.push(doctorStageCondition(filter.stage));
+    }
+
+    if (filter.isListed !== undefined) {
+      conditions.push(eq(doctorsTable.isListed, filter.isListed));
+    }
+
+    if (filter.allowInstantConsult !== undefined) {
+      conditions.push(eq(doctorsTable.allowInstantConsult, filter.allowInstantConsult));
+    }
+
+    if (filter.specialtyId) {
+      // EXISTS, not a join — a join against `doctor_specialties` multiplies
+      // a doctor by their specialty count and corrupts limit/offset, so a
+      // page of 25 could return 14 distinct doctors. Same call the
+      // `listListedDoctors` search path already makes.
+      conditions.push(
+        exists(
+          executor
+            .select({ one: sql`1` })
+            .from(doctorSpecialtiesTable)
+            .where(
+              and(
+                eq(doctorSpecialtiesTable.doctorId, doctorsTable.id),
+                eq(doctorSpecialtiesTable.specialtyId, filter.specialtyId),
+              ),
+            ),
+        ),
+      );
+    }
+
+    const search = filter.search?.trim();
+    if (search) {
+      // `%` and `_` are LIKE wildcards. A search for "50%" must look for the
+      // literal characters, not "starts with 50" — so they are escaped
+      // before the term is wrapped, with a backslash escape declared per
+      // pattern. Drizzle still binds the whole thing as a parameter; this is
+      // about the term meaning what the admin typed, not injection.
+      const escaped = search.replace(/[\\%_]/g, (char) => `\\${char}`);
+      const term = `%${escaped}%`;
+      conditions.push(
+        or(
+          ilike(doctorsTable.fullName, term),
+          // Numbers are stored E.164 ("+919876543210"), so a contains match
+          // finds a doctor whether the admin typed the bare 10 digits or
+          // pasted the full international form.
+          ilike(doctorsTable.mobileNumber, term),
+          ilike(doctorsTable.registrationNumber, term),
+        ) as SQL,
+      );
+    }
+
+    return conditions;
   }
 
   async listByIds(ids: readonly string[], executor: Executor = this.db): Promise<DoctorRow[]> {

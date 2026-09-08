@@ -7,9 +7,9 @@ import { IdentityFacade } from '../identity/identity.facade';
 import { maskFullName } from '../../shared/privacy/mask.util';
 import { DoctorDocumentRepository } from './doctor-document.repository';
 import { DoctorSpecialtyRepository } from './doctor-specialty.repository';
-import type { CreateDoctorDto, UpdateDoctorDto } from './doctor-admin.dto';
+import type { CreateDoctorDto, ListDoctorsQueryDto, UpdateDoctorDto } from './doctor-admin.dto';
 import type { UpdateOwnDoctorProfileDto } from './doctor.dto';
-import { DOCTOR_AUDIT_ENTITY_TYPES, DOCTOR_ERROR_CODES } from './doctor.constants';
+import { DOCTOR_AUDIT_ENTITY_TYPES, DOCTOR_ERROR_CODES, DOCTOR_LIST_DEFAULT_LIMIT } from './doctor.constants';
 import type {
   DeletionActor,
   DoctorDeletionSnapshot,
@@ -19,24 +19,66 @@ import type {
   PublicDoctorProfile,
 } from './doctor.contract';
 import {
+  toAdminDoctorListItem,
   toListedDoctorSummary,
   toPublicDoctorProfile,
   toPublicDoctorSpecialties,
   toSafeDoctorDocumentRow,
   toSafeDoctorRow,
+  type AdminDoctorListItem,
   type DoctorSpecialtyWithDetails,
   type SafeDoctorDocumentRow,
   type SafeDoctorRow,
 } from './doctor.mapper';
 import { normalizeMobileNumber } from './doctor-phone.util';
-import { DoctorRepository, type DoctorProfileFieldsUpdate } from './doctor.repository';
+import { DoctorRepository, type AdminDoctorListFilter, type DoctorProfileFieldsUpdate } from './doctor.repository';
 import type { DoctorSpecialtyRow } from '../../schema/doctor-specialties.schema';
 import type { DoctorVerificationStatus } from '../../schema/enums.schema';
 import type { DoctorRow } from '../../schema/doctors.schema';
 
+/**
+ * A doctor reading their OWN profile (`GET doctors/me`). Deliberately the
+ * plain safe row: `stage` is an admin-ops concept ("whose move is it"), and
+ * a doctor has no use for being told they are sitting in someone's queue.
+ */
 export interface DoctorProfileWithDetails extends SafeDoctorRow {
   specialties: PublicDoctorProfile['specialties'];
   documents: SafeDoctorDocumentRow[];
+}
+
+/**
+ * An ADMIN reading one doctor (`GET admin/doctors/:id`). Extends the admin
+ * list projection rather than the safe row, so the detail header renders the
+ * same `stage` strip, presence badge and specialties as the list row it was
+ * opened from — all computed once, in the same place.
+ *
+ * Split from `DoctorProfileWithDetails` on purpose: these two reads look
+ * alike but answer to different callers, and collapsing them into one type
+ * is what would quietly ship `stage` to the doctor app.
+ */
+export interface AdminDoctorDetail extends AdminDoctorListItem {
+  documents: SafeDoctorDocumentRow[];
+}
+
+/** `GET admin/doctors` — the paginated envelope, matching `PaginatedPayments`. */
+export interface PaginatedAdminDoctors {
+  items: AdminDoctorListItem[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+/**
+ * 'true' | 'false' | undefined -> boolean | undefined.
+ *
+ * Query-string booleans are tri-state and the third state matters: "not
+ * filtered" and "filtered to false" are different questions. This is why the
+ * DTO types these as string literals instead of reaching for
+ * `@Type(() => Boolean)`, whose underlying `Boolean('false')` is `true`.
+ */
+function parseTriStateBoolean(value: 'true' | 'false' | undefined): boolean | undefined {
+  if (value === undefined) return undefined;
+  return value === 'true';
 }
 
 /** Shared 404 shape — also used by `doctor-document.service.ts`, `doctor-specialty.service.ts`, etc. for a missing doctor id. */
@@ -319,12 +361,89 @@ export class DoctorService {
   /* Admin CRUD (admin/doctors)                                              */
   /* ---------------------------------------------------------------------- */
 
-  async adminList(): Promise<SafeDoctorRow[]> {
-    const doctors = await this.repo.list();
-    return doctors.map(toSafeDoctorRow);
+  /**
+   * Filter, sort and page all happen in Postgres. The page and its total are
+   * derived from one shared predicate builder in the repository, so they
+   * cannot drift apart.
+   *
+   * Defaulting happens HERE rather than in the repository: the DTO's own
+   * defaults only apply when the property is absent, and this is the one
+   * place that knows what an unspecified filter should mean.
+   */
+  async adminList(query: ListDoctorsQueryDto = {}): Promise<PaginatedAdminDoctors> {
+    const filter: AdminDoctorListFilter = {
+      search: query.search,
+      verificationStatus: query.verificationStatus,
+      stage: query.stage,
+      isListed: parseTriStateBoolean(query.isListed),
+      allowInstantConsult: parseTriStateBoolean(query.allowInstantConsult),
+      specialtyId: query.specialtyId,
+      includeDeleted: query.includeDeleted === 'true',
+      sortBy: query.sortBy ?? 'fullName',
+      sortOrder: query.sortOrder ?? 'asc',
+      limit: query.limit ?? DOCTOR_LIST_DEFAULT_LIMIT,
+      offset: query.offset ?? 0,
+    };
+
+    const [rows, total] = await Promise.all([
+      this.repo.listForAdmin(filter),
+      this.repo.countForAdmin(filter),
+    ]);
+
+    const specialtiesByDoctor = await this.loadSpecialtiesForPage(rows.map((row) => row.id));
+
+    return {
+      items: rows.map((row) => toAdminDoctorListItem(row, specialtiesByDoctor.get(row.id) ?? [])),
+      total,
+      limit: filter.limit,
+      offset: filter.offset,
+    };
   }
 
-  async adminGetDetail(doctorId: string): Promise<DoctorProfileWithDetails> {
+  /**
+   * Specialties for a whole page of doctors: ONE junction query, then one
+   * catalogue lookup per DISTINCT specialty rather than per row. A page of
+   * 25 doctors resolves in a handful of lookups instead of ~50.
+   *
+   * Unlike `enrichSpecialties`, a specialty that no longer resolves is
+   * SKIPPED rather than thrown on. That difference is deliberate: on the
+   * detail screen a dangling reference is a data bug worth surfacing loudly,
+   * but on a list it would take down the entire page for every admin because
+   * of one bad row on one doctor.
+   */
+  private async loadSpecialtiesForPage(
+    doctorIds: readonly string[],
+  ): Promise<Map<string, DoctorSpecialtyWithDetails[]>> {
+    const byDoctor = new Map<string, DoctorSpecialtyWithDetails[]>();
+    if (doctorIds.length === 0) return byDoctor;
+
+    const rows = await this.specialtyRepo.listByDoctorIds(doctorIds);
+    if (rows.length === 0) return byDoctor;
+
+    const distinctIds = [...new Set(rows.map((row) => row.specialtyId))];
+    const resolved = new Map(
+      (await Promise.all(distinctIds.map((id) => this.catalogue.getSpecialtyById(id))))
+        .filter((specialty): specialty is NonNullable<typeof specialty> => specialty !== null)
+        .map((specialty) => [specialty.id, specialty]),
+    );
+
+    for (const row of rows) {
+      const specialty = resolved.get(row.specialtyId);
+      if (!specialty) continue;
+      const list = byDoctor.get(row.doctorId) ?? [];
+      list.push({
+        id: row.id,
+        specialtyId: row.specialtyId,
+        code: specialty.code,
+        name: specialty.name,
+        isPrimary: row.isPrimary,
+      });
+      byDoctor.set(row.doctorId, list);
+    }
+    return byDoctor;
+  }
+
+  async adminGetDetail(doctorId: string): Promise<AdminDoctorDetail> {
     const doctor = await this.repo.findById(doctorId);
     if (!doctor) throw doctorNotFound();
     const [specialtyRows, documents] = await Promise.all([
@@ -333,8 +452,7 @@ export class DoctorService {
     ]);
     const specialties = await this.enrichSpecialties(specialtyRows);
     return {
-      ...toSafeDoctorRow(doctor),
-      specialties: toPublicDoctorSpecialties(specialties),
+      ...toAdminDoctorListItem(doctor, toPublicDoctorSpecialties(specialties)),
       documents: documents.map(toSafeDoctorDocumentRow),
     };
   }

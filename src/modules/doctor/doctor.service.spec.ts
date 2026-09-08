@@ -65,6 +65,8 @@ function createDeps() {
     findByMobile: jest.fn(),
     findByRegistrationNumber: jest.fn(),
     list: jest.fn(),
+    listForAdmin: jest.fn().mockResolvedValue([]),
+    countForAdmin: jest.fn().mockResolvedValue(0),
     create: jest.fn(),
     updateProfileFields: jest.fn(),
     updateOwnProfile: jest.fn(),
@@ -74,6 +76,7 @@ function createDeps() {
 
   const specialtyRepo = {
     listByDoctor: jest.fn().mockResolvedValue([]),
+    listByDoctorIds: jest.fn().mockResolvedValue([]),
   } as unknown as jest.Mocked<DoctorSpecialtyRepository>;
 
   const documentRepo = {
@@ -236,14 +239,72 @@ describe('DoctorService', () => {
   });
 
   describe('admin: adminList / adminGetDetail / requireDoctor', () => {
-    it('adminList strips tokenVersion/pushToken/deviceId/presence from every row', async () => {
+    it('adminList strips the auth/device internals but KEEPS presence — the admin projection deliberately re-adds it', async () => {
       const { service, repo } = createDeps();
-      repo.list.mockResolvedValue([baseDoctor({ tokenVersion: 5 })]);
+      repo.listForAdmin.mockResolvedValue([baseDoctor({ tokenVersion: 5, presence: 'available_now' })]);
+      repo.countForAdmin.mockResolvedValue(1);
 
       const result = await service.adminList();
+      const [row] = result.items;
 
-      expect(result[0]).not.toHaveProperty('tokenVersion');
-      expect(result[0]).not.toHaveProperty('presence');
+      expect(row).not.toHaveProperty('tokenVersion');
+      expect(row).not.toHaveProperty('pushToken');
+      expect(row).not.toHaveProperty('deviceId');
+      // presence is stripped from SafeDoctorRow but added back for admins:
+      // "must not edit" is not "must not read". See doctor.mapper.ts.
+      expect(row?.presence).toBe('available_now');
+    });
+
+    it('adminList returns a paginated envelope, and derives stage on every row', async () => {
+      const { service, repo } = createDeps();
+      repo.listForAdmin.mockResolvedValue([
+        baseDoctor({ id: 'd1', verificationStatus: 'pending' }),
+        baseDoctor({ id: 'd2', verificationStatus: 'verified', consultationFeeInr: '0', isListed: false }),
+        baseDoctor({ id: 'd3', verificationStatus: 'verified', consultationFeeInr: '900.00', isListed: true }),
+      ]);
+      repo.countForAdmin.mockResolvedValue(42);
+
+      const result = await service.adminList({ limit: 3, offset: 6 });
+
+      expect(result.items.map((d) => d.stage)).toEqual(['awaiting_verification', 'needs_fee', 'live']);
+      expect({ total: result.total, limit: result.limit, offset: result.offset }).toEqual({
+        total: 42,
+        limit: 3,
+        offset: 6,
+      });
+    });
+
+    it('adminList passes ONE identical filter to both the page query and the count query', async () => {
+      const { service, repo } = createDeps();
+
+      await service.adminList({ search: 'neha', stage: 'needs_fee', isListed: 'false' });
+
+      // The page and the total must agree about what they are counting;
+      // computing them from different predicates is how a table ends up
+      // claiming 40 results and rendering 12.
+      expect(repo.listForAdmin.mock.calls[0]?.[0]).toEqual(repo.countForAdmin.mock.calls[0]?.[0]);
+    });
+
+    it('adminList distinguishes "not filtered" from "filtered to false"', async () => {
+      const { service, repo } = createDeps();
+
+      await service.adminList({ isListed: 'false' });
+      expect(repo.listForAdmin.mock.calls[0]?.[0]).toMatchObject({ isListed: false });
+
+      repo.listForAdmin.mockClear();
+      await service.adminList({});
+      expect(repo.listForAdmin.mock.calls[0]?.[0].isListed).toBeUndefined();
+    });
+
+    it('adminList excludes soft-deleted doctors unless asked', async () => {
+      const { service, repo } = createDeps();
+
+      await service.adminList({});
+      expect(repo.listForAdmin.mock.calls[0]?.[0]).toMatchObject({ includeDeleted: false });
+
+      repo.listForAdmin.mockClear();
+      await service.adminList({ includeDeleted: 'true' });
+      expect(repo.listForAdmin.mock.calls[0]?.[0]).toMatchObject({ includeDeleted: true });
     });
 
     it('adminGetDetail 404s when the doctor does not exist', async () => {

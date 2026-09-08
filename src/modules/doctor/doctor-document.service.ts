@@ -15,6 +15,7 @@ import type { ReviewDoctorDocumentDto } from './doctor-admin.dto';
 import { DoctorDocumentRepository } from './doctor-document.repository';
 import {
   DOCTOR_AUDIT_ENTITY_TYPES,
+  DOCTOR_DOCUMENT_DOWNLOAD_URL_TTL_SECONDS,
   DOCTOR_DOCUMENT_MIME_ALLOWLIST,
   DOCTOR_DOCUMENT_STORAGE_CATEGORY,
   DOCTOR_ERROR_CODES,
@@ -152,6 +153,58 @@ export class DoctorDocumentService {
     return toSafeDoctorDocumentRow(updated);
   }
 
+  /**
+   * A short-lived signed URL for ONE credential document, for an admin
+   * carrying `doctors.read`. The counterpart of
+   * `patient-file.service.ts#getDownloadUrl`, and the reason it exists: the
+   * verification flow asks an admin to approve or reject a degree
+   * certificate, which is not a decision anyone can make from a filename.
+   *
+   * `storageKey` stays server-side — `toSafeDoctorDocumentRow` strips it and
+   * this method never returns it. The client gets a URL it cannot forge and
+   * that expires in `DOCTOR_DOCUMENT_DOWNLOAD_URL_TTL_SECONDS`.
+   *
+   * A document id belonging to a DIFFERENT doctor is a 404, not a 403 —
+   * matching `review()` above, so this route cannot be used to probe which
+   * document ids exist.
+   *
+   * Audited as a read. These are identity documents, and "who looked at this
+   * doctor's address proof, and when" is exactly the question M-21's audit
+   * trail exists to answer — the verification DECISION being audited
+   * elsewhere doesn't cover merely opening the file.
+   */
+  async getDownloadUrlForAdmin(
+    actingAdminId: string,
+    doctorId: string,
+    documentId: string,
+  ): Promise<{ url: string; expiresAt: Date }> {
+    const doctor = await this.doctorRepo.findById(doctorId);
+    if (!doctor) throw doctorNotFound();
+
+    const document = await this.repo.findByIdForDoctor(documentId, doctorId);
+    if (!document) {
+      throw new NotFoundException({ code: DOCTOR_ERROR_CODES.DOCUMENT_NOT_FOUND, message: 'Document not found.' });
+    }
+
+    let url: string;
+    try {
+      url = await this.storage.getSignedUrl(document.storageKey, DOCTOR_DOCUMENT_DOWNLOAD_URL_TTL_SECONDS);
+    } catch (error) {
+      throw this.wrapStorageDownloadError(error);
+    }
+
+    await this.audit.write({
+      actorType: 'admin',
+      actorId: actingAdminId,
+      action: 'read',
+      entityType: DOCTOR_AUDIT_ENTITY_TYPES.DOCTOR_DOCUMENT,
+      entityId: documentId,
+      metadata: { doctorId, documentType: document.documentType, event: 'credential_document_download' },
+    });
+
+    return { url, expiresAt: new Date(Date.now() + DOCTOR_DOCUMENT_DOWNLOAD_URL_TTL_SECONDS * 1000) };
+  }
+
   /* ---------------------------------------------------------------------- */
   /* Validation                                                               */
   /* ---------------------------------------------------------------------- */
@@ -225,6 +278,16 @@ export class DoctorDocumentService {
     return new ServiceUnavailableException({
       code: DOCTOR_ERROR_CODES.DOCUMENT_UPLOAD_FAILED,
       message: 'Could not upload your document right now. Please try again shortly.',
+    });
+  }
+
+  /** Download-side twin of `wrapStorageError` — same discipline (warn, 503, never the provider's own code), different code and audience: this one is read by an admin, not the uploading doctor. */
+  private wrapStorageDownloadError(error: unknown): ServiceUnavailableException {
+    const detail = error instanceof Error ? error.message : String(error);
+    this.logger.warn(`Doctor document signed-URL generation failed: ${detail}`);
+    return new ServiceUnavailableException({
+      code: DOCTOR_ERROR_CODES.DOCUMENT_DOWNLOAD_FAILED,
+      message: 'Could not open this document right now. Please try again shortly.',
     });
   }
 }

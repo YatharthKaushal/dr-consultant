@@ -149,7 +149,14 @@ describe('AvailabilitySlotService', () => {
       });
       ruleRepo.listForRange.mockResolvedValue([]);
 
-      const result = await service.isSlotBookable('doctor-1', new Date('2026-09-07T03:30:00Z'));
+      // Must be comfortably beyond the min-notice window, which is checked
+      // BEFORE working hours: a fixed literal here (this test previously
+      // used 2026-09-07) silently starts returning `too_soon` the day it
+      // falls into the past, so the date is derived from the clock instead.
+      // Any future instant works — with no rules at all, the engine answers
+      // `outside_working_hours` whatever the weekday.
+      const wellIntoTheFuture = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+      const result = await service.isSlotBookable('doctor-1', wellIntoTheFuture);
 
       // No rules at all -> outside_working_hours, per the engine's own contract.
       expect(result).toEqual({ bookable: false, reason: 'outside_working_hours' });

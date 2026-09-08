@@ -1,5 +1,7 @@
 import type { DoctorDocumentRow } from '../../schema/doctor-documents.schema';
 import type { DoctorRow } from '../../schema/doctors.schema';
+import type { DoctorPresence } from '../../schema/enums.schema';
+import { deriveDoctorStage, type DoctorOnboardingStage } from './doctor-stage';
 import type { ListedDoctorSummary, PublicDoctorProfile, PublicDoctorSpecialty } from './doctor.contract';
 
 /** A `doctor_specialties` row enriched with catalogue-owned `code`/`name` — assembled by the service layer via `CatalogueFacade`, never read directly off a join (see `doctor-specialty.repository.ts`). */
@@ -18,6 +20,44 @@ export interface DoctorSpecialtyWithDetails {
  * identity-owned `pushToken`/`deviceId`.
  */
 export type SafeDoctorRow = Omit<DoctorRow, 'tokenVersion' | 'pushToken' | 'deviceId' | 'presence' | 'blockedByConsultationId'>;
+
+/**
+ * The ADMIN projection: `SafeDoctorRow` plus the two things an admin panel
+ * needs that a generic client must not get.
+ *
+ * `stage` is derived (see `doctor-stage.ts`) — computed here rather than in
+ * the client so the badge and the `?stage=` filter can never disagree.
+ *
+ * `presence` is added back deliberately. `toSafeDoctorRow` strips it because
+ * M-13 owns that state and THIS module must not let anyone edit it — but
+ * "must not edit" is not "must not read", and an admin list that shows
+ * whether a doctor is online is exactly what `docs/ADMIN_FRONTEND.md` §6.1
+ * asks for. The alternative was a per-row call to the instant-consults
+ * presence endpoint, i.e. an N+1 to recover a column we already selected.
+ */
+export interface AdminDoctorListItem extends SafeDoctorRow {
+  stage: DoctorOnboardingStage;
+  presence: DoctorPresence;
+  /**
+   * Included on the LIST as well as the detail. The admin list offers a
+   * specialty filter, and a filter on a column you can't see is a guess —
+   * so the service batch-loads these for the page rather than leaving the
+   * client to N+1 the detail route per row.
+   */
+  specialties: PublicDoctorSpecialty[];
+}
+
+export function toAdminDoctorListItem(
+  row: DoctorRow,
+  specialties: PublicDoctorSpecialty[],
+): AdminDoctorListItem {
+  return {
+    ...toSafeDoctorRow(row),
+    stage: deriveDoctorStage(row),
+    presence: row.presence,
+    specialties,
+  };
+}
 
 export function toSafeDoctorRow(row: DoctorRow): SafeDoctorRow {
   const {

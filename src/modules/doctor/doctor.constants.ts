@@ -48,6 +48,14 @@ export const DOCTOR_ERROR_CODES = {
    * storage failures the same way too.
    */
   DOCUMENT_UPLOAD_FAILED: 'DOCTOR_DOCUMENT_UPLOAD_FAILED',
+  /**
+   * The download counterpart of `DOCUMENT_UPLOAD_FAILED` — `StorageFacade.
+   * getSignedUrl()` threw. Kept a SEPARATE code rather than reusing the
+   * upload one so an operator reading logs can tell which half of the
+   * storage gateway is failing; same "never surface the provider's own
+   * code/message" discipline.
+   */
+  DOCUMENT_DOWNLOAD_FAILED: 'DOCTOR_DOCUMENT_DOWNLOAD_FAILED',
 } as const;
 export type DoctorErrorCode = (typeof DOCTOR_ERROR_CODES)[keyof typeof DOCTOR_ERROR_CODES];
 
@@ -64,6 +72,37 @@ export type DoctorErrorCode = (typeof DOCTOR_ERROR_CODES)[keyof typeof DOCTOR_ER
  * simpler, equally-correct choice.
  */
 export const DOCTOR_DOCUMENT_STORAGE_CATEGORY = 'doctor-documents';
+
+/**
+ * Lifetime of a credential-document download URL, matching
+ * `document.constants.ts`'s `DOCUMENT_DOWNLOAD_URL_TTL_SECONDS`. Short on
+ * purpose: these are identity documents (`identity_proof`, `address_proof`),
+ * and M-10's bar is "access-controlled retrieval that cannot be reached by
+ * guessing a link" — a long-lived URL is a link that outlives the session
+ * that was authorised to hold it.
+ */
+export const DOCTOR_DOCUMENT_DOWNLOAD_URL_TTL_SECONDS = 300;
+
+/* ------------------------------------------------------------------------ */
+/* Admin doctor list                                                          */
+/* ------------------------------------------------------------------------ */
+
+export const DOCTOR_LIST_DEFAULT_LIMIT = 25;
+export const DOCTOR_LIST_MAX_LIMIT = 100;
+
+/**
+ * Sortable columns on `GET admin/doctors`.
+ *
+ * An allowlist, not a passthrough: the value reaches an ORDER BY, so it is
+ * mapped to a column reference by name and an unrecognised value never gets
+ * near the statement. `@IsIn` rejects it at the DTO first; the repository's
+ * lookup is the second line of the same defence.
+ */
+export const DOCTOR_LIST_SORT_FIELDS = ['fullName', 'createdAt', 'verifiedAt', 'consultationFeeInr'] as const;
+export type DoctorListSortField = (typeof DOCTOR_LIST_SORT_FIELDS)[number];
+
+export const DOCTOR_LIST_SORT_ORDERS = ['asc', 'desc'] as const;
+export type DoctorListSortOrder = (typeof DOCTOR_LIST_SORT_ORDERS)[number];
 
 /**
  * Per-`documentType` MIME allowlist — the doctor-module analog of

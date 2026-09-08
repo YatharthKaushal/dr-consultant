@@ -169,6 +169,20 @@ async function teardown(db: Database, fixtures: Fixtures): Promise<void> {
 
 /* -------------------------------------------------------------------------- */
 
+interface PaginatedBody {
+  items: Array<{
+    id: string;
+    fullName: string;
+    stage: string;
+    presence: string;
+    consultationFeeInr: string;
+    specialties: Array<{ id: string; name: string; isPrimary: boolean }>;
+  }>;
+  total: number;
+  limit: number;
+  offset: number;
+}
+
 describe('doctor module — real HTTP endpoint tests', () => {
   let app: NestFastifyApplication;
   let db: Database;
@@ -449,6 +463,45 @@ describe('doctor module — real HTTP endpoint tests', () => {
         expect(body.rejectionReason).toBe('Illegible scan.');
       });
 
+      it('a download URL for a nonexistent documentId is 404 DOCUMENT_NOT_FOUND', async () => {
+        const response = await app.inject({
+          method: 'GET',
+          url: `/api/admin/doctors/${fixtures.doctorSelfId}/documents/${randomUUID()}/download`,
+          headers: auth(tokens.adminAll),
+        });
+        expect(response.statusCode).toBe(404);
+        expect(payload<{ code: string }>(response).code).toBe('DOCUMENT_NOT_FOUND');
+      });
+
+      it('*** UNMOCKED *** a download URL for a real document reaches real storage and is refused 503 DOCTOR_DOCUMENT_DOWNLOAD_FAILED — no provider is configured in this environment', async () => {
+        // Mirrors the upload-side 503 test. The point is that the storage
+        // provider's own code/message never reaches the client.
+        const list = await app.inject({
+          method: 'GET',
+          url: `/api/admin/doctors/${fixtures.doctorSelfId}/documents`,
+          headers: auth(tokens.adminAll),
+        });
+        const documentId = payload<Array<{ id: string }>>(list)[0]?.id;
+        expect(documentId).toBeDefined();
+
+        const response = await app.inject({
+          method: 'GET',
+          url: `/api/admin/doctors/${fixtures.doctorSelfId}/documents/${documentId}/download`,
+          headers: auth(tokens.adminAll),
+        });
+        expect(response.statusCode).toBe(503);
+        expect(payload<{ code: string }>(response).code).toBe('DOCTOR_DOCUMENT_DOWNLOAD_FAILED');
+      });
+
+      it('a doctor token cannot reach the admin download route — 403', async () => {
+        const response = await app.inject({
+          method: 'GET',
+          url: `/api/admin/doctors/${fixtures.doctorSelfId}/documents/${randomUUID()}/download`,
+          headers: auth(tokens.doctorSelf),
+        });
+        expect(response.statusCode).toBe(403);
+      });
+
       it('a nonexistent documentId is 404 DOCUMENT_NOT_FOUND', async () => {
         const response = await app.inject({
           method: 'PATCH',
@@ -541,11 +594,105 @@ describe('doctor module — real HTTP endpoint tests', () => {
   });
 
   describe('GET /admin/doctors and /admin/doctors/:id (DOCTORS_READ)', () => {
-    it('lists doctors, including this run\'s fixtures', async () => {
-      const response = await app.inject({ method: 'GET', url: '/api/admin/doctors', headers: auth(tokens.adminAll) });
+    it('lists doctors in a paginated envelope, including this run\'s fixtures', async () => {
+      const response = await app.inject({
+        method: 'GET',
+        url: '/api/admin/doctors?limit=100',
+        headers: auth(tokens.adminAll),
+      });
       expect(response.statusCode).toBe(200);
-      const ids = payload<Array<{ id: string }>>(response).map((d) => d.id);
-      expect(ids).toEqual(expect.arrayContaining([fixtures.doctorSelfId, fixtures.doctorWorkflowId]));
+      const body = payload<PaginatedBody>(response);
+      expect(body.items.map((d) => d.id)).toEqual(
+        expect.arrayContaining([fixtures.doctorSelfId, fixtures.doctorWorkflowId]),
+      );
+      expect(typeof body.total).toBe('number');
+      expect(body.total).toBeGreaterThanOrEqual(body.items.length);
+    });
+
+    it('carries the derived stage and the presence column on every row', async () => {
+      const response = await app.inject({
+        method: 'GET',
+        url: '/api/admin/doctors?limit=100',
+        headers: auth(tokens.adminAll),
+      });
+      const row = payload<PaginatedBody>(response).items.find((d) => d.id === fixtures.doctorSelfId);
+      expect(row?.stage).toEqual(expect.any(String));
+      // Deliberately present for admins even though SafeDoctorRow strips it.
+      expect(row?.presence).toEqual(expect.any(String));
+      // ...but the auth internals are still gone.
+      expect(row).not.toHaveProperty('tokenVersion');
+    });
+
+    it('carries specialties on LIST rows, not just the detail — the list offers a specialty filter, so it must show what it filters on', async () => {
+      const response = await app.inject({
+        method: 'GET',
+        url: '/api/admin/doctors?limit=100',
+        headers: auth(tokens.adminAll),
+      });
+      const row = payload<PaginatedBody>(response).items.find((d) => d.id === fixtures.doctorSelfId);
+      expect(Array.isArray(row?.specialties)).toBe(true);
+    });
+
+    it('sorts across the WHOLE result set, not within a page', async () => {
+      // The bug this guards: paginating without server-side sorting leaves
+      // the client sorting only the rows it can see, so page 2 restarts the
+      // ordering instead of continuing it.
+      const url = (offset: number) => `/api/admin/doctors?sortBy=fullName&sortOrder=asc&limit=1&offset=${offset}`;
+      const [first, second] = await Promise.all([
+        app.inject({ method: 'GET', url: url(0), headers: auth(tokens.adminAll) }),
+        app.inject({ method: 'GET', url: url(1), headers: auth(tokens.adminAll) }),
+      ]);
+
+      const a = payload<PaginatedBody>(first).items[0];
+      const b = payload<PaginatedBody>(second).items[0];
+      expect(a).toBeDefined();
+      expect(b).toBeDefined();
+      expect(a!.id).not.toBe(b!.id);
+      expect(a!.fullName.localeCompare(b!.fullName)).toBeLessThanOrEqual(0);
+    });
+
+    it('sorts fee numerically, not lexically — 900 must not outrank 1000', async () => {
+      const response = await app.inject({
+        method: 'GET',
+        url: '/api/admin/doctors?sortBy=consultationFeeInr&sortOrder=desc&limit=100',
+        headers: auth(tokens.adminAll),
+      });
+      const fees = payload<PaginatedBody>(response).items.map((d) => Number(d.consultationFeeInr));
+      // Number() is fine HERE: this is a test assertion about ordering, not
+      // production money handling.
+      expect(fees).toEqual([...fees].sort((x, y) => y - x));
+    });
+
+    it('filters by stage, and the filtered rows all carry that stage', async () => {
+      const response = await app.inject({
+        method: 'GET',
+        url: '/api/admin/doctors?stage=awaiting_verification&limit=100',
+        headers: auth(tokens.adminAll),
+      });
+      expect(response.statusCode).toBe(200);
+      const items = payload<PaginatedBody>(response).items;
+      expect(items.every((d) => d.stage === 'awaiting_verification')).toBe(true);
+    });
+
+    it('search matches a bare 10-digit mobile even though numbers are stored E.164', async () => {
+      const bare = fixtures.doctorSelfMobile.replace(/^\+91/, '');
+      const response = await app.inject({
+        method: 'GET',
+        url: `/api/admin/doctors?search=${encodeURIComponent(bare)}`,
+        headers: auth(tokens.adminAll),
+      });
+      expect(response.statusCode).toBe(200);
+      expect(payload<PaginatedBody>(response).items.map((d) => d.id)).toContain(fixtures.doctorSelfId);
+    });
+
+    it('rejects an unknown sort field rather than interpolating it — 400 VALIDATION_FAILED', async () => {
+      const response = await app.inject({
+        method: 'GET',
+        url: '/api/admin/doctors?sortBy=tokenVersion',
+        headers: auth(tokens.adminAll),
+      });
+      expect(response.statusCode).toBe(400);
+      expect(payload<{ code: string }>(response).code).toBe('VALIDATION_FAILED');
     });
 
     it('returns the full detail with specialties and documents', async () => {
